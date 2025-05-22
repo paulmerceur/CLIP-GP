@@ -1,3 +1,7 @@
 .idea/
-.output/
+output/
 Dassl.pytorch/
+data/
+.venv/
+__pycache__/
+logs/

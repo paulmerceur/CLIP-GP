@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # custom config
-DATA=/data/
 TRAINER=ADAPTER
 
 DEVICE=$1
