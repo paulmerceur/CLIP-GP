@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # custom config
-DATA=/data/
 TRAINER=ADAPTER
 
 DEVICE=$1
@@ -15,8 +14,8 @@ BACKBONE=$8     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
 
 for SEED in 1 2 3
 do
-    MODELDIR=output/FINAL/debug/${DATASET_SOURCE}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
-    OUTDIR=output/FINAL/debug/${DATASET_TARGET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
+    MODELDIR=output/${DATASET_SOURCE}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
+    OUTDIR=output/${DATASET_TARGET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
     if [ -d "$OUTDIR" ]; then
         echo "Oops! The results exist at ${OUTDIR} (so skip this job)"
     else
