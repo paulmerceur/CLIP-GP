@@ -14,7 +14,7 @@ INPUT:
 
 OPTIM:
   NAME: "sgd"
-  LR: 0.1
+  LR: 0.01  # Lower learning rate for constrained optimization
   MAX_EPOCH: 300
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
@@ -24,7 +24,7 @@ OPTIM:
 
 TRAINER:
   ADAPTER:
-    CONSTRAINT_WEIGHT: 0.1  # Weight for CLAP constraint
+    CONSTRAINT_WEIGHT: 0.01  # Very light constraint weight
 
 TRAIN:
-  PRINT_FREQ: 5
+  PRINT_FREQ: 5 

@@ -8,9 +8,9 @@ Usage
 source .venv/bin/activate
 
 # run from the project root
-python parse_baseline_logs.py              # default paths
-python parse_baseline_logs.py \
-    --out_csv results/baseline_metrics.csv # custom CSV name
+python parse_baseline_logs.py my_experiment              # specify experiment name
+python parse_baseline_logs.py my_experiment \
+    --out_csv my_results.csv                             # custom CSV name
 """
 import argparse, csv, glob, os, re
 from collections import defaultdict
@@ -21,14 +21,12 @@ import numpy as np
 # ───────────────────────────────
 # helpers
 # ───────────────────────────────
-LOG_GLOB = "output/**/**/seed*/log.txt"      # recursive glob (**) ≈ any depth
+LOG_GLOB = "output/{experiment}/**/**/seed*/log.txt"      # recursive glob (**) ≈ any depth
 
 re_acc_best   = re.compile(r"acc_test\s+([0-9]+\.[0-9]+)")
 re_acc_zs     = re.compile(r"Zero-Shot accuracy on test:\s+([0-9]+\.[0-9]+)")
 re_ece        = re.compile(r"(?:ECE|ece)[^\d]*([0-9]+\.[0-9]+)")
 re_nll        = re.compile(r"(?:NLL|nll)[^\d]*([0-9]+\.[0-9]+)")
-re_dataset    = re.compile(r"output/(?P<dataset>[^/]+)/")
-re_config     = re.compile(r"output/(?P<dataset>[^/]+)/(?P<config>[^/]+)/")
 re_seed       = re.compile(r"/seed(?P<seed>\d+)/")
 re_shots      = re.compile(r"(\d+)shots")
 
@@ -119,20 +117,32 @@ def create_plots(rows_by_key: dict, metrics_dir: str):
 # ───────────────────────────────
 # main
 # ───────────────────────────────
-def main(output_root: str, out_csv: str):
-    # Create metrics directory
-    metrics_dir = "metrics"
+def main(experiment_name: str, output_root: str, out_csv: str):
+    # Create metrics directory for this experiment
+    metrics_dir = f"metrics/{experiment_name}"
     os.makedirs(metrics_dir, exist_ok=True)
     
-    # Update CSV path to be in metrics directory
+    # Update CSV path to be in experiment's metrics directory
     csv_path = os.path.join(metrics_dir, os.path.basename(out_csv))
     
+    # Update log glob pattern with experiment name
+    log_pattern = LOG_GLOB.format(experiment=experiment_name)
+    
     rows_by_key = defaultdict(list)  # key = (dataset, shots, method)
-    for log_path in glob.glob(os.path.join(output_root, LOG_GLOB), recursive=True):
+    for log_path in glob.glob(os.path.join(output_root, log_pattern), recursive=True):
         # extract dataset/config/seed from the *path*
-        dataset = re_dataset.search(log_path).group("dataset")
-        config  = re_config.search(log_path).group("config")
-        seed    = int(re_seed.search(log_path).group("seed"))
+        # Updated regex to account for experiment folder
+        dataset_match = re.search(rf"output/{re.escape(experiment_name)}/([^/]+)/", log_path)
+        config_match = re.search(rf"output/{re.escape(experiment_name)}/([^/]+)/([^/]+)/", log_path)
+        seed_match = re_seed.search(log_path)
+        
+        if not (dataset_match and config_match and seed_match):
+            print(f"Warning: Could not parse path {log_path}")
+            continue
+            
+        dataset = dataset_match.group(1)
+        config = config_match.group(2)
+        seed = int(seed_match.group("seed"))
 
         # shots & method derived from config string
         shots_match = re_shots.search(config)
@@ -182,9 +192,11 @@ def main(output_root: str, out_csv: str):
 # ───────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("experiment_name",
+                        help="name of the experiment")
     parser.add_argument("--output_root", default=".",
                         help="root folder containing experiment outputs")
     parser.add_argument("--out_csv", default="baseline_metrics.csv",
                         help="name of the summary CSV to create")
     args = parser.parse_args()
-    main(args.output_root, args.out_csv)
+    main(args.experiment_name, args.output_root, args.out_csv)
