@@ -136,8 +136,6 @@ class AdapterMethod(nn.Module):
         self.initialization = cfg.TRAINER.ADAPTER.INIT
         self.apply_constraint = cfg.TRAINER.ADAPTER.CONSTRAINT
         self.distance = "l2"
-        # Read constraint weight from config
-        self.constraint_weight = cfg.TRAINER.ADAPTER.CONSTRAINT_WEIGHT
         self.register_buffer("base_text_features", base_text_features)
         self.alpha_constraint = torch.zeros((base_text_features.shape[0])).to(self.device)
         self.base_text_features = base_text_features
@@ -689,7 +687,7 @@ class ADAPTER(TrainerXCostume):
                 # Constraint to zero-shot (CLAP)
                 if self.model.adapter.apply_constraint != "none":
                     loss_constraint = self.model.adapter.zero_shot_constraint()
-                    loss = loss_ce + self.model.adapter.constraint_weight * loss_constraint
+                    loss = loss_ce + loss_constraint
                 else:
                     loss = loss_ce
             self.optim.zero_grad()
@@ -704,7 +702,7 @@ class ADAPTER(TrainerXCostume):
             # Constraint to zero-shot (CLAP)
             if self.model.adapter.apply_constraint != "none":
                 loss_constraint = self.model.adapter.zero_shot_constraint()
-                loss = loss_ce + self.model.adapter.constraint_weight * loss_constraint
+                loss = loss_ce + loss_constraint
             else:
                 loss = loss_ce
 

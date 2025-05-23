@@ -13,7 +13,7 @@ CONSTRAINT=$6   # apply class-adaptive constraint in Linear Probing (CLAP) - i.e
 BACKBONE=$7     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
 EXPERIMENT_NAME=${8:-"default_experiment"}  # experiment name for organizing outputs
 
-for SEED in 1 2 3
+for SEED in 1 2 3 4 5
 do
     DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
     if [ -d "$DIR" ]; then
