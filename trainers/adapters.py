@@ -136,8 +136,8 @@ class AdapterMethod(nn.Module):
         self.initialization = cfg.TRAINER.ADAPTER.INIT
         self.apply_constraint = cfg.TRAINER.ADAPTER.CONSTRAINT
         self.distance = "l2"
-        # Read constraint weight from config if available, otherwise use default
-        self.constraint_weight = getattr(cfg.TRAINER.ADAPTER, 'CONSTRAINT_WEIGHT', 0.1)
+        # Read constraint weight from config
+        self.constraint_weight = cfg.TRAINER.ADAPTER.CONSTRAINT_WEIGHT
         self.register_buffer("base_text_features", base_text_features)
         self.alpha_constraint = torch.zeros((base_text_features.shape[0])).to(self.device)
         self.base_text_features = base_text_features

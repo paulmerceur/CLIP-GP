@@ -92,6 +92,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER = CN()
     cfg.TRAINER.ADAPTER.INIT = "ZS"
     cfg.TRAINER.ADAPTER.CONSTRAINT = "l2"  # none, l2
+    cfg.TRAINER.ADAPTER.CONSTRAINT_WEIGHT = 0.1  # Weight for constraint loss
     cfg.TRAINER.ADAPTER.ENHANCED_BASE = "none"  # none, enhanced (to use them you must download enhanced base from TaskRes).
     cfg.TRAINER.ADAPTER.PREC = "fp16"
 

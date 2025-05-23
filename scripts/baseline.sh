@@ -13,8 +13,8 @@
 EXPERIMENT_NAME=${1:-"default_experiment"}
 echo "Running experiment: $EXPERIMENT_NAME"
 
-# Change to project root directory (since we're in scripts/)
-cd "$(dirname "$0")/.."
+# Change to project root directory (SLURM runs in different dir)
+cd "$SLURM_SUBMIT_DIR"
 
 # Create experiment directories
 mkdir -p "output/$EXPERIMENT_NAME" "metrics/$EXPERIMENT_NAME" "logs/$EXPERIMENT_NAME"
@@ -59,4 +59,4 @@ done
 # 3. Launch *exactly* the selected configuration
 # ──────────────────────────
 IFS=' ' read -r seed ds optim_flag N split reg bb <<< "${cfg[$SLURM_ARRAY_TASK_ID]}"
-bash adapt.sh "$seed" "$ds" "$optim_flag" "$N" "$split" "$reg" "$bb" "$EXPERIMENT_NAME"
+bash scripts/adapt.sh "$seed" "$ds" "$optim_flag" "$N" "$split" "$reg" "$bb" "$EXPERIMENT_NAME"
