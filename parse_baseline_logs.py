@@ -15,6 +15,8 @@ python parse_baseline_logs.py \
 import argparse, csv, glob, os, re
 from collections import defaultdict
 from statistics import mean, stdev
+import matplotlib.pyplot as plt
+import numpy as np
 
 # ───────────────────────────────
 # helpers
@@ -25,8 +27,8 @@ re_acc_best   = re.compile(r"acc_test\s+([0-9]+\.[0-9]+)")
 re_acc_zs     = re.compile(r"Zero-Shot accuracy on test:\s+([0-9]+\.[0-9]+)")
 re_ece        = re.compile(r"(?:ECE|ece)[^\d]*([0-9]+\.[0-9]+)")
 re_nll        = re.compile(r"(?:NLL|nll)[^\d]*([0-9]+\.[0-9]+)")
-re_dataset    = re.compile(r"output/.+?/(?P<dataset>[^/]+)/")
-re_config     = re.compile(r"output/.+?/(?P<dataset>[^/]+)/(?P<config>[^/]+)/")
+re_dataset    = re.compile(r"output/(?P<dataset>[^/]+)/")
+re_config     = re.compile(r"output/(?P<dataset>[^/]+)/(?P<config>[^/]+)/")
 re_seed       = re.compile(r"/seed(?P<seed>\d+)/")
 re_shots      = re.compile(r"(\d+)shots")
 
@@ -66,12 +68,66 @@ def config_to_method(config_str: str, shots: int) -> str:
     return "ZS-LP"
 
 # ───────────────────────────────
+# plotting
+# ───────────────────────────────
+def create_plots(rows_by_key: dict, metrics_dir: str):
+    """Create line plots comparing ZS-LP vs CLAP for each dataset."""
+    # Group data by dataset
+    datasets = defaultdict(lambda: defaultdict(list))
+    
+    for (dataset, shots, method), metrics_list in rows_by_key.items():
+        if method in ["ZS-LP", "CLAP"]:  # Only plot these two methods
+            accs = [d["acc"] for d in metrics_list if d["acc"] is not None]
+            if accs:
+                acc_mean = mean(accs)
+                acc_std = stdev(accs) if len(accs) > 1 else 0
+                datasets[dataset][method].append((shots, acc_mean, acc_std))
+    
+    # Create a plot for each dataset
+    for dataset, methods_data in datasets.items():
+        plt.figure(figsize=(10, 6))
+        
+        for method, data_points in methods_data.items():
+            if not data_points:
+                continue
+                
+            # Sort by shots
+            data_points.sort(key=lambda x: x[0])
+            shots = [x[0] for x in data_points]
+            accs = [x[1] for x in data_points]
+            stds = [x[2] for x in data_points]
+            
+            # Plot line with error bars
+            plt.errorbar(shots, accs, yerr=stds, 
+                        label=method, marker='o', linewidth=2, markersize=6,
+                        capsize=5, capthick=1)
+        
+        plt.xlabel('Number of Shots', fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title(f'Performance Comparison: {dataset}', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # Save plot
+        plot_path = os.path.join(metrics_dir, f'{dataset}_performance.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✓ Saved plot: {plot_path}")
+
+# ───────────────────────────────
 # main
 # ───────────────────────────────
 def main(output_root: str, out_csv: str):
+    # Create metrics directory
+    metrics_dir = "metrics"
+    os.makedirs(metrics_dir, exist_ok=True)
+    
+    # Update CSV path to be in metrics directory
+    csv_path = os.path.join(metrics_dir, os.path.basename(out_csv))
+    
     rows_by_key = defaultdict(list)  # key = (dataset, shots, method)
-    print(f"Parsing logs from {output_root}")
-    print(f"Glob: {os.path.join(output_root, LOG_GLOB)}")
     for log_path in glob.glob(os.path.join(output_root, LOG_GLOB), recursive=True):
         # extract dataset/config/seed from the *path*
         dataset = re_dataset.search(log_path).group("dataset")
@@ -92,7 +148,7 @@ def main(output_root: str, out_csv: str):
         rows_by_key[(dataset, shots, method)].append(metrics)
 
     # average across seeds and write CSV
-    with open(out_csv, "w", newline="") as csv_f:
+    with open(csv_path, "w", newline="") as csv_f:
         writer = csv.writer(csv_f)
         header = ["dataset", "shots", "method",
                   "acc_mean", "acc_std",
@@ -118,7 +174,10 @@ def main(output_root: str, out_csv: str):
             ]
             writer.writerow(row)
 
-    print(f"✓ Parsed {len(rows_by_key)} experiment groups → {out_csv}")
+    print(f"✓ Parsed {len(rows_by_key)} experiment groups → {csv_path}")
+
+    # Create plots
+    create_plots(rows_by_key, metrics_dir)
 
 # ───────────────────────────────
 if __name__ == "__main__":
