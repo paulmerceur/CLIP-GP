@@ -4,22 +4,20 @@
 # Usage: ./run_experiment.sh <experiment_name> <script_type>
 # 
 # Example:
-#   ./run_experiment.sh clap_fix1 baseline_improved
-#   ./run_experiment.sh clap_variants baseline_clap_variants
+#   ./run_experiment.sh test few_shot_baseline
 
 EXPERIMENT_NAME=$1
-SCRIPT_TYPE=${2:-"baseline_improved"}
+SCRIPT_TYPE=${2:-"few_shot_baseline"}
 
 if [ -z "$EXPERIMENT_NAME" ]; then
     echo "Usage: $0 <experiment_name> [script_type]"
     echo ""
     echo "Available script types:"
-    echo "  baseline           - Original baseline comparison (scripts/baseline.sh)"
-    echo "  baseline_improved  - Improved CLAP with better hyperparams (scripts/baseline_improved.sh) [default]"
-    echo "  baseline_clap_variants - Test different CLAP constraint variants (scripts/baseline_clap_variants.sh)"
+    echo "  few_shot_baseline   - Original few-shot baseline comparison (scripts/few_shot_baseline.sh)"
+    echo "  cross_dataset       - Cross-dataset transfer evaluation (scripts/cross_dataset_transfer.sh)"
     echo ""
     echo "Example:"
-    echo "  $0 my_clap_test baseline_improved"
+    echo "  $0 my_clap_test few_shot_baseline"
     exit 1
 fi
 
@@ -31,28 +29,22 @@ echo ""
 mkdir -p "logs/$EXPERIMENT_NAME"
 
 case $SCRIPT_TYPE in
-    "baseline")
-        echo "Submitting scripts/baseline.sh with experiment name: $EXPERIMENT_NAME"
+    "few_shot_baseline")
+        echo "Submitting scripts/few_shot_baseline.sh with experiment name: $EXPERIMENT_NAME"
         # Update SLURM output path and submit
-        sed "s|#SBATCH --output=logs/%x_%A_%a.out|#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out|" scripts/baseline.sh > temp_baseline.sh
-        sbatch temp_baseline.sh "$EXPERIMENT_NAME"
-        rm temp_baseline.sh
+        sed "s|#SBATCH --output=logs/%x_%A_%a.out|#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out|" scripts/few_shot_baseline.sh > temp_few_shot_baseline.sh
+        sbatch temp_few_shot_baseline.sh "$EXPERIMENT_NAME"
+        rm temp_few_shot_baseline.sh
         ;;
-    "baseline_improved")
-        echo "Submitting scripts/baseline_improved.sh with experiment name: $EXPERIMENT_NAME"
-        sed "s|#SBATCH --output=logs/%x_%A_%a.out|#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out|" scripts/baseline_improved.sh > temp_baseline_improved.sh
-        sbatch temp_baseline_improved.sh "$EXPERIMENT_NAME"
-        rm temp_baseline_improved.sh
-        ;;
-    "baseline_clap_variants")
-        echo "Submitting scripts/baseline_clap_variants.sh with experiment name: $EXPERIMENT_NAME"
-        sed "s|#SBATCH --output=logs/%x_%A_%a.out|#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out|" scripts/baseline_clap_variants.sh > temp_baseline_clap_variants.sh
-        sbatch temp_baseline_clap_variants.sh "$EXPERIMENT_NAME"
-        rm temp_baseline_clap_variants.sh
+    "cross_dataset")
+        echo "Submitting scripts/cross_dataset_transfer.sh with experiment name: $EXPERIMENT_NAME"
+        sed "s|#SBATCH --output=logs/%x_%A_%a.out|#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out|" scripts/cross_dataset_transfer.sh > temp_cross_dataset_transfer.sh
+        sbatch temp_cross_dataset_transfer.sh "$EXPERIMENT_NAME"
+        rm temp_cross_dataset_transfer.sh
         ;;
     *)
         echo "Error: Unknown script type '$SCRIPT_TYPE'"
-        echo "Available: baseline, baseline_improved, baseline_clap_variants"
+        echo "Available: few_shot_baseline, cross_dataset"
         exit 1
         ;;
 esac

@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1                 # one GPU per array task
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --array=0-76%20              # 77 tasks, run ≤20 concurrently
+#SBATCH --array=0-43%22
 #SBATCH --output=logs/%x_%A_%a.out   # %A = job-ID, %a = array-index
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
@@ -33,7 +33,8 @@ export EXPERIMENT_NAME="$EXPERIMENT_NAME"
 # ──────────────────────────
 # 1. Parameter space
 # ──────────────────────────
-datasets=(caltech101 dtd eurosat fgvc_aircraft oxford_flowers oxford_pets sun397)
+#datasets=(caltech101 dtd eurosat fgvc_aircraft oxford_flowers oxford_pets sun397)
+datasets=(imagenet_a imagenet_r imagenet_sketch)
 shots=(1 2 4 8 16)                         # zero-shot handled separately
 optim="SGD_lr1e-1_B256_ep300"
 backbone="RN50"
