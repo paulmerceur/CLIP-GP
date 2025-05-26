@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
-from tqdm import tqdm
 import numpy as np
 
 from dassl.engine import TRAINER_REGISTRY, SimpleTrainer
@@ -815,7 +814,7 @@ class ADAPTER(TrainerXCostume):
 
             labels_ds, logits_ds, features_ds = [], [], []
             for rep in range(reps):
-                for batch_idx, batch in enumerate(tqdm(data_loader)):
+                for batch_idx, batch in enumerate(data_loader):
                     with torch.no_grad():
                         input, label = self.parse_batch_test(batch)
                         logits, features = self.model(input,  return_features=True)
@@ -831,7 +830,7 @@ class ADAPTER(TrainerXCostume):
             labels_ds, logits_ds, features_ds = [], [], []
             for rep in range(reps):
                 labels_ds_irep, logits_dsirep, features_ds_irep = [], [], []
-                for batch_idx, batch in enumerate(tqdm(data_loader)):
+                for batch_idx, batch in enumerate(data_loader):
                     with torch.no_grad():
                         input, label = self.parse_batch_test(batch)
                         logits, features = self.model(input, return_features=True)

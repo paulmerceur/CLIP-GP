@@ -1,10 +1,18 @@
+# IDE and editor files
 .idea/
+.cursor/
+pyrightconfig.json
+
+# Python
+__pycache__/
+.venv/
+
+# Project directories
 output/
 Dassl.pytorch/
 data/
-.venv/
-__pycache__/
 logs/
 metrics/
-.cursor/
+
+# Generated files
 *.out

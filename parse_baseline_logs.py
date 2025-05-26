@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Parse CLAP baseline logs and aggregate metrics.
+Parse CLAP cross-dataset transfer logs and aggregate metrics.
 
 Usage
 -----
@@ -34,30 +34,45 @@ re_shots      = re.compile(r"(\d+)shots")
 
 def parse_single_log(path: str) -> dict:
     """Return a dict with metrics parsed from *one* log file."""
-    best_acc = 0.0
+    best_acc = None
     zs_acc   = None
     ece_val  = None
     nll_val  = None
+    completed = False
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if m := re_acc_best.search(line):
-                best_acc = max(best_acc, float(m.group(1)))
-            elif m := re_acc_zs.search(line):
-                zs_acc = float(m.group(1))
-            elif m := re_ece.search(line):
-                ece_val = float(m.group(1))
-            elif m := re_nll.search(line):
-                nll_val = float(m.group(1))
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            
+            # Check if experiment completed
+            if "Finished" in content or "completed" in content or "acc_test" in content:
+                completed = True
+            
+            for line in content.split('\n'):
+                if m := re_acc_best.search(line):
+                    if best_acc is None:
+                        best_acc = float(m.group(1))
+                    else:
+                        best_acc = max(best_acc, float(m.group(1)))
+                elif m := re_acc_zs.search(line):
+                    zs_acc = float(m.group(1))
+                elif m := re_ece.search(line):
+                    ece_val = float(m.group(1))
+                elif m := re_nll.search(line):
+                    nll_val = float(m.group(1))
+    except Exception as e:
+        print(f"Warning: Error reading {path}: {e}")
+        return dict(acc=None, zs_acc=None, ece=None, nll=None, completed=False)
 
     # Edge case: zero-shot run has no acc_test lines → fall back
-    if best_acc == 0.0 and zs_acc is not None:
+    if best_acc is None and zs_acc is not None:
         best_acc = zs_acc
 
     return dict(acc = best_acc,
                 zs_acc = zs_acc,
                 ece = ece_val,
-                nll = nll_val)
+                nll = nll_val,
+                completed = completed)
 
 def config_to_method(config_str: str, shots: int) -> str:
     """Map config folder name to a human-readable method label."""
@@ -67,64 +82,11 @@ def config_to_method(config_str: str, shots: int) -> str:
         return "CLAP"
     return "ZS-LP"
 
-def detect_experiment_type(experiment_name: str, output_root: str) -> str:
-    """Detect if this is a cross-dataset transfer experiment or regular baseline."""
-    log_pattern = LOG_GLOB.format(experiment=experiment_name)
-    sample_paths = list(glob.glob(os.path.join(output_root, log_pattern), recursive=True))[:5]
-    
-    for path in sample_paths:
-        if "transfer" in path:
-            return "cross_dataset"
-    return "baseline"
-
-# ───────────────────────────────
-# baseline plotting
-# ───────────────────────────────
-def create_baseline_plots(rows_by_key: dict, metrics_dir: str):
-    """Create line plots comparing ZS-LP vs CLAP for each dataset (baseline experiments)."""
-    # Group data by dataset
-    datasets = defaultdict(lambda: defaultdict(list))
-    
-    for (dataset, shots, method), metrics_list in rows_by_key.items():
-        if method in ["ZS-LP", "CLAP"]:  # Only plot these two methods
-            accs = [d["acc"] for d in metrics_list if d["acc"] is not None]
-            if accs:
-                acc_mean = mean(accs)
-                acc_std = stdev(accs) if len(accs) > 1 else 0
-                datasets[dataset][method].append((shots, acc_mean, acc_std))
-    
-    # Create a plot for each dataset
-    for dataset, methods_data in datasets.items():
-        plt.figure(figsize=(10, 6))
-        
-        for method, data_points in methods_data.items():
-            if not data_points:
-                continue
-                
-            # Sort by shots
-            data_points.sort(key=lambda x: x[0])
-            shots = [x[0] for x in data_points]
-            accs = [x[1] for x in data_points]
-            stds = [x[2] for x in data_points]
-            
-            # Plot line with error bars
-            plt.errorbar(shots, accs, yerr=stds, 
-                        label=method, marker='o', linewidth=2, markersize=6,
-                        capsize=5, capthick=1)
-        
-        plt.xlabel('Number of Shots', fontsize=12)
-        plt.ylabel('Accuracy', fontsize=12)
-        plt.title(f'Performance Comparison: {dataset}', fontsize=14, fontweight='bold')
-        plt.legend(fontsize=11)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = os.path.join(metrics_dir, f'{dataset}_performance.png')
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ Saved plot: {plot_path}")
+def is_transfer_path(path: str, experiment_name: str) -> bool:
+    """Check if a path corresponds to a cross-dataset transfer experiment."""
+    # Look for transfer_X_to_Y pattern in the path
+    transfer_pattern = rf"output/{re.escape(experiment_name)}/transfer_[^_]+_to_[^/]+/"
+    return bool(re.search(transfer_pattern, path))
 
 # ───────────────────────────────
 # cross-dataset matrix plotting
@@ -147,6 +109,11 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
             for source, target in shots_data.keys():
                 all_datasets.add(source)
                 all_datasets.add(target)
+    
+    if not all_datasets:
+        print("No transfer data found for plotting")
+        return
+        
     all_datasets = sorted(list(all_datasets))
     
     # Create matrices for each method and shot combination
@@ -155,7 +122,70 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
             continue
             
         for shots in sorted(transfer_data[method].keys()):
-            # Create transfer matrix
+            # Create transfer matrix with relative improvements
+            matrix = np.full((len(all_datasets), len(all_datasets)), np.nan)
+            
+            # First, get ZS-LP baseline performance for each target dataset
+            zslp_baseline = {}
+            if "ZS-LP" in transfer_data and shots in transfer_data["ZS-LP"]:
+                for (source, target), acc in transfer_data["ZS-LP"][shots].items():
+                    if target not in zslp_baseline:
+                        zslp_baseline[target] = []
+                    zslp_baseline[target].append(acc)
+                
+                # Average ZS-LP performance across all source datasets for each target
+                for target in zslp_baseline:
+                    zslp_baseline[target] = mean(zslp_baseline[target])
+            
+            # Compute relative improvements w.r.t. ZS-LP baseline
+            for (source, target), acc in transfer_data[method][shots].items():
+                source_idx = all_datasets.index(source)
+                target_idx = all_datasets.index(target)
+                
+                if target in zslp_baseline:
+                    # Relative improvement = (method_acc - baseline_acc)
+                    relative_improvement = acc - zslp_baseline[target]
+                    matrix[source_idx, target_idx] = relative_improvement
+                else:
+                    # If no baseline available, use raw accuracy
+                    matrix[source_idx, target_idx] = acc
+            
+            # Create heatmap
+            plt.figure(figsize=(12, 10))
+            mask = np.isnan(matrix)
+            
+            # Create DataFrame for better labeling
+            df = pd.DataFrame(matrix, index=all_datasets, columns=all_datasets)
+            
+            # Use a diverging colormap centered at 0 for relative improvements
+            vmax = max(abs(np.nanmin(matrix)), abs(np.nanmax(matrix))) if not np.all(np.isnan(matrix)) else 1
+            
+            sns.heatmap(df, annot=True, fmt='.2f', cmap='RdBu_r', center=0,
+                       mask=mask, cbar_kws={'label': 'Relative Improvement (%)'},
+                       square=True, linewidths=0.5, vmin=-vmax, vmax=vmax)
+            
+            plt.title(f'Cross-Dataset Transfer Matrix: {method} ({shots} shots)\nRelative to ZS-LP Baseline', 
+                     fontsize=14, fontweight='bold')
+            plt.xlabel('Target Dataset', fontsize=12)
+            plt.ylabel('Source Dataset', fontsize=12)
+            plt.xticks(rotation=45, ha='right')
+            plt.yticks(rotation=0)
+            plt.tight_layout()
+            
+            # Save plot
+            plot_path = os.path.join(metrics_dir, f'transfer_matrix_{method}_{shots}shots_relative.png')
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✓ Saved relative improvement transfer matrix: {plot_path}")
+    
+    # Also create raw accuracy matrices for reference
+    for method in ["ZS-LP", "CLAP"]:
+        if method not in transfer_data:
+            continue
+            
+        for shots in sorted(transfer_data[method].keys()):
+            # Create raw accuracy matrix
             matrix = np.full((len(all_datasets), len(all_datasets)), np.nan)
             
             for (source, target), acc in transfer_data[method][shots].items():
@@ -174,7 +204,7 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
                        mask=mask, cbar_kws={'label': 'Accuracy'},
                        square=True, linewidths=0.5)
             
-            plt.title(f'Cross-Dataset Transfer Matrix: {method} ({shots} shots)', 
+            plt.title(f'Cross-Dataset Transfer Matrix: {method} ({shots} shots)\nRaw Accuracy', 
                      fontsize=14, fontweight='bold')
             plt.xlabel('Target Dataset', fontsize=12)
             plt.ylabel('Source Dataset', fontsize=12)
@@ -183,29 +213,44 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
             plt.tight_layout()
             
             # Save plot
-            plot_path = os.path.join(metrics_dir, f'transfer_matrix_{method}_{shots}shots.png')
+            plot_path = os.path.join(metrics_dir, f'transfer_matrix_{method}_{shots}shots_raw.png')
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Saved transfer matrix: {plot_path}")
+            print(f"✓ Saved raw accuracy transfer matrix: {plot_path}")
     
-    # Create aggregate transfer heatmap (average across all shots for each method)
+    # Create aggregate relative improvement heatmap (average across all shots for each method)
     for method in ["ZS-LP", "CLAP"]:
         if method not in transfer_data:
             continue
             
-        # Average across all shots
+        # Compute relative improvements across all shots
         aggregate_matrix = np.full((len(all_datasets), len(all_datasets)), np.nan)
         count_matrix = np.zeros((len(all_datasets), len(all_datasets)))
         
-        for shots_data in transfer_data[method].values():
-            for (source, target), acc in shots_data.items():
+        for shots in transfer_data[method].keys():
+            # Get ZS-LP baseline for this shot setting
+            zslp_baseline = {}
+            if "ZS-LP" in transfer_data and shots in transfer_data["ZS-LP"]:
+                for (source, target), acc in transfer_data["ZS-LP"][shots].items():
+                    if target not in zslp_baseline:
+                        zslp_baseline[target] = []
+                    zslp_baseline[target].append(acc)
+                
+                for target in zslp_baseline:
+                    zslp_baseline[target] = mean(zslp_baseline[target])
+            
+            # Compute relative improvements for this shot setting
+            for (source, target), acc in transfer_data[method][shots].items():
                 source_idx = all_datasets.index(source)
                 target_idx = all_datasets.index(target)
-                if np.isnan(aggregate_matrix[source_idx, target_idx]):
-                    aggregate_matrix[source_idx, target_idx] = 0
-                aggregate_matrix[source_idx, target_idx] += acc
-                count_matrix[source_idx, target_idx] += 1
+                
+                if target in zslp_baseline:
+                    relative_improvement = acc - zslp_baseline[target]
+                    if np.isnan(aggregate_matrix[source_idx, target_idx]):
+                        aggregate_matrix[source_idx, target_idx] = 0
+                    aggregate_matrix[source_idx, target_idx] += relative_improvement
+                    count_matrix[source_idx, target_idx] += 1
         
         # Compute averages
         with np.errstate(invalid='ignore'):
@@ -219,11 +264,14 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
         
         df = pd.DataFrame(aggregate_matrix, index=all_datasets, columns=all_datasets)
         
-        sns.heatmap(df, annot=True, fmt='.3f', cmap='viridis',
-                   mask=mask, cbar_kws={'label': 'Average Accuracy'},
-                   square=True, linewidths=0.5)
+        # Use a diverging colormap centered at 0
+        vmax = max(abs(np.nanmin(aggregate_matrix)), abs(np.nanmax(aggregate_matrix))) if not np.all(np.isnan(aggregate_matrix)) else 1
         
-        plt.title(f'Average Cross-Dataset Transfer: {method} (All Shots)', 
+        sns.heatmap(df, annot=True, fmt='.2f', cmap='RdBu_r', center=0,
+                   mask=mask, cbar_kws={'label': 'Average Relative Improvement (%)'},
+                   square=True, linewidths=0.5, vmin=-vmax, vmax=vmax)
+        
+        plt.title(f'Average Cross-Dataset Transfer: {method} (All Shots)\nRelative to ZS-LP Baseline', 
                  fontsize=14, fontweight='bold')
         plt.xlabel('Target Dataset', fontsize=12)
         plt.ylabel('Source Dataset', fontsize=12)
@@ -232,53 +280,30 @@ def create_transfer_matrices(rows_by_key: dict, metrics_dir: str):
         plt.tight_layout()
         
         # Save plot
-        plot_path = os.path.join(metrics_dir, f'transfer_matrix_{method}_aggregate.png')
+        plot_path = os.path.join(metrics_dir, f'transfer_matrix_{method}_aggregate_relative.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✓ Saved aggregate transfer matrix: {plot_path}")
+        print(f"✓ Saved aggregate relative improvement transfer matrix: {plot_path}")
 
 # ───────────────────────────────
 # main parsing functions
 # ───────────────────────────────
-def parse_baseline_experiment(experiment_name: str, output_root: str, metrics_dir: str) -> dict:
-    """Parse regular baseline experiment logs."""
-    log_pattern = LOG_GLOB.format(experiment=experiment_name)
-    rows_by_key = defaultdict(list)  # key = (dataset, shots, method)
-    
-    for log_path in glob.glob(os.path.join(output_root, log_pattern), recursive=True):
-        # extract dataset/config/seed from the *path*
-        dataset_match = re.search(rf"output/{re.escape(experiment_name)}/([^/]+)/", log_path)
-        config_match = re.search(rf"output/{re.escape(experiment_name)}/([^/]+)/([^/]+)/", log_path)
-        seed_match = re_seed.search(log_path)
-        
-        if not (dataset_match and config_match and seed_match):
-            print(f"Warning: Could not parse baseline path {log_path}")
-            continue
-            
-        dataset = dataset_match.group(1)
-        config = config_match.group(2)
-        seed = int(seed_match.group("seed"))
-
-        # shots & method derived from config string
-        shots_match = re_shots.search(config)
-        if shots_match:
-            shots = int(shots_match.group(1))
-        else:
-            shots = 0
-            
-        method = config_to_method(config, shots)
-        metrics = parse_single_log(log_path)
-        rows_by_key[(dataset, shots, method)].append(metrics)
-    
-    return rows_by_key
-
-def parse_cross_dataset_experiment(experiment_name: str, output_root: str, metrics_dir: str) -> dict:
+def parse_transfer_logs(experiment_name: str, output_root: str) -> dict:
     """Parse cross-dataset transfer experiment logs."""
     log_pattern = LOG_GLOB.format(experiment=experiment_name)
     rows_by_key = defaultdict(list)  # key = (source, target, shots, method)
     
+    total_logs = 0
+    completed_logs = 0
+    
     for log_path in glob.glob(os.path.join(output_root, log_pattern), recursive=True):
+        # Only process transfer experiments
+        if not is_transfer_path(log_path, experiment_name):
+            continue
+            
+        total_logs += 1
+            
         # Extract transfer info from path
         transfer_match = re.search(rf"output/{re.escape(experiment_name)}/transfer_([^_]+)_to_([^/]+)/", log_path)
         config_match = re.search(rf"transfer_[^/]+/([^/]+)/", log_path)
@@ -302,41 +327,21 @@ def parse_cross_dataset_experiment(experiment_name: str, output_root: str, metri
             
         method = config_to_method(config, shots)
         metrics = parse_single_log(log_path)
+        
+        if metrics["completed"]:
+            completed_logs += 1
+            
         rows_by_key[(source, target, shots, method)].append(metrics)
     
+    print(f"Found {total_logs} transfer experiment logs, {completed_logs} completed")
     return rows_by_key
-
-def write_baseline_csv(rows_by_key: dict, csv_path: str):
-    """Write baseline experiment results to CSV."""
-    with open(csv_path, "w", newline="") as csv_f:
-        writer = csv.writer(csv_f)
-        header = ["dataset", "shots", "method",
-                  "acc_mean", "acc_std",
-                  "ece_mean", "nll_mean", "zs_acc_mean"]
-        writer.writerow(header)
-
-        for (dataset, shots, method), lst in sorted(rows_by_key.items()):
-            accs    = [d["acc"]     for d in lst if d["acc"]     is not None]
-            eces    = [d["ece"]     for d in lst if d["ece"]     is not None]
-            nlls    = [d["nll"]     for d in lst if d["nll"]     is not None]
-            zs_accs = [d["zs_acc"]  for d in lst if d["zs_acc"]  is not None]
-
-            row = [
-                dataset, shots, method,
-                f"{mean(accs):.3f}",
-                f"{stdev(accs):.3f}"  if len(accs) > 1 else "",
-                f"{mean(eces):.4f}"   if eces else "",
-                f"{mean(nlls):.3f}"   if nlls else "",
-                f"{mean(zs_accs):.3f}" if zs_accs else ""
-            ]
-            writer.writerow(row)
 
 def write_transfer_csv(rows_by_key: dict, csv_path: str):
     """Write cross-dataset transfer results to CSV."""
     with open(csv_path, "w", newline="") as csv_f:
         writer = csv.writer(csv_f)
         header = ["source_dataset", "target_dataset", "shots", "method",
-                  "acc_mean", "acc_std",
+                  "acc_mean", "acc_std", "num_seeds", "completed_seeds",
                   "ece_mean", "nll_mean", "zs_acc_mean"]
         writer.writerow(header)
 
@@ -345,14 +350,17 @@ def write_transfer_csv(rows_by_key: dict, csv_path: str):
             eces    = [d["ece"]     for d in lst if d["ece"]     is not None]
             nlls    = [d["nll"]     for d in lst if d["nll"]     is not None]
             zs_accs = [d["zs_acc"]  for d in lst if d["zs_acc"]  is not None]
+            completed = sum(1 for d in lst if d["completed"])
 
             row = [
                 source, target, shots, method,
-                f"{mean(accs):.3f}",
-                f"{stdev(accs):.3f}"  if len(accs) > 1 else "",
-                f"{mean(eces):.4f}"   if eces else "",
-                f"{mean(nlls):.3f}"   if nlls else "",
-                f"{mean(zs_accs):.3f}" if zs_accs else ""
+                f"{mean(accs):.3f}" if accs else "N/A",
+                f"{stdev(accs):.3f}" if len(accs) > 1 else ("0.000" if len(accs) == 1 else "N/A"),
+                len(lst),
+                completed,
+                f"{mean(eces):.4f}" if eces else "N/A",
+                f"{mean(nlls):.3f}" if nlls else "N/A",
+                f"{mean(zs_accs):.3f}" if zs_accs else "N/A"
             ]
             writer.writerow(row)
 
@@ -364,26 +372,33 @@ def main(experiment_name: str, output_root: str, out_csv: str):
     metrics_dir = f"metrics/{experiment_name}"
     os.makedirs(metrics_dir, exist_ok=True)
     
-    # Update CSV path to be in experiment's metrics directory
-    csv_path = os.path.join(metrics_dir, os.path.basename(out_csv))
+    # Parse transfer experiments only
+    print(f"Parsing cross-dataset transfer experiments for: {experiment_name}")
+    transfer_rows = parse_transfer_logs(experiment_name, output_root)
     
-    # Detect experiment type
-    exp_type = detect_experiment_type(experiment_name, output_root)
-    print(f"Detected experiment type: {exp_type}")
-    
-    if exp_type == "cross_dataset":
-        # Parse cross-dataset transfer results
-        rows_by_key = parse_cross_dataset_experiment(experiment_name, output_root, metrics_dir)
-        write_transfer_csv(rows_by_key, csv_path)
-        create_transfer_matrices(rows_by_key, metrics_dir)
-        print(f"✓ Parsed {len(rows_by_key)} transfer experiment groups → {csv_path}")
+    if transfer_rows:
+        # Generate CSV output
+        csv_path = os.path.join(metrics_dir, out_csv)
+        write_transfer_csv(transfer_rows, csv_path)
+        print(f"✓ Parsed {len(transfer_rows)} transfer experiment groups → {csv_path}")
+        
+        # Generate transfer matrices
+        create_transfer_matrices(transfer_rows, metrics_dir)
+        
+        # Print summary statistics
+        total_experiments = len(transfer_rows)
+        completed_experiments = sum(1 for metrics_list in transfer_rows.values() 
+                                  if any(d["completed"] for d in metrics_list))
+        with_results = sum(1 for metrics_list in transfer_rows.values() 
+                          if any(d["acc"] is not None for d in metrics_list))
+        
+        print(f"\nSummary:")
+        print(f"  Total experiment configurations: {total_experiments}")
+        print(f"  Configurations with completed runs: {completed_experiments}")
+        print(f"  Configurations with results: {with_results}")
         
     else:
-        # Parse regular baseline results
-        rows_by_key = parse_baseline_experiment(experiment_name, output_root, metrics_dir)
-        write_baseline_csv(rows_by_key, csv_path)
-        create_baseline_plots(rows_by_key, metrics_dir)
-        print(f"✓ Parsed {len(rows_by_key)} baseline experiment groups → {csv_path}")
+        print("No transfer experiments found")
 
 # ───────────────────────────────
 if __name__ == "__main__":
@@ -392,7 +407,7 @@ if __name__ == "__main__":
                         help="name of the experiment")
     parser.add_argument("--output_root", default=".",
                         help="root folder containing experiment outputs")
-    parser.add_argument("--out_csv", default="baseline_metrics.csv",
+    parser.add_argument("--out_csv", default="transfer_results.csv",
                         help="name of the summary CSV to create")
     args = parser.parse_args()
     main(args.experiment_name, args.output_root, args.out_csv)

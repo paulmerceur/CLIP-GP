@@ -2,11 +2,11 @@
 #SBATCH --job-name=clap_baselines
 #SBATCH --account=def-josedolz
 #SBATCH --time=04:00:00
-#SBATCH --gres=gpu:1                 # one GPU per array task
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --array=0-43%22
-#SBATCH --output=logs/%x_%A_%a.out   # %A = job-ID, %a = array-index
+#SBATCH --array=0-120%50    # 11 datasets * (5 shots with CLAP + 5 shots with ZS-LP + ZS)
+#SBATCH --output=logs/%x_%A_%a.out
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
 # ──────────────────────────
@@ -33,14 +33,13 @@ export EXPERIMENT_NAME="$EXPERIMENT_NAME"
 # ──────────────────────────
 # 1. Parameter space
 # ──────────────────────────
-#datasets=(caltech101 dtd eurosat fgvc_aircraft oxford_flowers oxford_pets sun397)
-datasets=(imagenet_a imagenet_r imagenet_sketch)
-shots=(1 2 4 8 16)                         # zero-shot handled separately
+datasets=(caltech101 dtd eurosat fgvc_aircraft oxford_flowers oxford_pets sun397 food101 imagenet_a imagenet_r imagenet_sketch)
+shots=(1 2 4 8 16) # zero-shot handled separately
 optim="SGD_lr1e-1_B256_ep300"
-backbone="RN50"
+backbone="ViT-B/16"
 
 # ──────────────────────────
-# 2. Build the 77 configurations
+# 2. Build the 121 configurations
 #    (index == $SLURM_ARRAY_TASK_ID)
 # ──────────────────────────
 declare -a cfg                         # cfg[i] holds one full CLI line
