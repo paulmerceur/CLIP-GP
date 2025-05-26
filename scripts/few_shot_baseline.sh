@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --array=0-120%50    # 11 datasets * (5 shots with CLAP + 5 shots with ZS-LP + ZS)
+#SBATCH --array=0-120%20    # 11 datasets * (5 shots with CLAP + 5 shots with ZS-LP + ZS)
 #SBATCH --output=logs/%x_%A_%a.out
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  

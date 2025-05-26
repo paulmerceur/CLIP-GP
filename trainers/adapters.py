@@ -467,12 +467,13 @@ class TrainerXCostume(SimpleTrainer):
                 eta_seconds = batch_time.avg * nb_remain
                 eta = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-                info = []
-                info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
-                info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]
-                info += [f"{losses}"]
-                info += [f"eta {eta}"]
-                print(" ".join(info))
+                if self.batch_idx % 10 == 0:
+                    info = []
+                    info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
+                    info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]
+                    info += [f"{losses}"]
+                    info += [f"eta {eta}"]
+                    print(" ".join(info))
 
             n_iter = self.epoch * self.num_batches + self.batch_idx
             for name, meter in losses.meters.items():
