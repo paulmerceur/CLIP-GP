@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --array=0-120%20    # 11 datasets * (5 shots with CLAP + 5 shots with ZS-LP + ZS)
+#SBATCH --array=0-109%20    # 11 datasets * 5 shots per config * 2 configs
 #SBATCH --output=logs/%x_%A_%a.out
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
@@ -34,9 +34,9 @@ export EXPERIMENT_NAME="$EXPERIMENT_NAME"
 # 1. Parameter space
 # ──────────────────────────
 datasets=(caltech101 dtd eurosat fgvc_aircraft oxford_flowers oxford_pets sun397 food101 imagenet_a imagenet_r imagenet_sketch)
-shots=(1 2 4 8 16) # zero-shot handled separately
+shots=(1 2 4 8 16)
 optim="SGD_lr1e-1_B256_ep300"
-backbone="ViT-B/16"
+backbone="RN50"
 
 # ──────────────────────────
 # 2. Build the 121 configurations
@@ -46,7 +46,7 @@ declare -a cfg                         # cfg[i] holds one full CLI line
 
 for ds in "${datasets[@]}"; do
   # 2-A  Zero-shot
-  cfg+=("0 $ds SGD_lr1e-3_B1_ep1 0 ZS none $backbone")
+  #cfg+=("0 $ds SGD_lr1e-3_B1_ep1 0 ZS none $backbone")
 
   # 2-B  Few-shot (ZS-LP and CLAP)
   for N in "${shots[@]}"; do

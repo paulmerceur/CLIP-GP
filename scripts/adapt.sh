@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # custom config
+DATA=/scratch/pmerceur/data/
 TRAINER=ADAPTER
 
 DEVICE=$1

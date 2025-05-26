@@ -1,6 +1,5 @@
 import argparse
 import torch
-import time
 
 from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import get_cfg_default
@@ -129,7 +128,6 @@ def setup_cfg(args):
 
 
 def main(args):
-    time_start = time.time()
     cfg = setup_cfg(args)
     if cfg.SEED >= 0:
         print("Setting fixed seed: {}".format(cfg.SEED))
@@ -152,8 +150,7 @@ def main(args):
 
     if not args.no_train:
         trainer.train()
-    time_end = time.time()
-    print(f"Time taken: {time_end - time_start} seconds")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
