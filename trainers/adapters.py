@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import random
 from re import template
 import time
 import os.path as osp
@@ -110,6 +111,9 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
 
     if dataset == "ImageNet":
         TEMPLATES = IMAGENET_TEMPLATES_SELECT
+    elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+        # Randomly select NUM_TEMPLATES templates from IMAGENET_TEMPLATES
+        TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
     else:
         TEMPLATES = []
     TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
@@ -467,7 +471,7 @@ class TrainerXCostume(SimpleTrainer):
                 eta_seconds = batch_time.avg * nb_remain
                 eta = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-                if self.batch_idx % 10 == 0:
+                if self.epoch % 10 == 0 or self.epoch == self.max_epoch - 1:
                     info = []
                     info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
                     info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]

@@ -29,8 +29,8 @@ def parse_config_from_filename(config_dir: str) -> Dict[str, str]:
     """
     Parse configuration parameters from directory name.
     
-    Expected format: {optimizer}_lr{lr}_B{batch_size}_ep{epochs}_{init_type}_{constraint}_{shots}shots
-    Example: SGD_lr1e-1_B256_ep300_ZSInit_l2Constraint_1shots
+    Expected format: {optimizer}_lr{lr}_B{batch_size}_ep{epochs}_{init_type}_{constraint}_{shots}shots_{nb_templates}templates
+    Example: SGD_lr1e-1_B256_ep300_ZSInit_l2Constraint_1shots_10templates
     """
     config = {}
     
@@ -65,6 +65,11 @@ def parse_config_from_filename(config_dir: str) -> Dict[str, str]:
     if constraint_match:
         config['constraint'] = constraint_match.group(1)
     
+    # Extract number of templates
+    template_match = re.search(r'_(\d+)templates', config_dir)
+    if template_match:
+        config['nb_templates'] = int(template_match.group(1))
+    
     return config
 
 def parse_log_file(log_path: str) -> Optional[Dict[str, float]]:
@@ -85,30 +90,15 @@ def parse_log_file(log_path: str) -> Optional[Dict[str, float]]:
         if zs_match:
             metrics['zero_shot_accuracy'] = float(zs_match.group(1))
         
-        # Extract final test accuracy (from last epoch)
-        final_acc_matches = list(re.finditer(r'acc_test ([\d.]+)', content))
-        if final_acc_matches:
-            metrics['final_test_accuracy'] = float(final_acc_matches[-1].group(1))
-        
-        # Extract best test accuracy (maximum across all epochs)
-        all_test_accs = [float(m.group(1)) for m in re.finditer(r'acc_test ([\d.]+)', content)]
-        if all_test_accs:
-            metrics['best_test_accuracy'] = max(all_test_accs)
-        
-        # Extract final training accuracy
-        final_train_matches = list(re.finditer(r'acc_train ([\d.]+)', content))
-        if final_train_matches:
-            metrics['final_train_accuracy'] = float(final_train_matches[-1].group(1))
-        
-        # Extract final loss
-        final_loss_matches = list(re.finditer(r'loss ([\d.]+)', content))
-        if final_loss_matches:
-            metrics['final_loss'] = float(final_loss_matches[-1].group(1))
-        
-        # Extract training time
-        time_match = re.search(r'Time taken: ([\d.]+) seconds', content)
-        if time_match:
-            metrics['training_time'] = float(time_match.group(1))
+        # Extract final test accuracy
+        test_acc_match = re.search(r'\* accuracy: ([\d.]+)%', content)
+        if test_acc_match:
+            metrics['test_accuracy'] = float(test_acc_match.group(1))
+
+        # Extract final test macro-F1
+        f1_match = re.search(r'\* macro_f1: ([\d.]+)%', content)
+        if f1_match:
+            metrics['test_macro_f1'] = float(f1_match.group(1))
         
         return metrics
         
@@ -187,15 +177,14 @@ def aggregate_results(results: List[Dict]) -> pd.DataFrame:
     df = pd.DataFrame(results)
     
     # Group by all config parameters and dataset, then average metrics
-    group_cols = ['experiment', 'dataset', 'config_name', 'num_shots', 'optimizer', 
-                  'learning_rate', 'batch_size', 'epochs', 'init_type', 'constraint']
+    group_cols = ['experiment', 'dataset', 'num_shots', 'optimizer', 
+                  'learning_rate', 'batch_size', 'epochs', 'init_type', 'constraint', 'nb_templates']
     
     # Only include columns that exist in the dataframe
     group_cols = [col for col in group_cols if col in df.columns]
     
     # Metrics to average
-    metric_cols = ['zero_shot_accuracy', 'final_test_accuracy', 'best_test_accuracy', 
-                   'final_train_accuracy', 'final_loss', 'training_time']
+    metric_cols = ['zero_shot_accuracy', 'test_accuracy', 'test_f1']
     metric_cols = [col for col in metric_cols if col in df.columns]
     
     # Aggregate
@@ -211,8 +200,7 @@ def create_method_name(row: pd.Series) -> str:
     """
     Create a method name for plotting.
     
-    Format: {init_type}_{constraint}_{optimizer}_{learning_rate}
-    But only include optimizer and learning rate if they vary across experiments.
+    Format: {init_type}_{constraint}_{nb_templates}templates
     """
     parts = []
     
@@ -222,18 +210,15 @@ def create_method_name(row: pd.Series) -> str:
     if pd.notna(row.get('constraint')):
         parts.append(str(row['constraint']))
     
-    # For now, always include optimizer and LR for clarity
-    if pd.notna(row.get('optimizer')):
-        parts.append(str(row['optimizer']))
-    
-    if pd.notna(row.get('learning_rate')):
-        parts.append(f"lr{row['learning_rate']}")
+    if pd.notna(row.get('nb_templates')):
+        parts.append(f"{row['nb_templates']}templates")
     
     return "_".join(parts)
 
 def create_plots(df: pd.DataFrame, experiment_name: str, output_dir: Path):
     """
     Create line plots comparing methods across different shot numbers.
+    For now, only plot test accuracy.
     """
     if df.empty:
         print("No data to plot!")
@@ -253,14 +238,11 @@ def create_plots(df: pd.DataFrame, experiment_name: str, output_dir: Path):
             continue
         
         # Create subplots for different metrics
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle(f'{experiment_name} - {dataset}', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(1, 1, figsize=(15, 12))
+        fig.suptitle(dataset.upper(), fontsize=16, fontweight='bold')
         
         metrics_to_plot = [
-            ('final_test_accuracy_mean', 'Final Test Accuracy (%)', axes[0, 0]),
-            ('best_test_accuracy_mean', 'Best Test Accuracy (%)', axes[0, 1]),
-            ('final_train_accuracy_mean', 'Final Train Accuracy (%)', axes[1, 0]),
-            ('final_loss_mean', 'Final Loss', axes[1, 1])
+            ('test_accuracy_mean', 'Test Accuracy (%)', axes)
         ]
         
         for metric, title, ax in metrics_to_plot:
@@ -290,7 +272,8 @@ def create_plots(df: pd.DataFrame, experiment_name: str, output_dir: Path):
             
             ax.set_xlabel('Number of Shots')
             ax.set_ylabel(title)
-            ax.set_title(title)
+            if len(metrics_to_plot) > 1:
+                ax.set_title(title)
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax.grid(True, alpha=0.3)
             
@@ -341,10 +324,10 @@ def main():
     print(f"Aggregated to {len(agg_df)} unique configurations")
     
     # Save raw results CSV
-    raw_df = pd.DataFrame(results)
-    raw_csv_path = output_dir / f'raw_results.csv'
-    raw_df.to_csv(raw_csv_path, index=False)
-    print(f"Saved raw results: {raw_csv_path}")
+    # raw_df = pd.DataFrame(results)
+    # raw_csv_path = output_dir / f'raw_results.csv'
+    # raw_df.to_csv(raw_csv_path, index=False)
+    # print(f"Saved raw results: {raw_csv_path}")
     
     # Save aggregated results CSV
     agg_csv_path = output_dir / f'aggregated_results.csv'
@@ -365,17 +348,13 @@ def main():
         print(f"\n{dataset.upper()}:")
         dataset_df = agg_df[agg_df['dataset'] == dataset]
         
-        if 'final_test_accuracy_mean' in dataset_df.columns:
-            best_acc = dataset_df['final_test_accuracy_mean'].max()
-            best_row = dataset_df[dataset_df['final_test_accuracy_mean'] == best_acc].iloc[0]
+        if 'test_accuracy_mean' in dataset_df.columns:
+            best_acc = dataset_df['test_accuracy_mean'].max()
+            best_row = dataset_df[dataset_df['test_accuracy_mean'] == best_acc].iloc[0]
             print(f"  Best final test accuracy: {best_acc:.2f}%")
             print(f"  Best method: {create_method_name(best_row)}")
             print(f"  Shots: {best_row.get('num_shots', 'N/A')}")
-        
-        if 'best_test_accuracy_mean' in dataset_df.columns:
-            best_acc = dataset_df['best_test_accuracy_mean'].max()
-            best_row = dataset_df[dataset_df['best_test_accuracy_mean'] == best_acc].iloc[0]
-            print(f"  Best test accuracy overall: {best_acc:.2f}%")
+
 
 if __name__ == "__main__":
     main() 
