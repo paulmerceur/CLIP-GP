@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --array=1-120    # 12 datasets * 5 shots per config * 2 configs
+#SBATCH --array=1-100    # 10 datasets * 5 shots per config * 2 configs
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
 # ──────────────────────────
@@ -20,7 +20,7 @@ echo "Running experiment: $EXPERIMENT_NAME"
 # Update SLURM output path for this experiment
 #SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out
 
-source "${PWD}/.venv/bin/activate"
+source .venv/bin/activate
 
 export TORCH_HOME="${PWD}/.cache"
 export PYTHONHASHSEED=0
@@ -28,7 +28,7 @@ export PYTHONHASHSEED=0
 # ──────────────────────────
 # 1. Parameter space
 # ──────────────────────────
-datasets=(caltech101 dtd eurosat fgvc_aircraft food101 imagenet_a imagenet_r imagenet_sketch oxford_flowers oxford_pets sun397 ucf101)
+datasets=(caltech101 dtd eurosat fgvc_aircraft food101 oxford_flowers oxford_pets sun397 ucf101 stanford_cars)
 shots=(1 2 4 8 16)
 optim="SGD_lr1e-1_B256_ep300"
 backbone="RN50"
@@ -41,8 +41,8 @@ declare -a cfg
 
 for ds in "${datasets[@]}"; do
   for N in "${shots[@]}"; do
-    for nb_templates in "${nb_templates[@]}"; do
-      cfg+=("0 $ds $optim $N ZS none $backbone $nb_templates")
+    for nt in "${nb_templates[@]}"; do
+      cfg+=("0 $ds $optim $N ZS none $backbone $nt")
     done
   done
 done
