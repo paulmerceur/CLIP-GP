@@ -47,6 +47,66 @@ CUSTOM_TEMPLATES = {
 }
 
 
+class GPTemplateWeighting(nn.Module):
+    """Simple GP-based template weighting module."""
+    
+    def __init__(self, num_templates, lengthscale=1.0, outputscale=1.0, noise=0.1):
+        super().__init__()
+        self.num_templates = num_templates
+        
+        # GP hyperparameters as learnable parameters
+        self.log_lengthscale = nn.Parameter(torch.log(torch.tensor(lengthscale)))
+        self.log_outputscale = nn.Parameter(torch.log(torch.tensor(outputscale)))
+        self.log_noise = nn.Parameter(torch.log(torch.tensor(noise)))
+        
+        # Template indices as input points
+        self.register_buffer('template_indices', torch.arange(num_templates, dtype=torch.float32))
+        
+    def rbf_kernel(self, x1, x2):
+        """RBF kernel function."""
+        lengthscale = torch.exp(self.log_lengthscale)
+        outputscale = torch.exp(self.log_outputscale)
+        
+        # Compute squared distances
+        dist_sq = (x1.unsqueeze(-1) - x2.unsqueeze(0)).pow(2)
+        
+        # RBF kernel
+        return outputscale * torch.exp(-0.5 * dist_sq / lengthscale.pow(2))
+    
+    def forward(self, text_embeddings):
+        """
+        Compute GP-based weights for template embeddings.
+        
+        Args:
+            text_embeddings: [num_classes, num_templates, embedding_dim]
+            
+        Returns:
+            weighted_embeddings: [num_classes, embedding_dim]
+        """
+        num_classes, num_templates, embedding_dim = text_embeddings.shape
+        
+        if num_templates == 1:
+            # If only one template, return as is
+            return text_embeddings.squeeze(1)
+        
+        # Compute kernel matrix
+        K = self.rbf_kernel(self.template_indices, self.template_indices)
+        
+        # Add noise to diagonal
+        noise = torch.exp(self.log_noise)
+        K = K + noise * torch.eye(num_templates, device=K.device)
+        
+        # Simple GP prediction: use uniform mean, compute weights based on kernel
+        # For simplicity, we use the kernel's softmax as weights
+        weights = F.softmax(K.mean(dim=0), dim=0)  # [num_templates]
+        
+        # Apply weights to embeddings
+        weights = weights.view(1, num_templates, 1)  # [1, num_templates, 1]
+        weighted_embeddings = (text_embeddings * weights).sum(dim=1)  # [num_classes, embedding_dim]
+        
+        return weighted_embeddings
+
+
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
     url = clip._MODELS[backbone_name]
@@ -94,7 +154,7 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
         text_encoder = text_encoder.cuda()
 
         if pretrained_projection is not None:
-            # Load pretrained projection from TaskResidual Work
+            # Load pretrained projection from TaskRes Work
             pretrained_text_projection = torch.load(pretrained_projection)
 
             # Move weight to current CLIP model
@@ -118,17 +178,50 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
         TEMPLATES = []
     TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
 
-    with torch.no_grad():
+    # FIX: Conditionally use torch.no_grad() based on GP usage
+    # When GP is enabled, we need gradients to flow through text embeddings
+    use_grad_context = cfg.TRAINER.ADAPTER.USE_GP and cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1
+    
+    if use_grad_context:
+        # Don't use no_grad context - allow gradients to flow
         text_embeddings = []
         for text in classnames:
             tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
             embeddings = clip_model.token_embedding(tokens).type(clip_model.dtype)
             prototype = text_encoder(embeddings.cuda(), tokens.cuda())
             text_embeddings.append(prototype)
+    else:
+        # Use no_grad context for efficiency when GP is not used
+        with torch.no_grad():
+            text_embeddings = []
+            for text in classnames:
+                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
+                embeddings = clip_model.token_embedding(tokens).type(clip_model.dtype)
+                prototype = text_encoder(embeddings.cuda(), tokens.cuda())
+                text_embeddings.append(prototype)
 
     text_embeddings = torch.stack(text_embeddings)
-    text_embeddings_avg = text_embeddings.mean(1)
-    return text_embeddings_avg.to(device), text_embeddings
+    
+    # Ensure we use the correct device (where text_embeddings are located)
+    actual_device = text_embeddings.device
+    
+    # Choose between GP weighting and simple averaging
+    if cfg.TRAINER.ADAPTER.USE_GP and text_embeddings.shape[1] > 1:
+        # Initialize GP weighting module on the same device as text embeddings
+        gp_weighter = GPTemplateWeighting(
+            num_templates=text_embeddings.shape[1],
+            lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
+            outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
+            noise=cfg.TRAINER.ADAPTER.GP_NOISE
+        ).to(actual_device)
+        
+        # Apply GP weighting
+        text_embeddings_avg = gp_weighter(text_embeddings)
+        
+        return text_embeddings_avg, text_embeddings, gp_weighter
+    else:
+        text_embeddings_avg = text_embeddings.mean(1)
+        return text_embeddings_avg, text_embeddings, None
 
 
 class AdapterMethod(nn.Module):
@@ -144,22 +237,23 @@ class AdapterMethod(nn.Module):
         self.base_text_features = base_text_features
         self.augmentations = True  # True
         self.epochs_aumentation = 20  # 20
+        self.use_gp = cfg.TRAINER.ADAPTER.USE_GP  # Store GP usage flag
 
         if self.initialization == "RANDOM":  # Randomly initialized Linear Probing
-            print("Using RANDOM initialization in Linear Probing", end="\n")
+            print("Using RANDOM initialization in Linear Probing")
             self.prototypes = nn.Parameter(torch.nn.init.kaiming_normal_(torch.empty(base_text_features.shape)))
         elif "ZS" in self.initialization:  # Linear Probe initialized with zero-shot weights
-            print("Using Zero-Shot initialization in Linear Probing", end="\n")
+            print("Using Zero-Shot initialization in Linear Probing")
             self.prototypes = nn.Parameter(base_text_features.clone())
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
-            print("Using Task_residual approach for Linear Probing", end="\n")
+            print("Using Task_residual approach for Linear Probing")
             self.init_TR(alpha=0.5)
         elif "ClipA" in self.initialization:  # CLIP-Adapter form Gao et al. (2023)
             self.init_clipA()
         elif "TipA" in self.initialization:  # TIP-Adapter form Zhang et al. (2022)
             self.init_tipA()
         elif "CrossModal" in self.initialization:  # Cross-Modal Linear Probing form Lin et al. (2023)
-            print("Using CrossModal for Linear Probing", end="\n")
+            print("Using CrossModal for Linear Probing")
             self.init_MultiModal()
         else:
             print("Initialization for Linear Probing not implemented")
@@ -169,18 +263,17 @@ class AdapterMethod(nn.Module):
             print("Applying constraint to the logistic regression weights: " + str(self.distance))
 
     def init_MultiModal(self):
-        print("Using Zero-Shot initialization in Linear Probing", end="\n")
+        print("Using Zero-Shot initialization in Linear Probing")
         self.prototypes = nn.Parameter(self.base_text_features.clone())
     def init_TR(self, alpha=0.5):
-        print("Using TaskRes-Adapter", end="\n")
         self.alpha = alpha
         self.grid_search_param = {"lr": [1e-1, 1e-2, 1e-3],
                                   "alpha": list(np.arange(0.2, 1.2, 0.2))}
-        print("Using Task_residual approach for Linear Probing", end="\n")
+        print("Using Task_residual approach for Linear Probing")
         self.prototypes = nn.Parameter(torch.zeros_like(self.base_text_features.clone()))
 
     def init_clipA(self, ratio=0.2):
-        print("Using CLIP-Adapter", end="\n")
+        print("Using CLIP-Adapter")
         self.grid_search_param = {"lr": [1e-1, 1e-2, 1e-3],
                                   "ratio": list(np.arange(0.2, 1, 0.2))}
         self.ratio = ratio
@@ -289,6 +382,14 @@ class AdapterMethod(nn.Module):
     def forward(self):
         return self.prototypes
 
+    def update_base_features(self, new_base_features):
+        """Update base text features for GP mode."""
+        self.base_text_features = new_base_features
+        if hasattr(self, 'prototypes') and "ZS" in self.initialization:
+            # Update prototypes for ZS initialization when base features change
+            with torch.no_grad():
+                self.prototypes.data = new_base_features.clone()
+
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
@@ -296,18 +397,28 @@ class CustomCLIP(nn.Module):
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype  # float16
+        
+        # Store necessary attributes for Fix 2
+        self.cfg = cfg
+        self.classnames = classnames
+        # FIX: Instead of storing clip_model reference, store token_embedding as a proper submodule
+        # so it gets moved to GPU with the rest of the model
+        self.token_embedding = clip_model.token_embedding
+        
         text_encoder = TextEncoder(clip_model)
+        self.text_encoder = text_encoder
 
         # For TaskRes (Yu et al.) enhanced base - or regular CLIP base
         if cfg.TRAINER.ADAPTER.ENHANCED_BASE == "none":
             print(">> Use regular base!")
-            base_text_features, text_embeddings_all = _get_base_text_features(cfg, classnames, clip_model, text_encoder)
+            base_text_features, text_embeddings_all, gp_weighter = _get_base_text_features(cfg, classnames, clip_model, text_encoder)
         else:
             print(">> Use enhanced base!")
-            base_text_features, text_embeddings_all = _get_base_text_features(
+            base_text_features, text_embeddings_all, gp_weighter = _get_base_text_features(
                 cfg, classnames, clip_model, text_encoder, cfg.TRAINER.TaskRes.ENHANCED_BASE)
 
         self.text_embeddings_all = text_embeddings_all
+        self.gp_weighter = gp_weighter  # Store GP weighter for training
         self.adapter = AdapterMethod(cfg, clip_model, base_text_features)
 
     def forward(self, image, return_features=False):
@@ -315,6 +426,63 @@ class CustomCLIP(nn.Module):
             image_features = self.image_encoder(image.type(self.dtype))
         except:
             image_features = self.image_encoder(image.float())
+
+        # Update base features if using GP and in training mode
+        # Only update during actual training epochs, not during feature extraction
+        if (self.gp_weighter is not None and 
+            self.training and 
+            hasattr(self, '_in_training_epoch') and 
+            self._in_training_epoch):
+            
+            # FIX 2: Recreate text embeddings with gradients during training
+            # Get the text encoder and templates - follow exact same setup as _get_base_text_features
+            text_encoder = self.text_encoder
+            classnames = self.classnames
+            cfg = self.cfg
+            
+            # Handle text_encoder device and dtype properly
+            if self.dtype == torch.float16:
+                text_encoder = text_encoder.cuda()
+            
+            # FIX: Update text_encoder.dtype to match actual parameter dtype after model conversion
+            text_encoder.dtype = next(text_encoder.parameters()).dtype
+            
+            # Recreate embeddings with gradients (similar to _get_base_text_features)
+            dataset = cfg.DATASET.NAME
+            if dataset == "ImageNet":
+                TEMPLATES = IMAGENET_TEMPLATES_SELECT
+            elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+                TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
+            else:
+                TEMPLATES = []
+            
+            TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
+            
+            # Create text embeddings WITH gradients - follow exact same pattern as _get_base_text_features
+            text_embeddings = []
+            for text in classnames:
+                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
+                
+                # Move tokens to the same device as token_embedding
+                tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                
+                # Use the actual dtype of the token_embedding instead of stored self.dtype for consistency
+                embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
+                
+                # Convert embeddings to the actual dtype of text_encoder to avoid dtype mismatch
+                embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
+                
+                prototype = text_encoder(embeddings.cuda(), tokens.cuda())  # move to GPU for text encoder
+                text_embeddings.append(prototype)
+            
+            text_embeddings = torch.stack(text_embeddings)
+            
+            # Apply GP weighting to fresh embeddings
+            updated_base_features = self.gp_weighter(text_embeddings)
+            self.adapter.update_base_features(updated_base_features)
+        elif self.gp_weighter is not None:
+            # During feature extraction or eval, don't update base features, just use the current state
+            pass
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(image_features)
@@ -331,6 +499,52 @@ class CustomCLIP(nn.Module):
             return logits
 
     def forward_features(self, features):
+        
+        # Update base features if using GP and in training mode
+        # Only update during actual training epochs, not during feature extraction
+        if (self.gp_weighter is not None and 
+            self.training and 
+            hasattr(self, '_in_training_epoch') and 
+            self._in_training_epoch):
+            
+            # Recreate text embeddings with gradients during training
+            text_encoder = self.text_encoder
+            classnames = self.classnames
+            cfg = self.cfg
+            
+            # Handle text_encoder device and dtype properly
+            if self.dtype == torch.float16:
+                text_encoder = text_encoder.cuda()
+            
+            # Update text_encoder.dtype to match actual parameter dtype after model conversion
+            text_encoder.dtype = next(text_encoder.parameters()).dtype
+            
+            # Recreate embeddings with gradients (similar to _get_base_text_features)
+            dataset = cfg.DATASET.NAME
+            if dataset == "ImageNet":
+                TEMPLATES = IMAGENET_TEMPLATES_SELECT
+            elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+                TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
+            else:
+                TEMPLATES = []
+            
+            TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
+            
+            # Create text embeddings WITH gradients
+            text_embeddings = []
+            for text in classnames:
+                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])
+                tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
+                embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
+                prototype = text_encoder(embeddings.cuda(), tokens.cuda())
+                text_embeddings.append(prototype)
+            
+            text_embeddings = torch.stack(text_embeddings)
+            
+            # Apply GP weighting to fresh embeddings
+            updated_base_features = self.gp_weighter(text_embeddings)
+            self.adapter.update_base_features(updated_base_features)
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(features)
@@ -422,6 +636,9 @@ class TrainerXCostume(SimpleTrainer):
     """A base trainer using labeled data only."""
 
     def run_epoch(self):
+        # Mark that we're in a training epoch for Fix 2
+        self.model._in_training_epoch = True
+        
         # Eval mode - not updating batchnorm statistics
         self.set_model_mode("eval")
 
@@ -485,6 +702,10 @@ class TrainerXCostume(SimpleTrainer):
             self.write_scalar("train/lr", self.get_current_lr(), n_iter)
 
             end = time.time()
+        
+        # Unmark training epoch flag  
+        self.model._in_training_epoch = False
+        
         return loss_summary
 
 
@@ -512,18 +733,37 @@ class ADAPTER(TrainerXCostume):
 
         print("Turning off gradients in both the image and the text encoder")
         for name, param in self.model.named_parameters():
-            if "adapter" not in name:
+            if "adapter" not in name and "gp_weighter" not in name:
                 param.requires_grad_(False)
-            else:
-                print(name)
 
         if cfg.MODEL.INIT_WEIGHTS:
             load_pretrained_weights(self.model.adapter, cfg.MODEL.INIT_WEIGHTS)
 
         self.model.to(self.device)
         self.model = self.model.float()
-        # NOTE: only give adapter to the optimizer
-        self.optim = build_optimizer(self.model.adapter, cfg.OPTIM)
+        
+        # NOTE: only give adapter (and optionally GP) parameters to the optimizer
+        if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
+            # Create a parameter list for both adapter and GP parameters
+            adapter_params = list(self.model.adapter.parameters())
+            gp_params = list(self.model.gp_weighter.parameters())
+            all_params = adapter_params + gp_params
+            
+            # Get weight decay if available
+            weight_decay = getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+            
+            # Create temporary optimizer with parameter groups
+            from torch.optim import SGD, Adam
+            if cfg.OPTIM.NAME.lower() == "sgd":
+                self.optim = SGD(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+            elif cfg.OPTIM.NAME.lower() == "adam":
+                self.optim = Adam(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+            else:
+                # Fallback to SGD
+                self.optim = SGD(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+        else:
+            self.optim = build_optimizer(self.model.adapter, cfg.OPTIM)
+            
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("adapter", self.model.adapter, self.optim, self.sched)
 
@@ -561,7 +801,7 @@ class ADAPTER(TrainerXCostume):
 
         # Init alphas in constraint formulation
         if self.model.adapter.apply_constraint != "none":
-            print("Getting initial lagrangian multipliers for constraint formulation", end="\n")
+            print("Getting initial lagrangian multipliers for constraint formulation")
             self.model.adapter.device = self.device
             self.model.adapter.init_lagrangian_multipliers(self.labels_train, self.logits_zs)
             print("Lagrangian multipliers: ")
@@ -662,7 +902,29 @@ class ADAPTER(TrainerXCostume):
 
         if "lr" in list(params.keys()):
             self.cfg.OPTIM["LR"] = params["lr"]
-        self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)
+            
+        # Recreate optimizer considering GP parameters
+        if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
+            # Create a parameter list for both adapter and GP parameters
+            adapter_params = list(self.model.adapter.parameters())
+            gp_params = list(self.model.gp_weighter.parameters())
+            all_params = adapter_params + gp_params
+            
+            # Get weight decay if available
+            weight_decay = getattr(self.cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+            
+            # Create temporary optimizer with parameter groups
+            from torch.optim import SGD, Adam
+            if self.cfg.OPTIM.NAME.lower() == "sgd":
+                self.optim = SGD(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+            elif self.cfg.OPTIM.NAME.lower() == "adam":
+                self.optim = Adam(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+            else:
+                # Fallback to SGD
+                self.optim = SGD(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+        else:
+            self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)
+            
         self.sched = build_lr_scheduler(self.optim, self.cfg.OPTIM)
         self._models.popitem(), self._optims.popitem(),self._scheds.popitem()
         self.register_model("adapter" + str(random.random()), self.model.adapter, self.optim, self.sched)
@@ -681,11 +943,13 @@ class ADAPTER(TrainerXCostume):
         self.close_writer()
 
     def forward_backward(self, features, labels):
+        
         prec = self.cfg.TRAINER.ADAPTER.PREC
         if prec == "amp":
             with autocast():
                 # Cross-entropy loss
                 output = self.model.forward_features(torch.tensor(features).to(self.device))
+                
                 # Softmax cross-entropy
                 loss_ce = F.cross_entropy(output, labels)
                 # Constraint to zero-shot (CLAP)
@@ -790,7 +1054,7 @@ class ADAPTER(TrainerXCostume):
             self.model.float()
 
     def extract_features(self, partition, reps=1, transforms=False):
-        print("Extracting features from: " + partition, end="\n")
+        print("Extracting features from: " + partition)
         self.set_model_mode("eval")
 
         if partition == "train":

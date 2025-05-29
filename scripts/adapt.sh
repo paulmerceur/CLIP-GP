@@ -4,7 +4,7 @@
 DATA=/scratch/pmerceur/data
 TRAINER=ADAPTER
 
-DEVICE=$1
+SEEDS=$1
 DATASET=$2      # target dataset - i.e. {imagenet, caltech101, oxford_pets, stanford_cars, oxford_flowers, food101,
                 #                        fgvc_aircraft, sun397, dtd, eurosat, ucf101}
 CFG=$3          # config file - SGD_lr1e-1_B256_ep300
@@ -15,15 +15,14 @@ BACKBONE=$7     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
 NB_TEMPLATES=$8 # number of templates
 EXPERIMENT_NAME=${9:-"single_test"}  # experiment name for organizing outputs
 
-for SEED in 1 2 3 4 5
-do
-    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots_${NB_TEMPLATES}templates/seed${SEED}
+for ((seed=1; seed<=SEEDS; seed++)); do
+    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots_${NB_TEMPLATES}templates/seed${seed}
     if [ -d "$DIR" ]; then
         echo "Oops! The results exist at ${DIR} (so skip this job)"
     else
-        CUDA_VISIBLE_DEVICES=${DEVICE} python train.py \
+        python train.py \
         --root ${DATA} \
-        --seed ${SEED} \
+        --seed ${seed} \
         --trainer ${TRAINER} \
         --dataset-config-file configs/datasets/${DATASET}.yaml \
         --config-file configs/trainers/${CFG}.yaml \

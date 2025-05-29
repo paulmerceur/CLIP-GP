@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --array=1-100    # 10 datasets * 5 shots per config * 2 configs
+
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
 # ──────────────────────────
@@ -28,6 +29,7 @@ export PYTHONHASHSEED=0
 # ──────────────────────────
 # 1. Parameter space
 # ──────────────────────────
+seeds=5
 datasets=(caltech101 dtd eurosat fgvc_aircraft food101 oxford_flowers oxford_pets sun397 ucf101 stanford_cars)
 shots=(1 2 4 8 16)
 optim="SGD_lr1e-1_B256_ep300"
@@ -42,7 +44,7 @@ declare -a cfg
 for ds in "${datasets[@]}"; do
   for N in "${shots[@]}"; do
     for nt in "${nb_templates[@]}"; do
-      cfg+=("0 $ds $optim $N ZS none $backbone $nt")
+      cfg+=("$seeds $ds $optim $N ZS none $backbone $nt")
     done
   done
 done

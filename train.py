@@ -97,6 +97,13 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.ENHANCED_BASE = "none"  # none, enhanced (to use them you must download enhanced base from TaskRes).
     cfg.TRAINER.ADAPTER.PREC = "fp16"
     cfg.TRAINER.ADAPTER.NUM_TEMPLATES = 1
+    
+    # GP-specific configuration variables
+    cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
+    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # GP lengthscale parameter
+    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # GP output scale parameter
+    cfg.TRAINER.ADAPTER.GP_NOISE = 0.1  # GP noise parameter
+    cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
@@ -141,7 +148,7 @@ def main(args):
     if torch.cuda.is_available() and cfg.USE_CUDA:
         torch.backends.cudnn.benchmark = True
 
-    #print_args(args, cfg)
+    print_args(args, cfg)
     #print("Collecting env info ...")
     #print("** System info **\n{}\n".format(collect_env_info()))
 

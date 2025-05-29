@@ -70,6 +70,13 @@ def parse_config_from_filename(config_dir: str) -> Dict[str, str]:
     if template_match:
         config['nb_templates'] = int(template_match.group(1))
     
+    # Extract GP
+    gp_match = re.search(r'_GP', config_dir)
+    if gp_match:
+        config['gp'] = True
+    else:
+        config['gp'] = False
+    
     return config
 
 def parse_log_file(log_path: str) -> Optional[Dict[str, float]]:
@@ -177,8 +184,8 @@ def aggregate_results(results: List[Dict]) -> pd.DataFrame:
     df = pd.DataFrame(results)
     
     # Group by all config parameters and dataset, then average metrics
-    group_cols = ['experiment', 'dataset', 'num_shots', 'optimizer', 
-                  'learning_rate', 'batch_size', 'epochs', 'init_type', 'constraint', 'nb_templates']
+    group_cols = ['experiment', 'dataset', 'num_shots', 'optimizer', 'learning_rate', 
+                'batch_size', 'epochs', 'init_type', 'constraint', 'nb_templates', 'gp']
     
     # Only include columns that exist in the dataframe
     group_cols = [col for col in group_cols if col in df.columns]
@@ -200,7 +207,7 @@ def create_method_name(row: pd.Series) -> str:
     """
     Create a method name for plotting.
     
-    Format: {init_type}_{constraint}_{nb_templates}templates
+    Format: {init_type}_{constraint}_{nb_templates}templates_{gp}GP
     """
     parts = []
     
@@ -212,6 +219,9 @@ def create_method_name(row: pd.Series) -> str:
     
     if pd.notna(row.get('nb_templates')):
         parts.append(f"{row['nb_templates']}templates")
+    
+    if pd.notna(row.get('gp')) and row['gp'] == True:
+        parts.append("GP")
     
     return "_".join(parts)
 
@@ -238,7 +248,7 @@ def create_plots(df: pd.DataFrame, experiment_name: str, output_dir: Path):
             continue
         
         # Create subplots for different metrics
-        fig, axes = plt.subplots(1, 1, figsize=(15, 12))
+        fig, axes = plt.subplots(1, 1, figsize=(10, 8))
         fig.suptitle(dataset.upper(), fontsize=16, fontweight='bold')
         
         metrics_to_plot = [

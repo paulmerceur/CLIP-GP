@@ -2,26 +2,23 @@
 #SBATCH --job-name=clap_baselines
 #SBATCH --account=def-josedolz
 #SBATCH --time=00:30:00
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=16G
-#SBATCH --array=0-0%1
-#SBATCH --output=logs/single_test/%x_%j.out
+#SBATCH --gpus-per-node=v100l:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --output=logs/test_gp2/%x_%j.out
 # ──────────────────────────
 # 0. Parse arguments and environment set-up  
 # ──────────────────────────
 
-source "${PWD}/.venv/bin/activate"
+source .venv/bin/activate
 
-export TORCH_HOME="${PWD}/.cache"
-export PYTHONHASHSEED=0
-
-dataset="stanford_cars"
-optim="SGD_lr1e-1_B256_ep300"
-shot=1
+dataset="caltech101"
+optim="SGD_lr1e-1_B256_ep300_GP"
+shots=2
 init="ZS"
 constraint="none"
 backbone="RN50"
-nb_templates=1
+nb_templates="10"
+experiment_name="test_gp2"
 
-bash scripts/adapt.sh 0 "$dataset" "$optim" "$shot" "$init" "$constraint" "$backbone" "$nb_templates"
+bash scripts/adapt.sh 3 "$dataset" "$optim" "$shots" "$init" "$constraint" "$backbone" "$nb_templates" "$experiment_name"
