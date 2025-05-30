@@ -28,6 +28,20 @@ torch.backends.cudnn.allow_tf32 = True
 
 _tokenizer = _Tokenizer()
 
+
+def reset_gpu_state():
+    """Reset GPU state to avoid CUDA errors between runs."""
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Reset CUDA context if needed
+            torch.cuda.reset_peak_memory_stats()
+            print("GPU state reset successfully")
+    except Exception as e:
+        print(f"Warning: Could not reset GPU state: {e}")
+
+
 CUSTOM_TEMPLATES = {
     "OxfordPets": "a photo of a {}, a type of pet.",
     "OxfordFlowers": "a photo of a {}, a type of flower.",
@@ -48,34 +62,53 @@ CUSTOM_TEMPLATES = {
 
 
 class GPTemplateWeighting(nn.Module):
-    """Simple GP-based template weighting module."""
+    """
+    Learnable template weighting module that learns to weight templates based on their effectiveness.
     
-    def __init__(self, num_templates, lengthscale=1.0, outputscale=1.0, noise=0.1):
+    This simplified approach focuses on:
+    1. Direct learnable importance scores for each template
+    2. Adaptive temperature learning
+    3. Minimal but effective regularization
+    """
+    
+    def __init__(self, num_templates, embedding_dim=512, lengthscale=1.0, outputscale=1.0, noise=0.1):
         super().__init__()
         self.num_templates = num_templates
+        self.embedding_dim = embedding_dim
         
-        # GP hyperparameters as learnable parameters
-        self.log_lengthscale = nn.Parameter(torch.log(torch.tensor(lengthscale)))
-        self.log_outputscale = nn.Parameter(torch.log(torch.tensor(outputscale)))
-        self.log_noise = nn.Parameter(torch.log(torch.tensor(noise)))
+        # Main learnable parameters - template importance scores
+        # Initialize with slight bias towards custom template (last one)
+        importance_init = torch.zeros(num_templates)
+        if num_templates > 1:
+            importance_init[-1] = 0.5  # Slight preference for custom template
+        self.template_importance = nn.Parameter(importance_init)
         
-        # Template indices as input points
-        self.register_buffer('template_indices', torch.arange(num_templates, dtype=torch.float32))
+        # Learnable temperature - starts relatively high to allow learning
+        self.temperature = nn.Parameter(torch.tensor(3.0))
         
-    def rbf_kernel(self, x1, x2):
-        """RBF kernel function."""
-        lengthscale = torch.exp(self.log_lengthscale)
-        outputscale = torch.exp(self.log_outputscale)
+        # Simple quality predictor that learns from template embeddings
+        self.quality_predictor = nn.Sequential(
+            nn.Linear(embedding_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1), 
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, 1)
+        )
         
-        # Compute squared distances
-        dist_sq = (x1.unsqueeze(-1) - x2.unsqueeze(0)).pow(2)
+        # Initialize quality predictor with small weights
+        for module in self.quality_predictor.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, 0, 0.01)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
         
-        # RBF kernel
-        return outputscale * torch.exp(-0.5 * dist_sq / lengthscale.pow(2))
-    
+        self._step_count = 0
+        
     def forward(self, text_embeddings):
         """
-        Compute GP-based weights for template embeddings.
+        Apply learnable template weighting.
         
         Args:
             text_embeddings: [num_classes, num_templates, embedding_dim]
@@ -86,25 +119,55 @@ class GPTemplateWeighting(nn.Module):
         num_classes, num_templates, embedding_dim = text_embeddings.shape
         
         if num_templates == 1:
-            # If only one template, return as is
             return text_embeddings.squeeze(1)
         
-        # Compute kernel matrix
-        K = self.rbf_kernel(self.template_indices, self.template_indices)
+        device = text_embeddings.device
+        dtype = text_embeddings.dtype
         
-        # Add noise to diagonal
-        noise = torch.exp(self.log_noise)
-        K = K + noise * torch.eye(num_templates, device=K.device)
+        # Compute quality scores for each template
+        template_means = text_embeddings.mean(dim=0)  # [num_templates, embedding_dim]
+        quality_scores = self.quality_predictor(template_means.float()).squeeze(-1)  # [num_templates]
         
-        # Simple GP prediction: use uniform mean, compute weights based on kernel
-        # For simplicity, we use the kernel's softmax as weights
-        weights = F.softmax(K.mean(dim=0), dim=0)  # [num_templates]
+        # Combine importance and quality
+        combined_scores = self.template_importance + 0.5 * quality_scores
+        
+        # Apply temperature and compute weights
+        temperature = torch.clamp(self.temperature, min=0.5, max=5.0)
+        weights = F.softmax(combined_scores / temperature, dim=0)
+        
+        # Debug logging every 50 steps
+        self._step_count += 1
+        if self._step_count % 50 == 0:
+            print(f"GP Debug [Step {self._step_count}]:")
+            print(f"  Template importance: {self.template_importance.detach().cpu().numpy()}")
+            print(f"  Quality scores: {quality_scores.detach().cpu().numpy()}")
+            print(f"  Combined scores: {combined_scores.detach().cpu().numpy()}")
+            print(f"  Final weights: {weights.detach().cpu().numpy()}")
+            print(f"  Weight std: {weights.std().item():.4f}")
+            print(f"  Weight max: {weights.max().item():.4f}")
+            print(f"  Weight min: {weights.min().item():.4f}")
+            print(f"  Temperature: {temperature.item():.3f}")
         
         # Apply weights to embeddings
-        weights = weights.view(1, num_templates, 1)  # [1, num_templates, 1]
-        weighted_embeddings = (text_embeddings * weights).sum(dim=1)  # [num_classes, embedding_dim]
+        weights = weights.to(dtype).view(1, num_templates, 1)
+        weighted_embeddings = (text_embeddings * weights).sum(dim=1)
         
         return weighted_embeddings
+    
+    def get_gp_loss(self):
+        """
+        Compute regularization loss that encourages meaningful learning without over-regularizing.
+        """
+        # Encourage non-uniform weights (but not too aggressively)
+        weight_entropy_penalty = 0.001 * self.template_importance.var()
+        
+        # Light L2 regularization on quality predictor
+        quality_reg = 0.0001 * sum(p.pow(2).sum() for p in self.quality_predictor.parameters())
+        
+        # Keep temperature in reasonable range
+        temp_reg = 0.001 * torch.relu(self.temperature - 4.0).pow(2)
+        
+        return weight_entropy_penalty + quality_reg + temp_reg
 
 
 def load_clip_to_cpu(cfg):
@@ -150,9 +213,27 @@ class TextEncoder(nn.Module):
 
 def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretrained_projection=None):
     device = next(text_encoder.parameters()).device
+    
+    # Add robust CUDA handling
     if clip_model.dtype == torch.float16:
-        text_encoder = text_encoder.cuda()
-
+        try:
+            # Clear GPU cache first to avoid memory issues
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Check if we can safely move to CUDA
+            if device.type == 'cuda' or torch.cuda.is_available():
+                text_encoder = text_encoder.cuda()
+            else:
+                print("Warning: CUDA not available, using CPU for text encoder")
+                
+        except RuntimeError as e:
+            print(f"CUDA error when moving text encoder: {e}")
+            print("Falling back to CPU computation")
+            # Force CPU computation if CUDA fails
+            text_encoder = text_encoder.cpu()
+            
         if pretrained_projection is not None:
             # Load pretrained projection from TaskRes Work
             pretrained_text_projection = torch.load(pretrained_projection)
@@ -172,8 +253,11 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
     if dataset == "ImageNet":
         TEMPLATES = IMAGENET_TEMPLATES_SELECT
     elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-        # Randomly select NUM_TEMPLATES templates from IMAGENET_TEMPLATES
+        # Use deterministic template selection with fixed seed for consistency
+        rng_state = random.getstate()
+        random.seed(42)
         TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
+        random.setstate(rng_state)
     else:
         TEMPLATES = []
     TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
@@ -210,6 +294,7 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
         # Initialize GP weighting module on the same device as text embeddings
         gp_weighter = GPTemplateWeighting(
             num_templates=text_embeddings.shape[1],
+            embedding_dim=text_embeddings.shape[-1],
             lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
             outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
             noise=cfg.TRAINER.ADAPTER.GP_NOISE
@@ -384,11 +469,22 @@ class AdapterMethod(nn.Module):
 
     def update_base_features(self, new_base_features):
         """Update base text features for GP mode."""
+        # Update the base features reference (used for constraints, etc.)
         self.base_text_features = new_base_features
+        
+        # CRITICAL FIX: Do NOT update prototypes during training when GP is active!
+        # The prototypes should be allowed to learn independently from the base features.
+        # Only update prototypes at initialization or when not training.
         if hasattr(self, 'prototypes') and "ZS" in self.initialization:
-            # Update prototypes for ZS initialization when base features change
-            with torch.no_grad():
-                self.prototypes.data = new_base_features.clone()
+            # Only update prototypes if we're not in training mode or GP is not active
+            if not self.use_gp or not getattr(self, '_is_training', True):
+                if not self.use_gp:
+                    with torch.no_grad():
+                        self.prototypes.data = new_base_features.clone()
+                else:
+                    # Allow gradients to flow through when GP is active but not training
+                    self.prototypes.data = new_base_features.clone().detach()
+            # If GP is active and we're training, let prototypes learn independently!
 
 
 class CustomCLIP(nn.Module):
@@ -407,6 +503,21 @@ class CustomCLIP(nn.Module):
         
         text_encoder = TextEncoder(clip_model)
         self.text_encoder = text_encoder
+
+        # CRITICAL FIX: Store the templates used during initialization to reuse consistently
+        # Generate templates exactly as in _get_base_text_features
+        dataset = cfg.DATASET.NAME
+        if dataset == "ImageNet":
+            self.templates = IMAGENET_TEMPLATES_SELECT
+        elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+            # Use deterministic template selection with fixed seed for consistency
+            rng_state = random.getstate()
+            random.seed(42)
+            self.templates = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
+            random.setstate(rng_state)
+        else:
+            self.templates = []
+        self.templates += [CUSTOM_TEMPLATES[dataset]]
 
         # For TaskRes (Yu et al.) enhanced base - or regular CLIP base
         if cfg.TRAINER.ADAPTER.ENHANCED_BASE == "none":
@@ -434,37 +545,41 @@ class CustomCLIP(nn.Module):
             hasattr(self, '_in_training_epoch') and 
             self._in_training_epoch):
             
-            # FIX 2: Recreate text embeddings with gradients during training
-            # Get the text encoder and templates - follow exact same setup as _get_base_text_features
+            # Set training flag for adapter
+            self.adapter._is_training = True
+            
+            # CRITICAL FIX: Use the stored templates instead of regenerating random ones
             text_encoder = self.text_encoder
             classnames = self.classnames
-            cfg = self.cfg
+            TEMPLATES = self.templates  # Use the consistent templates stored during initialization
             
             # Handle text_encoder device and dtype properly
             if self.dtype == torch.float16:
-                text_encoder = text_encoder.cuda()
+                try:
+                    # Clear GPU cache and check CUDA availability
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        text_encoder = text_encoder.cuda()
+                    else:
+                        print("Warning: CUDA not available during forward pass")
+                except RuntimeError as e:
+                    print(f"CUDA error in forward pass: {e}")
+                    print("Continuing with current device")
             
             # FIX: Update text_encoder.dtype to match actual parameter dtype after model conversion
             text_encoder.dtype = next(text_encoder.parameters()).dtype
             
-            # Recreate embeddings with gradients (similar to _get_base_text_features)
-            dataset = cfg.DATASET.NAME
-            if dataset == "ImageNet":
-                TEMPLATES = IMAGENET_TEMPLATES_SELECT
-            elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-                TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
-            else:
-                TEMPLATES = []
-            
-            TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
-            
-            # Create text embeddings WITH gradients - follow exact same pattern as _get_base_text_features
+            # Create text embeddings WITH gradients using the SAME templates as baseline
             text_embeddings = []
             for text in classnames:
                 tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
                 
-                # Move tokens to the same device as token_embedding
-                tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                # Move tokens to the same device as token_embedding safely
+                try:
+                    tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                except RuntimeError as e:
+                    print(f"Warning: Could not move tokens to device: {e}")
+                    tokens = tokens.cuda() if torch.cuda.is_available() else tokens
                 
                 # Use the actual dtype of the token_embedding instead of stored self.dtype for consistency
                 embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
@@ -472,17 +587,22 @@ class CustomCLIP(nn.Module):
                 # Convert embeddings to the actual dtype of text_encoder to avoid dtype mismatch
                 embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
                 
-                prototype = text_encoder(embeddings.cuda(), tokens.cuda())  # move to GPU for text encoder
+                try:
+                    prototype = text_encoder(embeddings.cuda(), tokens.cuda())  # move to GPU for text encoder
+                except RuntimeError as e:
+                    print(f"Warning: CUDA error in text encoding: {e}")
+                    prototype = text_encoder(embeddings, tokens)  # fallback to current device
                 text_embeddings.append(prototype)
             
             text_embeddings = torch.stack(text_embeddings)
             
-            # Apply GP weighting to fresh embeddings
+            # Apply GP weighting to fresh embeddings with consistent templates
             updated_base_features = self.gp_weighter(text_embeddings)
             self.adapter.update_base_features(updated_base_features)
-        elif self.gp_weighter is not None:
-            # During feature extraction or eval, don't update base features, just use the current state
-            pass
+        else:
+            # Not in training mode with GP
+            if hasattr(self.adapter, '_is_training'):
+                self.adapter._is_training = False
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(image_features)
@@ -507,44 +627,59 @@ class CustomCLIP(nn.Module):
             hasattr(self, '_in_training_epoch') and 
             self._in_training_epoch):
             
-            # Recreate text embeddings with gradients during training
+            # Set training flag for adapter
+            self.adapter._is_training = True
+            
+            # CRITICAL FIX: Use the stored templates instead of regenerating random ones
             text_encoder = self.text_encoder
             classnames = self.classnames
-            cfg = self.cfg
+            TEMPLATES = self.templates  # Use the consistent templates stored during initialization
             
             # Handle text_encoder device and dtype properly
             if self.dtype == torch.float16:
-                text_encoder = text_encoder.cuda()
+                try:
+                    # Clear GPU cache and check CUDA availability
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        text_encoder = text_encoder.cuda()
+                    else:
+                        print("Warning: CUDA not available during forward pass")
+                except RuntimeError as e:
+                    print(f"CUDA error in forward pass: {e}")
+                    print("Continuing with current device")
             
-            # Update text_encoder.dtype to match actual parameter dtype after model conversion
+            # FIX: Update text_encoder.dtype to match actual parameter dtype after model conversion
             text_encoder.dtype = next(text_encoder.parameters()).dtype
             
-            # Recreate embeddings with gradients (similar to _get_base_text_features)
-            dataset = cfg.DATASET.NAME
-            if dataset == "ImageNet":
-                TEMPLATES = IMAGENET_TEMPLATES_SELECT
-            elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-                TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
-            else:
-                TEMPLATES = []
-            
-            TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
-            
-            # Create text embeddings WITH gradients
+            # Create text embeddings WITH gradients using the SAME templates as baseline
             text_embeddings = []
             for text in classnames:
                 tokens = clip.tokenize([template.format(text) for template in TEMPLATES])
-                tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                try:
+                    tokens = tokens.to(next(self.token_embedding.parameters()).device)
+                except RuntimeError as e:
+                    print(f"Warning: Could not move tokens to device: {e}")
+                    tokens = tokens.cuda() if torch.cuda.is_available() else tokens
+                    
                 embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
                 embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
-                prototype = text_encoder(embeddings.cuda(), tokens.cuda())
+                
+                try:
+                    prototype = text_encoder(embeddings.cuda(), tokens.cuda())
+                except RuntimeError as e:
+                    print(f"Warning: CUDA error in text encoding: {e}")
+                    prototype = text_encoder(embeddings, tokens)
                 text_embeddings.append(prototype)
             
             text_embeddings = torch.stack(text_embeddings)
             
-            # Apply GP weighting to fresh embeddings
+            # Apply GP weighting to fresh embeddings with consistent templates
             updated_base_features = self.gp_weighter(text_embeddings)
             self.adapter.update_base_features(updated_base_features)
+        else:
+            # Not in training mode with GP
+            if hasattr(self.adapter, '_is_training'):
+                self.adapter._is_training = False
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(features)
@@ -721,6 +856,9 @@ class ADAPTER(TrainerXCostume):
         cfg = self.cfg
         classnames = self.dm.dataset.classnames
 
+        # Reset GPU state to avoid CUDA errors
+        reset_gpu_state()
+
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
 
@@ -744,23 +882,29 @@ class ADAPTER(TrainerXCostume):
         
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Create a parameter list for both adapter and GP parameters
+            # Create parameter groups with different learning rates
             adapter_params = list(self.model.adapter.parameters())
             gp_params = list(self.model.gp_weighter.parameters())
-            all_params = adapter_params + gp_params
             
             # Get weight decay if available
             weight_decay = getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+            gp_lr = getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR)
             
-            # Create temporary optimizer with parameter groups
+            # Create parameter groups
+            param_groups = [
+                {'params': adapter_params, 'lr': cfg.OPTIM.LR, 'weight_decay': weight_decay},
+                {'params': gp_params, 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+            ]
+            
+            # Create optimizer with parameter groups
             from torch.optim import SGD, Adam
             if cfg.OPTIM.NAME.lower() == "sgd":
-                self.optim = SGD(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = SGD(param_groups, momentum=getattr(cfg.OPTIM, 'MOMENTUM', 0.9))
             elif cfg.OPTIM.NAME.lower() == "adam":
-                self.optim = Adam(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = Adam(param_groups)
             else:
                 # Fallback to SGD
-                self.optim = SGD(all_params, lr=cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = SGD(param_groups, momentum=getattr(cfg.OPTIM, 'MOMENTUM', 0.9))
         else:
             self.optim = build_optimizer(self.model.adapter, cfg.OPTIM)
             
@@ -905,23 +1049,29 @@ class ADAPTER(TrainerXCostume):
             
         # Recreate optimizer considering GP parameters
         if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Create a parameter list for both adapter and GP parameters
+            # Create parameter groups with different learning rates
             adapter_params = list(self.model.adapter.parameters())
             gp_params = list(self.model.gp_weighter.parameters())
-            all_params = adapter_params + gp_params
             
             # Get weight decay if available
             weight_decay = getattr(self.cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+            gp_lr = getattr(self.cfg.TRAINER.ADAPTER, 'GP_LR', self.cfg.OPTIM.LR)
             
-            # Create temporary optimizer with parameter groups
+            # Create parameter groups
+            param_groups = [
+                {'params': adapter_params, 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
+                {'params': gp_params, 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+            ]
+            
+            # Create optimizer with parameter groups
             from torch.optim import SGD, Adam
             if self.cfg.OPTIM.NAME.lower() == "sgd":
-                self.optim = SGD(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, 'MOMENTUM', 0.9))
             elif self.cfg.OPTIM.NAME.lower() == "adam":
-                self.optim = Adam(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = Adam(param_groups)
             else:
                 # Fallback to SGD
-                self.optim = SGD(all_params, lr=self.cfg.OPTIM.LR, weight_decay=weight_decay)
+                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, 'MOMENTUM', 0.9))
         else:
             self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)
             
@@ -952,12 +1102,19 @@ class ADAPTER(TrainerXCostume):
                 
                 # Softmax cross-entropy
                 loss_ce = F.cross_entropy(output, labels)
+                
                 # Constraint to zero-shot (CLAP)
                 if self.model.adapter.apply_constraint != "none":
                     loss_constraint = self.model.adapter.zero_shot_constraint()
                     loss = loss_ce + loss_constraint
                 else:
                     loss = loss_ce
+                
+                # GP regularization loss
+                if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
+                    gp_reg_loss = self.model.gp_weighter.get_gp_loss()
+                    loss = loss + gp_reg_loss
+                    
             self.optim.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optim)
@@ -965,14 +1122,21 @@ class ADAPTER(TrainerXCostume):
         else:
             # Cross-entropy loss
             output = self.model.forward_features(torch.tensor(features).to(self.device))
+            
             # Softmax cross-entropy
             loss_ce = F.cross_entropy(output, labels)
+            
             # Constraint to zero-shot (CLAP)
             if self.model.adapter.apply_constraint != "none":
                 loss_constraint = self.model.adapter.zero_shot_constraint()
                 loss = loss_ce + loss_constraint
             else:
                 loss = loss_ce
+            
+            # GP regularization loss
+            if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
+                gp_reg_loss = self.model.gp_weighter.get_gp_loss()
+                loss = loss + gp_reg_loss
 
             self.model_backward_and_update(loss)
 
