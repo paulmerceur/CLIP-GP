@@ -100,10 +100,25 @@ def extend_cfg(cfg):
     
     # GP-specific configuration variables
     cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
-    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # GP lengthscale parameter
-    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # GP output scale parameter
-    cfg.TRAINER.ADAPTER.GP_NOISE = 0.1  # GP noise parameter
     cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
+    cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
+    
+    # GP Prior Parameters
+    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
+    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # kernel lengthscale parameter
+    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # kernel output scale parameter
+    cfg.TRAINER.ADAPTER.GP_NOISE_VAR = 1e-4  # noise variance for numerical stability
+    
+    # Variational Inference Parameters
+    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
+    cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
+    
+    # Legacy parameters (kept for backward compatibility)
+    cfg.TRAINER.ADAPTER.GP_INIT_STD = 1e-2  # initialization std for template weights
+    cfg.TRAINER.ADAPTER.GP_QUALITY_SCALE = 2.0  # scaling factor for quality scores
+    cfg.TRAINER.ADAPTER.GP_TEMP_INIT = 1.5  # initial temperature value
+    cfg.TRAINER.ADAPTER.GP_REG_SCALE = 1.0  # regularization scaling factor
+    cfg.TRAINER.ADAPTER.GP_UPDATE_FREQ = 10  # Update GP weights every 10 batches
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1

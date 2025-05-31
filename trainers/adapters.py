@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 import numpy as np
+import math
 
 from dassl.engine import TRAINER_REGISTRY, SimpleTrainer
 from dassl.metrics import compute_accuracy
@@ -61,114 +62,285 @@ CUSTOM_TEMPLATES = {
 }
 
 
-class GPTemplateWeighting(nn.Module):
-    """
-    Learnable template weighting module that learns to weight templates based on their effectiveness.
+class GaussianProcessTemplateWeighter(nn.Module):
+    """Gaussian Process Template Weighter with Variational Inference.
     
-    This simplified approach focuses on:
-    1. Direct learnable importance scores for each template
-    2. Adaptive temperature learning
-    3. Minimal but effective regularization
+    Implements the GP framework from the specifications:
+    - GP prior on weight vectors α_k ∈ ℝ^M for each class k
+    - Variational approximation q(α_k) = N(μ_k, Σ_k)
+    - ELBO objective with Monte Carlo sampling
+    - Kernel-based covariance matrices
     """
-    
-    def __init__(self, num_templates, embedding_dim=512, lengthscale=1.0, outputscale=1.0, noise=0.1):
+
+    def __init__(
+        self,
+        num_classes: int,
+        num_templates: int,
+        embedding_dim: int = 512,
+        kernel_type: str = "rbf",
+        lengthscale: float = 1.0,
+        outputscale: float = 1.0,
+        noise_var: float = 1e-4,
+        num_mc_samples: int = 5,
+        use_diagonal_cov: bool = True,
+    ):
         super().__init__()
-        self.num_templates = num_templates
-        self.embedding_dim = embedding_dim
+        self.K = num_classes  # K classes
+        self.M = num_templates  # M templates  
+        self.D = embedding_dim
+        self.kernel_type = kernel_type
+        self.num_mc_samples = num_mc_samples
+        self.use_diagonal_cov = use_diagonal_cov
         
-        # Main learnable parameters - template importance scores
-        # Initialize with slight bias towards custom template (last one)
-        importance_init = torch.zeros(num_templates)
-        if num_templates > 1:
-            importance_init[-1] = 0.5  # Slight preference for custom template
-        self.template_importance = nn.Parameter(importance_init)
+        # GP prior parameters (fixed)
+        self.register_buffer("lengthscale", torch.tensor(lengthscale))
+        self.register_buffer("outputscale", torch.tensor(outputscale))
+        self.register_buffer("noise_var", torch.tensor(noise_var))
         
-        # Learnable temperature - starts relatively high to allow learning
-        self.temperature = nn.Parameter(torch.tensor(3.0))
+        # Prior mean (zero mean function)
+        self.register_buffer("prior_mean", torch.zeros(num_templates))
         
-        # Simple quality predictor that learns from template embeddings
-        self.quality_predictor = nn.Sequential(
-            nn.Linear(embedding_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1), 
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, 1)
+        # Variational parameters for q(α_k) = N(μ_k, Σ_k)
+        # μ_k ∈ ℝ^M for each class k
+        self.variational_mean = nn.Parameter(
+            torch.randn(num_classes, num_templates) * 0.01
         )
         
-        # Initialize quality predictor with small weights
-        for module in self.quality_predictor.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, 0, 0.01)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
+        if use_diagonal_cov:
+            # Diagonal covariance: log(σ²_k) for numerical stability
+            self.variational_logvar = nn.Parameter(
+                torch.full((num_classes, num_templates), -2.0)  # σ² ≈ 0.135
+            )
+        else:
+            # Full covariance (lower triangular L such that Σ = LL^T)
+            self.variational_chol = nn.Parameter(
+                torch.eye(num_templates).unsqueeze(0).repeat(num_classes, 1, 1) * 0.1
+            )
         
-        self._step_count = 0
-        
-    def forward(self, text_embeddings):
-        """
-        Apply learnable template weighting.
+    def _compute_prior_covariance(self, text_embeddings):
+        """Compute GP prior covariance K_k based on text embeddings.
         
         Args:
-            text_embeddings: [num_classes, num_templates, embedding_dim]
+            text_embeddings: [K, M, D] - text features for computing kernel
             
         Returns:
-            weighted_embeddings: [num_classes, embedding_dim]
+            prior_cov: [K, M, M] - prior covariance matrices for each class
         """
-        num_classes, num_templates, embedding_dim = text_embeddings.shape
+        K, M, D = text_embeddings.shape
         
-        if num_templates == 1:
-            return text_embeddings.squeeze(1)
-        
-        device = text_embeddings.device
-        dtype = text_embeddings.dtype
-        
-        # Compute quality scores for each template
-        template_means = text_embeddings.mean(dim=0)  # [num_templates, embedding_dim]
-        quality_scores = self.quality_predictor(template_means.float()).squeeze(-1)  # [num_templates]
-        
-        # Combine importance and quality
-        combined_scores = self.template_importance + 0.5 * quality_scores
-        
-        # Apply temperature and compute weights
-        temperature = torch.clamp(self.temperature, min=0.5, max=5.0)
-        weights = F.softmax(combined_scores / temperature, dim=0)
-        
-        # Debug logging every 50 steps
-        self._step_count += 1
-        if self._step_count % 50 == 0:
-            print(f"GP Debug [Step {self._step_count}]:")
-            print(f"  Template importance: {self.template_importance.detach().cpu().numpy()}")
-            print(f"  Quality scores: {quality_scores.detach().cpu().numpy()}")
-            print(f"  Combined scores: {combined_scores.detach().cpu().numpy()}")
-            print(f"  Final weights: {weights.detach().cpu().numpy()}")
-            print(f"  Weight std: {weights.std().item():.4f}")
-            print(f"  Weight max: {weights.max().item():.4f}")
-            print(f"  Weight min: {weights.min().item():.4f}")
-            print(f"  Temperature: {temperature.item():.3f}")
-        
-        # Apply weights to embeddings
-        weights = weights.to(dtype).view(1, num_templates, 1)
-        weighted_embeddings = (text_embeddings * weights).sum(dim=1)
-        
-        return weighted_embeddings
+        if self.kernel_type == "rbf":
+            # RBF kernel: k(f_i, f_j) = σ² * exp(-||f_i - f_j||² / (2 * l²))
+            prior_cov = []
+            for k in range(K):
+                # Get embeddings for class k: [M, D]
+                f_k = text_embeddings[k]  # [M, D]
+                
+                # Compute pairwise distances
+                f_k_norm = f_k.norm(dim=1, keepdim=True)  # [M, 1]
+                distances_sq = f_k_norm.pow(2) + f_k_norm.pow(2).t() - 2 * f_k @ f_k.t()
+                distances_sq = torch.clamp(distances_sq, min=0.0)  # Numerical stability
+                
+                # RBF kernel
+                K_k = self.outputscale * torch.exp(-distances_sq / (2 * self.lengthscale.pow(2)))
+                
+                # Add noise for numerical stability
+                K_k = K_k + self.noise_var * torch.eye(M, device=K_k.device, dtype=K_k.dtype)
+                
+                prior_cov.append(K_k)
+                
+            return torch.stack(prior_cov)  # [K, M, M]
+            
+        elif self.kernel_type == "linear":
+            # Linear kernel: k(f_i, f_j) = σ² * f_i^T f_j
+            prior_cov = []
+            for k in range(K):
+                f_k = text_embeddings[k]  # [M, D]
+                K_k = self.outputscale * (f_k @ f_k.t())
+                K_k = K_k + self.noise_var * torch.eye(M, device=K_k.device, dtype=K_k.dtype)
+                prior_cov.append(K_k)
+            return torch.stack(prior_cov)  # [K, M, M]
+            
+        else:
+            raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
     
-    def get_gp_loss(self):
+    def _sample_alpha(self, batch_size=None):
+        """Sample α_k from variational distribution q(α_k) = N(μ_k, Σ_k).
+        
+        Args:
+            batch_size: If None, return [K, M]. If int, return [batch_size, K, M]
+            
+        Returns:
+            alpha_samples: Sampled weight vectors
         """
-        Compute regularization loss that encourages meaningful learning without over-regularizing.
+        if batch_size is None:
+            batch_size = 1
+            squeeze = True
+        else:
+            squeeze = False
+            
+        if self.use_diagonal_cov:
+            # Diagonal covariance case
+            std = torch.exp(0.5 * self.variational_logvar)  # [K, M]
+            eps = torch.randn(batch_size, self.K, self.M, device=std.device, dtype=std.dtype)
+            alpha_samples = self.variational_mean.unsqueeze(0) + eps * std.unsqueeze(0)
+        else:
+            # Full covariance case
+            eps = torch.randn(batch_size, self.K, self.M, device=self.variational_mean.device, dtype=self.variational_mean.dtype)
+            # Use lower triangular matrix to ensure positive definite covariance
+            L = torch.tril(self.variational_chol)  # [K, M, M]
+            alpha_samples = self.variational_mean.unsqueeze(0) + torch.bmm(
+                L.unsqueeze(0).expand(batch_size, -1, -1, -1).contiguous().view(-1, self.M, self.M),
+                eps.view(-1, self.M, 1)
+            ).view(batch_size, self.K, self.M)
+            
+        if squeeze:
+            alpha_samples = alpha_samples.squeeze(0)  # [K, M]
+            
+        return alpha_samples
+    
+    def _compute_kl_divergence(self, text_embeddings):
+        """Compute KL divergence KL(q(α_k) || p(α_k)) for all classes.
+        
+        Args:
+            text_embeddings: [K, M, D] - used to compute prior covariance
+            
+        Returns:
+            kl_div: Scalar KL divergence summed over all classes
         """
-        # Encourage non-uniform weights (but not too aggressively)
-        weight_entropy_penalty = 0.001 * self.template_importance.var()
+        # Compute prior covariance matrices
+        prior_cov = self._compute_prior_covariance(text_embeddings)  # [K, M, M]
         
-        # Light L2 regularization on quality predictor
-        quality_reg = 0.0001 * sum(p.pow(2).sum() for p in self.quality_predictor.parameters())
+        total_kl = 0.0
         
-        # Keep temperature in reasonable range
-        temp_reg = 0.001 * torch.relu(self.temperature - 4.0).pow(2)
+        for k in range(self.K):
+            # Prior: N(0, K_k)
+            prior_mean_k = self.prior_mean  # [M]
+            prior_cov_k = prior_cov[k]  # [M, M]
+            
+            # Variational: N(μ_k, Σ_k)
+            var_mean_k = self.variational_mean[k]  # [M]
+            
+            if self.use_diagonal_cov:
+                var_cov_k = torch.diag(torch.exp(self.variational_logvar[k]))  # [M, M]
+            else:
+                L_k = torch.tril(self.variational_chol[k])  # [M, M]
+                var_cov_k = L_k @ L_k.t()  # [M, M]
+            
+            # KL divergence between two multivariate Gaussians
+            # KL(q||p) = 0.5 * [tr(Σ_p^-1 Σ_q) + (μ_p - μ_q)^T Σ_p^-1 (μ_p - μ_q) - k + log(det(Σ_p)/det(Σ_q))]
+            
+            try:
+                # Cholesky decomposition for numerical stability
+                L_prior = torch.linalg.cholesky(prior_cov_k)  # Lower triangular
+                
+                # Solve triangular systems
+                mean_diff = var_mean_k - prior_mean_k  # [M]
+                
+                # Compute terms efficiently using Cholesky
+                # tr(Σ_p^-1 Σ_q) = ||L_p^-1 L_q||_F^2 where Σ_q = L_q L_q^T
+                if self.use_diagonal_cov:
+                    var_std = torch.exp(0.5 * self.variational_logvar[k])  # [M]
+                    # For diagonal case, solve directly without matrix operations
+                    solved_std = torch.linalg.solve_triangular(L_prior, var_std.unsqueeze(-1), upper=False).squeeze(-1)
+                    trace_term = (solved_std ** 2).sum()
+                    logdet_var = 2 * torch.sum(torch.log(var_std))
+                else:
+                    L_var = torch.tril(self.variational_chol[k])
+                    solved_var = torch.linalg.solve_triangular(L_prior, L_var, upper=False)
+                    trace_term = (solved_var ** 2).sum()
+                    logdet_var = 2 * torch.sum(torch.log(torch.diag(L_var)))
+                
+                # Mean term: (μ_p - μ_q)^T Σ_p^-1 (μ_p - μ_q)
+                solved_mean = torch.linalg.solve_triangular(L_prior, mean_diff.unsqueeze(-1), upper=False).squeeze(-1)
+                mean_term = (solved_mean ** 2).sum()
+                
+                # Log determinant terms
+                logdet_prior = 2 * torch.sum(torch.log(torch.diag(L_prior)))
+                
+                # KL divergence
+                kl_k = 0.5 * (trace_term + mean_term - self.M + logdet_prior - logdet_var)
+                total_kl = total_kl + kl_k
+                
+            except Exception as e:
+                # Fallback: add small regularization if Cholesky fails
+                print(f"Warning: Cholesky failed for class {k}, using regularized computation: {e}")
+                reg_prior_cov = prior_cov_k + 1e-3 * torch.eye(self.M, device=prior_cov_k.device, dtype=prior_cov_k.dtype)
+                
+                try:
+                    L_prior = torch.linalg.cholesky(reg_prior_cov)
+                    
+                    mean_diff = var_mean_k - prior_mean_k
+                    
+                    if self.use_diagonal_cov:
+                        var_std = torch.exp(0.5 * self.variational_logvar[k])
+                        solved_std = torch.linalg.solve_triangular(L_prior, var_std.unsqueeze(-1), upper=False).squeeze(-1)
+                        trace_term = (solved_std ** 2).sum()
+                        logdet_var = 2 * torch.sum(torch.log(var_std))
+                    else:
+                        L_var = torch.tril(self.variational_chol[k])
+                        solved_var = torch.linalg.solve_triangular(L_prior, L_var, upper=False)
+                        trace_term = (solved_var ** 2).sum()
+                        logdet_var = 2 * torch.sum(torch.log(torch.diag(L_var)))
+                    
+                    solved_mean = torch.linalg.solve_triangular(L_prior, mean_diff.unsqueeze(-1), upper=False).squeeze(-1)
+                    mean_term = (solved_mean ** 2).sum()
+                    
+                    logdet_prior = 2 * torch.sum(torch.log(torch.diag(L_prior)))
+                    
+                    kl_k = 0.5 * (trace_term + mean_term - self.M + logdet_prior - logdet_var)
+                    total_kl = total_kl + kl_k
+                    
+                except Exception as e2:
+                    print(f"Warning: Even regularized Cholesky failed for class {k}: {e2}")
+                    # Use simple L2 regularization as fallback
+                    kl_k = 0.01 * (var_mean_k ** 2).sum()
+                    if not self.use_diagonal_cov:
+                        kl_k = kl_k + 0.01 * (self.variational_chol[k] ** 2).sum()
+                    else:
+                        kl_k = kl_k + 0.01 * (self.variational_logvar[k] ** 2).sum()
+                    total_kl = total_kl + kl_k
         
-        return weight_entropy_penalty + quality_reg + temp_reg
-
+        return total_kl
+    
+    def forward(self, text_embeddings, return_kl=True):
+        """Apply GP-weighted template combination.
+        
+        Args:
+            text_embeddings: [K, M, D] - text embeddings for all classes and templates
+            return_kl: Whether to return KL divergence for ELBO loss
+            
+        Returns:
+            weighted_embeddings: [K, D] - weighted text prototypes
+            kl_divergence: Scalar KL divergence (if return_kl=True)
+        """
+        orig_dtype = text_embeddings.dtype
+        text_embeddings = text_embeddings.float()  # Use fp32 for numerical stability
+        
+        K, M, D = text_embeddings.shape
+        assert K == self.K and M == self.M
+        
+        # Sample α_k from variational distribution (Monte Carlo sampling)
+        alpha_samples = self._sample_alpha(batch_size=self.num_mc_samples)  # [num_mc_samples, K, M]
+        
+        # Apply softmax to get normalized weights for each sample
+        weights = F.softmax(alpha_samples, dim=-1)  # [num_mc_samples, K, M]
+        
+        # Compute weighted embeddings for each MC sample
+        # weights: [num_mc_samples, K, M, 1], text_embeddings: [1, K, M, D]
+        weighted_samples = []
+        for s in range(self.num_mc_samples):
+            weighted_s = (text_embeddings * weights[s].unsqueeze(-1)).sum(dim=1)  # [K, D]
+            weighted_samples.append(weighted_s)
+        
+        # Average over MC samples
+        weighted_embeddings = torch.stack(weighted_samples).mean(dim=0)  # [K, D]
+        
+        # Compute KL divergence for ELBO loss
+        if return_kl:
+            kl_divergence = self._compute_kl_divergence(text_embeddings)
+            return weighted_embeddings.to(orig_dtype), kl_divergence
+        else:
+            return weighted_embeddings.to(orig_dtype)
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -292,21 +464,25 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretraine
     # Choose between GP weighting and simple averaging
     if cfg.TRAINER.ADAPTER.USE_GP and text_embeddings.shape[1] > 1:
         # Initialize GP weighting module on the same device as text embeddings
-        gp_weighter = GPTemplateWeighting(
+        gp_weighter = GaussianProcessTemplateWeighter(
+            num_classes=text_embeddings.shape[0],
             num_templates=text_embeddings.shape[1],
             embedding_dim=text_embeddings.shape[-1],
+            kernel_type=cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE,
             lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
             outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
-            noise=cfg.TRAINER.ADAPTER.GP_NOISE
+            noise_var=cfg.TRAINER.ADAPTER.GP_NOISE_VAR,
+            num_mc_samples=cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES,
+            use_diagonal_cov=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
         ).to(actual_device)
         
         # Apply GP weighting
-        text_embeddings_avg = gp_weighter(text_embeddings)
+        text_embeddings_avg, kl_divergence = gp_weighter(text_embeddings)
         
-        return text_embeddings_avg, text_embeddings, gp_weighter
+        return text_embeddings_avg, text_embeddings, gp_weighter, kl_divergence
     else:
         text_embeddings_avg = text_embeddings.mean(1)
-        return text_embeddings_avg, text_embeddings, None
+        return text_embeddings_avg, text_embeddings, None, None
 
 
 class AdapterMethod(nn.Module):
@@ -522,15 +698,18 @@ class CustomCLIP(nn.Module):
         # For TaskRes (Yu et al.) enhanced base - or regular CLIP base
         if cfg.TRAINER.ADAPTER.ENHANCED_BASE == "none":
             print(">> Use regular base!")
-            base_text_features, text_embeddings_all, gp_weighter = _get_base_text_features(cfg, classnames, clip_model, text_encoder)
+            base_text_features, text_embeddings_all, gp_weighter, kl_divergence = _get_base_text_features(cfg, classnames, clip_model, text_encoder)
         else:
             print(">> Use enhanced base!")
-            base_text_features, text_embeddings_all, gp_weighter = _get_base_text_features(
+            base_text_features, text_embeddings_all, gp_weighter, kl_divergence = _get_base_text_features(
                 cfg, classnames, clip_model, text_encoder, cfg.TRAINER.TaskRes.ENHANCED_BASE)
 
         self.text_embeddings_all = text_embeddings_all
         self.gp_weighter = gp_weighter  # Store GP weighter for training
         self.adapter = AdapterMethod(cfg, clip_model, base_text_features)
+        
+        # Store latest KL divergence for ELBO loss computation
+        self.latest_kl_divergence = None
 
     def forward(self, image, return_features=False):
         try:
@@ -540,8 +719,8 @@ class CustomCLIP(nn.Module):
 
         # Update base features if using GP and in training mode
         # Only update during actual training epochs, not during feature extraction
+        # Note: Don't check self.training since model is set to eval mode during training epochs
         if (self.gp_weighter is not None and 
-            self.training and 
             hasattr(self, '_in_training_epoch') and 
             self._in_training_epoch):
             
@@ -597,12 +776,17 @@ class CustomCLIP(nn.Module):
             text_embeddings = torch.stack(text_embeddings)
             
             # Apply GP weighting to fresh embeddings with consistent templates
-            updated_base_features = self.gp_weighter(text_embeddings)
+            updated_base_features, kl_divergence = self.gp_weighter(text_embeddings)
             self.adapter.update_base_features(updated_base_features)
+            
+            # Store KL divergence for ELBO loss computation
+            self.latest_kl_divergence = kl_divergence
         else:
             # Not in training mode with GP
             if hasattr(self.adapter, '_is_training'):
                 self.adapter._is_training = False
+            # Reset KL divergence when not using GP
+            self.latest_kl_divergence = None
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(image_features)
@@ -620,10 +804,10 @@ class CustomCLIP(nn.Module):
 
     def forward_features(self, features):
         
-        # Update base features if using GP and in training mode
-        # Only update during actual training epochs, not during feature extraction
+        # Apply GP weighting during training if enabled
+        # This ensures GP learning happens even when using pre-extracted image features
+        # Note: Don't check self.training since model is set to eval mode during training epochs
         if (self.gp_weighter is not None and 
-            self.training and 
             hasattr(self, '_in_training_epoch') and 
             self._in_training_epoch):
             
@@ -674,12 +858,17 @@ class CustomCLIP(nn.Module):
             text_embeddings = torch.stack(text_embeddings)
             
             # Apply GP weighting to fresh embeddings with consistent templates
-            updated_base_features = self.gp_weighter(text_embeddings)
+            updated_base_features, kl_divergence = self.gp_weighter(text_embeddings)
             self.adapter.update_base_features(updated_base_features)
+            
+            # Store KL divergence for ELBO loss computation
+            self.latest_kl_divergence = kl_divergence
         else:
             # Not in training mode with GP
             if hasattr(self.adapter, '_is_training'):
                 self.adapter._is_training = False
+            # Reset KL divergence when not using GP
+            self.latest_kl_divergence = None
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(features)
@@ -873,6 +1062,10 @@ class ADAPTER(TrainerXCostume):
         for name, param in self.model.named_parameters():
             if "adapter" not in name and "gp_weighter" not in name:
                 param.requires_grad_(False)
+            else:
+                # Ensure adapter and GP parameters require gradients
+                param.requires_grad_(True)
+                print(f"  Parameter {name} requires_grad: {param.requires_grad}")
 
         if cfg.MODEL.INIT_WEIGHTS:
             load_pretrained_weights(self.model.adapter, cfg.MODEL.INIT_WEIGHTS)
@@ -1097,7 +1290,7 @@ class ADAPTER(TrainerXCostume):
         prec = self.cfg.TRAINER.ADAPTER.PREC
         if prec == "amp":
             with autocast():
-                # Cross-entropy loss
+                # Cross-entropy loss (likelihood term in ELBO)
                 output = self.model.forward_features(torch.tensor(features).to(self.device))
                 
                 # Softmax cross-entropy
@@ -1110,17 +1303,18 @@ class ADAPTER(TrainerXCostume):
                 else:
                     loss = loss_ce
                 
-                # GP regularization loss
+                # ELBO loss: -E[log p(y|α)] + β * KL(q(α)||p(α))
                 if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-                    gp_reg_loss = self.model.gp_weighter.get_gp_loss()
-                    loss = loss + gp_reg_loss
+                    if self.model.latest_kl_divergence is not None:
+                        kl_divergence = self.model.latest_kl_divergence
+                        loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
                     
             self.optim.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
-            # Cross-entropy loss
+            # Cross-entropy loss (likelihood term in ELBO)
             output = self.model.forward_features(torch.tensor(features).to(self.device))
             
             # Softmax cross-entropy
@@ -1133,10 +1327,11 @@ class ADAPTER(TrainerXCostume):
             else:
                 loss = loss_ce
             
-            # GP regularization loss
+            # ELBO loss: -E[log p(y|α)] + β * KL(q(α)||p(α))
             if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-                gp_reg_loss = self.model.gp_weighter.get_gp_loss()
-                loss = loss + gp_reg_loss
+                if self.model.latest_kl_divergence is not None:
+                    kl_divergence = self.model.latest_kl_divergence
+                    loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
 
             self.model_backward_and_update(loss)
 
@@ -1148,6 +1343,10 @@ class ADAPTER(TrainerXCostume):
             "acc_train": compute_accuracy(output, labels)[0].item(),
             "acc_test": compute_accuracy(output_test, self.labels_test)[0].item(),
         }
+        
+        # Add KL divergence to loss summary for monitoring
+        if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.latest_kl_divergence is not None:
+            loss_summary["kl_divergence"] = self.model.latest_kl_divergence.item()
 
         if (self.batch_idx + 1) == self.num_batches:
             self.update_lr()

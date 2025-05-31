@@ -24,3 +24,7 @@ OPTIM:
 
 TRAIN:
   PRINT_FREQ: 5
+
+TRAINER:
+  ADAPTER:
+    USE_GP: False

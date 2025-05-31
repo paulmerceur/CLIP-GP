@@ -31,4 +31,8 @@ TRAINER:
     GP_LENGTHSCALE: 2.0
     GP_OUTPUTSCALE: 1.0
     GP_NOISE: 0.1
-    GP_LR: 0.05 
+    GP_LR: 0.5
+    GP_QUALITY_SCALE: 3.0
+    GP_TEMP_INIT: 1.0
+    GP_REG_SCALE: 2.0
+    GP_UPDATE_FREQ: 10  # Update GP weights every 10 batches
