@@ -5,21 +5,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
+#SBATCH --output=logs/baseline/%x_%A_%a.out
 #SBATCH --array=1-100    # 10 datasets * 5 shots per config * 2 configs
-
-# ──────────────────────────
-# 0. Parse arguments and environment set-up  
-# ──────────────────────────
-if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 <experiment_name>" >&2
-  exit 1
-fi
-
-EXPERIMENT_NAME=$1
-echo "Running experiment: $EXPERIMENT_NAME"
-
-# Update SLURM output path for this experiment
-#SBATCH --output=logs/$EXPERIMENT_NAME/%x_%A_%a.out
 
 source .venv/bin/activate
 
@@ -35,6 +22,7 @@ shots=(1 2 4 8 16)
 optim="SGD_lr1e-1_B256_ep300"
 backbone="RN50"
 nb_templates=(1 10)
+experiment_name="baseline"
 
 # ──────────────────────────
 # 2. Build the configurations
@@ -53,9 +41,9 @@ done
 # 3. Launch *exactly* the selected configuration
 # ──────────────────────────
 IFS=' ' read -r seed ds optim N init constraint bb nb_templates <<< "${cfg[$SLURM_ARRAY_TASK_ID]}"
-bash scripts/adapt.sh "$seed" "$ds" "$optim" "$N" "$init" "$constraint" "$bb" "$nb_templates" "$EXPERIMENT_NAME"
+bash scripts/adapt.sh "$seed" "$ds" "$optim" "$N" "$init" "$constraint" "$bb" "$nb_templates" "$experiment_name"
 
 # ──────────────────────────
 # 4. Analyze the results
 # ──────────────────────────
-python parse_experiment_results.py "$EXPERIMENT_NAME"
+python parse_experiment_results.py "$experiment_name"

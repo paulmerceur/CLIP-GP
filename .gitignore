@@ -13,6 +13,7 @@ Dassl.pytorch/
 data/
 logs/
 metrics/
+results/
 
 # Generated files
 *.out

@@ -20,7 +20,7 @@ for ((seed=1; seed<=SEEDS; seed++)); do
     if [ -d "$DIR" ]; then
         echo "Oops! The results exist at ${DIR} (so skip this job)"
     else
-        python train.py \
+        CUDA_VISIBLE_DEVICES=0 python train.py \
         --root ${DATA} \
         --seed ${seed} \
         --trainer ${TRAINER} \
