@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+from typing import List, Optional
 import random
 from re import template
 import time
@@ -11,7 +12,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 import numpy as np
-import math
 
 from dassl.engine import TRAINER_REGISTRY, SimpleTrainer
 from dassl.metrics import compute_accuracy
@@ -21,6 +21,7 @@ from dassl.optim import build_optimizer, build_lr_scheduler
 from clip import clip
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from datasets.imagenet_templates import IMAGENET_TEMPLATES, IMAGENET_TEMPLATES_SELECT
+from trainers.gp_template_weigher import GaussianProcessTemplateWeighter
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
@@ -28,19 +29,6 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
 
 _tokenizer = _Tokenizer()
-
-
-def reset_gpu_state():
-    """Reset GPU state to avoid CUDA errors between runs."""
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            # Reset CUDA context if needed
-            torch.cuda.reset_peak_memory_stats()
-            print("GPU state reset successfully")
-    except Exception as e:
-        print(f"Warning: Could not reset GPU state: {e}")
 
 
 CUSTOM_TEMPLATES = {
@@ -61,286 +49,6 @@ CUSTOM_TEMPLATES = {
     "ImageNetR": "a photo of a {}.",
 }
 
-
-class GaussianProcessTemplateWeighter(nn.Module):
-    """Gaussian Process Template Weighter with Variational Inference.
-    
-    Implements the GP framework from the specifications:
-    - GP prior on weight vectors α_k ∈ ℝ^M for each class k
-    - Variational approximation q(α_k) = N(μ_k, Σ_k)
-    - ELBO objective with Monte Carlo sampling
-    - Kernel-based covariance matrices
-    """
-
-    def __init__(
-        self,
-        num_classes: int,
-        num_templates: int,
-        embedding_dim: int = 512,
-        kernel_type: str = "rbf",
-        lengthscale: float = 1.0,
-        outputscale: float = 1.0,
-        noise_var: float = 1e-4,
-        num_mc_samples: int = 5,
-        use_diagonal_cov: bool = True,
-    ):
-        super().__init__()
-        self.K = num_classes  # K classes
-        self.M = num_templates  # M templates  
-        self.D = embedding_dim
-        self.kernel_type = kernel_type
-        self.num_mc_samples = num_mc_samples
-        self.use_diagonal_cov = use_diagonal_cov
-        
-        # GP prior parameters (fixed)
-        self.register_buffer("lengthscale", torch.tensor(lengthscale))
-        self.register_buffer("outputscale", torch.tensor(outputscale))
-        self.register_buffer("noise_var", torch.tensor(noise_var))
-        
-        # Prior mean (zero mean function)
-        self.register_buffer("prior_mean", torch.zeros(num_templates))
-        
-        # Variational parameters for q(α_k) = N(μ_k, Σ_k)
-        # μ_k ∈ ℝ^M for each class k
-        self.variational_mean = nn.Parameter(
-            torch.randn(num_classes, num_templates) * 0.01
-        )
-        
-        if use_diagonal_cov:
-            # Diagonal covariance: log(σ²_k) for numerical stability
-            self.variational_logvar = nn.Parameter(
-                torch.full((num_classes, num_templates), -2.0)  # σ² ≈ 0.135
-            )
-        else:
-            # Full covariance (lower triangular L such that Σ = LL^T)
-            self.variational_chol = nn.Parameter(
-                torch.eye(num_templates).unsqueeze(0).repeat(num_classes, 1, 1) * 0.1
-            )
-        
-    def _compute_prior_covariance(self, text_embeddings):
-        """Compute GP prior covariance K_k based on text embeddings.
-        
-        Args:
-            text_embeddings: [K, M, D] - text features for computing kernel
-            
-        Returns:
-            prior_cov: [K, M, M] - prior covariance matrices for each class
-        """
-        K, M, D = text_embeddings.shape
-        
-        if self.kernel_type == "rbf":
-            # RBF kernel: k(f_i, f_j) = σ² * exp(-||f_i - f_j||² / (2 * l²))
-            prior_cov = []
-            for k in range(K):
-                # Get embeddings for class k: [M, D]
-                f_k = text_embeddings[k]  # [M, D]
-                
-                # Compute pairwise distances
-                f_k_norm = f_k.norm(dim=1, keepdim=True)  # [M, 1]
-                distances_sq = f_k_norm.pow(2) + f_k_norm.pow(2).t() - 2 * f_k @ f_k.t()
-                distances_sq = torch.clamp(distances_sq, min=0.0)  # Numerical stability
-                
-                # RBF kernel
-                K_k = self.outputscale * torch.exp(-distances_sq / (2 * self.lengthscale.pow(2)))
-                
-                # Add noise for numerical stability
-                K_k = K_k + self.noise_var * torch.eye(M, device=K_k.device, dtype=K_k.dtype)
-                
-                prior_cov.append(K_k)
-                
-            return torch.stack(prior_cov)  # [K, M, M]
-            
-        elif self.kernel_type == "linear":
-            # Linear kernel: k(f_i, f_j) = σ² * f_i^T f_j
-            prior_cov = []
-            for k in range(K):
-                f_k = text_embeddings[k]  # [M, D]
-                K_k = self.outputscale * (f_k @ f_k.t())
-                K_k = K_k + self.noise_var * torch.eye(M, device=K_k.device, dtype=K_k.dtype)
-                prior_cov.append(K_k)
-            return torch.stack(prior_cov)  # [K, M, M]
-            
-        else:
-            raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
-    
-    def _sample_alpha(self, batch_size=None):
-        """Sample α_k from variational distribution q(α_k) = N(μ_k, Σ_k).
-        
-        Args:
-            batch_size: If None, return [K, M]. If int, return [batch_size, K, M]
-            
-        Returns:
-            alpha_samples: Sampled weight vectors
-        """
-        if batch_size is None:
-            batch_size = 1
-            squeeze = True
-        else:
-            squeeze = False
-            
-        if self.use_diagonal_cov:
-            # Diagonal covariance case
-            std = torch.exp(0.5 * self.variational_logvar)  # [K, M]
-            eps = torch.randn(batch_size, self.K, self.M, device=std.device, dtype=std.dtype)
-            alpha_samples = self.variational_mean.unsqueeze(0) + eps * std.unsqueeze(0)
-        else:
-            # Full covariance case
-            eps = torch.randn(batch_size, self.K, self.M, device=self.variational_mean.device, dtype=self.variational_mean.dtype)
-            # Use lower triangular matrix to ensure positive definite covariance
-            L = torch.tril(self.variational_chol)  # [K, M, M]
-            alpha_samples = self.variational_mean.unsqueeze(0) + torch.bmm(
-                L.unsqueeze(0).expand(batch_size, -1, -1, -1).contiguous().view(-1, self.M, self.M),
-                eps.view(-1, self.M, 1)
-            ).view(batch_size, self.K, self.M)
-            
-        if squeeze:
-            alpha_samples = alpha_samples.squeeze(0)  # [K, M]
-            
-        return alpha_samples
-    
-    def _compute_kl_divergence(self, text_embeddings):
-        """Compute KL divergence KL(q(α_k) || p(α_k)) for all classes.
-        
-        Args:
-            text_embeddings: [K, M, D] - used to compute prior covariance
-            
-        Returns:
-            kl_div: Scalar KL divergence summed over all classes
-        """
-        # Compute prior covariance matrices
-        prior_cov = self._compute_prior_covariance(text_embeddings)  # [K, M, M]
-        
-        total_kl = 0.0
-        
-        for k in range(self.K):
-            # Prior: N(0, K_k)
-            prior_mean_k = self.prior_mean  # [M]
-            prior_cov_k = prior_cov[k]  # [M, M]
-            
-            # Variational: N(μ_k, Σ_k)
-            var_mean_k = self.variational_mean[k]  # [M]
-            
-            if self.use_diagonal_cov:
-                var_cov_k = torch.diag(torch.exp(self.variational_logvar[k]))  # [M, M]
-            else:
-                L_k = torch.tril(self.variational_chol[k])  # [M, M]
-                var_cov_k = L_k @ L_k.t()  # [M, M]
-            
-            # KL divergence between two multivariate Gaussians
-            # KL(q||p) = 0.5 * [tr(Σ_p^-1 Σ_q) + (μ_p - μ_q)^T Σ_p^-1 (μ_p - μ_q) - k + log(det(Σ_p)/det(Σ_q))]
-            
-            try:
-                # Cholesky decomposition for numerical stability
-                L_prior = torch.linalg.cholesky(prior_cov_k)  # Lower triangular
-                
-                # Solve triangular systems
-                mean_diff = var_mean_k - prior_mean_k  # [M]
-                
-                # Compute terms efficiently using Cholesky
-                # tr(Σ_p^-1 Σ_q) = ||L_p^-1 L_q||_F^2 where Σ_q = L_q L_q^T
-                if self.use_diagonal_cov:
-                    var_std = torch.exp(0.5 * self.variational_logvar[k])  # [M]
-                    # For diagonal case, solve directly without matrix operations
-                    solved_std = torch.linalg.solve_triangular(L_prior, var_std.unsqueeze(-1), upper=False).squeeze(-1)
-                    trace_term = (solved_std ** 2).sum()
-                    logdet_var = 2 * torch.sum(torch.log(var_std))
-                else:
-                    L_var = torch.tril(self.variational_chol[k])
-                    solved_var = torch.linalg.solve_triangular(L_prior, L_var, upper=False)
-                    trace_term = (solved_var ** 2).sum()
-                    logdet_var = 2 * torch.sum(torch.log(torch.diag(L_var)))
-                
-                # Mean term: (μ_p - μ_q)^T Σ_p^-1 (μ_p - μ_q)
-                solved_mean = torch.linalg.solve_triangular(L_prior, mean_diff.unsqueeze(-1), upper=False).squeeze(-1)
-                mean_term = (solved_mean ** 2).sum()
-                
-                # Log determinant terms
-                logdet_prior = 2 * torch.sum(torch.log(torch.diag(L_prior)))
-                
-                # KL divergence
-                kl_k = 0.5 * (trace_term + mean_term - self.M + logdet_prior - logdet_var)
-                total_kl = total_kl + kl_k
-                
-            except Exception as e:
-                # Fallback: add small regularization if Cholesky fails
-                print(f"Warning: Cholesky failed for class {k}, using regularized computation: {e}")
-                reg_prior_cov = prior_cov_k + 1e-3 * torch.eye(self.M, device=prior_cov_k.device, dtype=prior_cov_k.dtype)
-                
-                try:
-                    L_prior = torch.linalg.cholesky(reg_prior_cov)
-                    
-                    mean_diff = var_mean_k - prior_mean_k
-                    
-                    if self.use_diagonal_cov:
-                        var_std = torch.exp(0.5 * self.variational_logvar[k])
-                        solved_std = torch.linalg.solve_triangular(L_prior, var_std.unsqueeze(-1), upper=False).squeeze(-1)
-                        trace_term = (solved_std ** 2).sum()
-                        logdet_var = 2 * torch.sum(torch.log(var_std))
-                    else:
-                        L_var = torch.tril(self.variational_chol[k])
-                        solved_var = torch.linalg.solve_triangular(L_prior, L_var, upper=False)
-                        trace_term = (solved_var ** 2).sum()
-                        logdet_var = 2 * torch.sum(torch.log(torch.diag(L_var)))
-                    
-                    solved_mean = torch.linalg.solve_triangular(L_prior, mean_diff.unsqueeze(-1), upper=False).squeeze(-1)
-                    mean_term = (solved_mean ** 2).sum()
-                    
-                    logdet_prior = 2 * torch.sum(torch.log(torch.diag(L_prior)))
-                    
-                    kl_k = 0.5 * (trace_term + mean_term - self.M + logdet_prior - logdet_var)
-                    total_kl = total_kl + kl_k
-                    
-                except Exception as e2:
-                    print(f"Warning: Even regularized Cholesky failed for class {k}: {e2}")
-                    # Use simple L2 regularization as fallback
-                    kl_k = 0.01 * (var_mean_k ** 2).sum()
-                    if not self.use_diagonal_cov:
-                        kl_k = kl_k + 0.01 * (self.variational_chol[k] ** 2).sum()
-                    else:
-                        kl_k = kl_k + 0.01 * (self.variational_logvar[k] ** 2).sum()
-                    total_kl = total_kl + kl_k
-        
-        return total_kl
-    
-    def forward(self, text_embeddings, return_kl=True):
-        """Apply GP-weighted template combination.
-        
-        Args:
-            text_embeddings: [K, M, D] - text embeddings for all classes and templates
-            return_kl: Whether to return KL divergence for ELBO loss
-            
-        Returns:
-            weighted_embeddings: [K, D] - weighted text prototypes
-            kl_divergence: Scalar KL divergence (if return_kl=True)
-        """
-        orig_dtype = text_embeddings.dtype
-        text_embeddings = text_embeddings.float()  # Use fp32 for numerical stability
-        
-        K, M, D = text_embeddings.shape
-        assert K == self.K and M == self.M
-        
-        # Sample α_k from variational distribution (Monte Carlo sampling)
-        alpha_samples = self._sample_alpha(batch_size=self.num_mc_samples)  # [num_mc_samples, K, M]
-        
-        # Apply softmax to get normalized weights for each sample
-        weights = F.softmax(alpha_samples, dim=-1)  # [num_mc_samples, K, M]
-        
-        # Compute weighted embeddings for each MC sample
-        # weights: [num_mc_samples, K, M, 1], text_embeddings: [1, K, M, D]
-        weighted_samples = []
-        for s in range(self.num_mc_samples):
-            weighted_s = (text_embeddings * weights[s].unsqueeze(-1)).sum(dim=1)  # [K, D]
-            weighted_samples.append(weighted_s)
-        
-        # Average over MC samples
-        weighted_embeddings = torch.stack(weighted_samples).mean(dim=0)  # [K, D]
-        
-        # Compute KL divergence for ELBO loss
-        if return_kl:
-            kl_divergence = self._compute_kl_divergence(text_embeddings)
-            return weighted_embeddings.to(orig_dtype), kl_divergence
-        else:
-            return weighted_embeddings.to(orig_dtype)
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -382,108 +90,61 @@ class TextEncoder(nn.Module):
 
         return x
 
-
-def _get_base_text_features(cfg, classnames, clip_model, text_encoder, pretrained_projection=None):
-    device = next(text_encoder.parameters()).device
-    
-    # Add robust CUDA handling
-    if clip_model.dtype == torch.float16:
-        try:
-            # Clear GPU cache first to avoid memory issues
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            
-            # Check if we can safely move to CUDA
-            if device.type == 'cuda' or torch.cuda.is_available():
-                text_encoder = text_encoder.cuda()
-            else:
-                print("Warning: CUDA not available, using CPU for text encoder")
-                
-        except RuntimeError as e:
-            print(f"CUDA error when moving text encoder: {e}")
-            print("Falling back to CPU computation")
-            # Force CPU computation if CUDA fails
-            text_encoder = text_encoder.cpu()
-            
-        if pretrained_projection is not None:
-            # Load pretrained projection from TaskRes Work
-            pretrained_text_projection = torch.load(pretrained_projection)
-
-            # Move weight to current CLIP model
-            state_dict = text_encoder.state_dict()
-            state_dict['text_projection'] = pretrained_text_projection['state_dict']['weight'].t()
-            text_encoder.load_state_dict(state_dict)
-            print(">> Pretrained text encoder loaded!")
-            params = pretrained_text_projection['state_dict']['weight'].size(0) * \
-                     pretrained_text_projection['state_dict']['weight'].size(1)
-            print(">> Text projection parameters: ", params)
-            print(pretrained_text_projection['state_dict'].keys())
-
+def _build_templates(cfg) -> List[str]:
+    """Deterministic template list for the given dataset."""
     dataset = cfg.DATASET.NAME
-
     if dataset == "ImageNet":
-        TEMPLATES = IMAGENET_TEMPLATES_SELECT
+        base = IMAGENET_TEMPLATES_SELECT.copy()
     elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-        # Use deterministic template selection with fixed seed for consistency
-        rng_state = random.getstate()
-        random.seed(42)
-        TEMPLATES = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
-        random.setstate(rng_state)
+        rng = random.Random(42)
+        base = rng.sample(
+            IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1
+        )
     else:
-        TEMPLATES = []
-    TEMPLATES += [CUSTOM_TEMPLATES[dataset]]
+        base = []
+    base.append(CUSTOM_TEMPLATES[dataset])
+    return base
 
-    # FIX: Conditionally use torch.no_grad() based on GP usage
-    # When GP is enabled, we need gradients to flow through text embeddings
-    use_grad_context = cfg.TRAINER.ADAPTER.USE_GP and cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1
-    
-    if use_grad_context:
-        # Don't use no_grad context - allow gradients to flow
-        text_embeddings = []
-        for text in classnames:
-            tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
-            embeddings = clip_model.token_embedding(tokens).type(clip_model.dtype)
-            prototype = text_encoder(embeddings.cuda(), tokens.cuda())
-            text_embeddings.append(prototype)
-    else:
-        # Use no_grad context for efficiency when GP is not used
-        with torch.no_grad():
-            text_embeddings = []
-            for text in classnames:
-                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
-                embeddings = clip_model.token_embedding(tokens).type(clip_model.dtype)
-                prototype = text_encoder(embeddings.cuda(), tokens.cuda())
-                text_embeddings.append(prototype)
+def _get_base_text_features(
+    cfg,
+    classnames: List[str],
+    clip_model,
+    text_encoder: TextEncoder,
+    pretrained_projection: Optional[str] = None,
+):
+    """Original helper - now *also* caches embeddings inside closure."""
 
-    text_embeddings = torch.stack(text_embeddings)
-    
-    # Ensure we use the correct device (where text_embeddings are located)
-    actual_device = text_embeddings.device
-    
-    # Choose between GP weighting and simple averaging
-    if cfg.TRAINER.ADAPTER.USE_GP and text_embeddings.shape[1] > 1:
-        # Initialize GP weighting module on the same device as text embeddings
-        gp_weighter = GaussianProcessTemplateWeighter(
-            num_classes=text_embeddings.shape[0],
-            num_templates=text_embeddings.shape[1],
-            embedding_dim=text_embeddings.shape[-1],
+    device = next(text_encoder.parameters()).device
+    templates = _build_templates(cfg)
+
+    # Encode all prompts once - returned tensor is reused by caller.
+    emb_list = []
+    with torch.no_grad():
+        for name in classnames:
+            tok = clip.tokenize([t.format(name) for t in templates]).to(device)
+            e = clip_model.token_embedding(tok).type(clip_model.dtype)
+            emb = text_encoder(e, tok)
+            emb_list.append(emb)
+    text_embeds = torch.stack(emb_list)  # [K,M,D]
+
+    # Instantiate GP if requested
+    if cfg.TRAINER.ADAPTER.USE_GP and text_embeds.size(1) > 1:
+        gp = GaussianProcessTemplateWeighter(
+            num_classes=text_embeds.size(0),
+            num_templates=text_embeds.size(1),
+            embedding_dim=text_embeds.size(2),
             kernel_type=cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE,
             lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
             outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
-            noise_var=cfg.TRAINER.ADAPTER.GP_NOISE_VAR,
+            noise_var=cfg.TRAINER.ADAPTER.GP_NOISE,
             num_mc_samples=cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES,
             use_diagonal_cov=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
-        ).to(actual_device)
-        
-        # Apply GP weighting
-        text_embeddings_avg, kl_divergence = gp_weighter(text_embeddings)
-        
-        return text_embeddings_avg, text_embeddings, gp_weighter, kl_divergence
-    else:
-        text_embeddings_avg = text_embeddings.mean(1)
-        return text_embeddings_avg, text_embeddings, None, None
+        ).to(device)
+        proto, kl = gp(text_embeds)
+        return proto, text_embeds, gp, kl
 
+    # GP disabled → simple average
+    return text_embeds.mean(1), text_embeds, None, None
 
 class AdapterMethod(nn.Module):
     def __init__(self, cfg, clip_model, base_text_features):
@@ -664,297 +325,101 @@ class AdapterMethod(nn.Module):
 
 
 class CustomCLIP(nn.Module):
+    """CLIP + optional GP-weighted template prototypes (cached)."""
+
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
-        self.image_encoder = clip_model.visual
-        self.logit_scale = clip_model.logit_scale
-        self.dtype = clip_model.dtype  # float16
-        
-        # Store necessary attributes for Fix 2
         self.cfg = cfg
         self.classnames = classnames
-        # FIX: Instead of storing clip_model reference, store token_embedding as a proper submodule
-        # so it gets moved to GPU with the rest of the model
+
+        self.image_encoder = clip_model.visual
         self.token_embedding = clip_model.token_embedding
-        
-        text_encoder = TextEncoder(clip_model)
-        self.text_encoder = text_encoder
+        self.text_encoder = TextEncoder(clip_model)
+        self.logit_scale = clip_model.logit_scale
+        self.dtype = clip_model.dtype
 
-        # CRITICAL FIX: Store the templates used during initialization to reuse consistently
-        # Generate templates exactly as in _get_base_text_features
-        dataset = cfg.DATASET.NAME
-        if dataset == "ImageNet":
-            self.templates = IMAGENET_TEMPLATES_SELECT
-        elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-            # Use deterministic template selection with fixed seed for consistency
-            rng_state = random.getstate()
-            random.seed(42)
-            self.templates = random.sample(IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1)
-            random.setstate(rng_state)
-        else:
-            self.templates = []
-        self.templates += [CUSTOM_TEMPLATES[dataset]]
+        # Use helper to build all text-related tensors 
+        base_proto, self.text_embeddings_all, self.gp_weighter, self.latest_kl_divergence = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
 
-        # For TaskRes (Yu et al.) enhanced base - or regular CLIP base
-        if cfg.TRAINER.ADAPTER.ENHANCED_BASE == "none":
-            print(">> Use regular base!")
-            base_text_features, text_embeddings_all, gp_weighter, kl_divergence = _get_base_text_features(cfg, classnames, clip_model, text_encoder)
-        else:
-            print(">> Use enhanced base!")
-            base_text_features, text_embeddings_all, gp_weighter, kl_divergence = _get_base_text_features(
-                cfg, classnames, clip_model, text_encoder, cfg.TRAINER.TaskRes.ENHANCED_BASE)
+        # Cache embeddings for fast GP updates
+        self.register_buffer("text_embeddings_static", self.text_embeddings_all.float())
 
-        self.text_embeddings_all = text_embeddings_all
-        self.gp_weighter = gp_weighter  # Store GP weighter for training
-        self.adapter = AdapterMethod(cfg, clip_model, base_text_features)
-        
-        # Store latest KL divergence for ELBO loss computation
-        self.latest_kl_divergence = None
+        # Adapter
+        self.adapter = AdapterMethod(cfg, clip_model, base_proto)
 
-    def forward(self, image, return_features=False):
-        try:
-            image_features = self.image_encoder(image.type(self.dtype))
-        except:
-            image_features = self.image_encoder(image.float())
+        self._in_training_epoch = False  # toggled by trainer each epoch
 
-        # Update base features if using GP and in training mode
-        # Only update during actual training epochs, not during feature extraction
-        # Note: Don't check self.training since model is set to eval mode during training epochs
-        if (self.gp_weighter is not None and 
-            hasattr(self, '_in_training_epoch') and 
-            self._in_training_epoch):
-            
-            # Set training flag for adapter
-            self.adapter._is_training = True
-            
-            # CRITICAL FIX: Use the stored templates instead of regenerating random ones
-            text_encoder = self.text_encoder
-            classnames = self.classnames
-            TEMPLATES = self.templates  # Use the consistent templates stored during initialization
-            
-            # Handle text_encoder device and dtype properly
-            if self.dtype == torch.float16:
-                try:
-                    # Clear GPU cache and check CUDA availability
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        text_encoder = text_encoder.cuda()
-                    else:
-                        print("Warning: CUDA not available during forward pass")
-                except RuntimeError as e:
-                    print(f"CUDA error in forward pass: {e}")
-                    print("Continuing with current device")
-            
-            # FIX: Update text_encoder.dtype to match actual parameter dtype after model conversion
-            text_encoder.dtype = next(text_encoder.parameters()).dtype
-            
-            # Create text embeddings WITH gradients using the SAME templates as baseline
-            text_embeddings = []
-            for text in classnames:
-                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])  # tokenized prompts are indices
-                
-                # Move tokens to the same device as token_embedding safely
-                try:
-                    tokens = tokens.to(next(self.token_embedding.parameters()).device)
-                except RuntimeError as e:
-                    print(f"Warning: Could not move tokens to device: {e}")
-                    tokens = tokens.cuda() if torch.cuda.is_available() else tokens
-                
-                # Use the actual dtype of the token_embedding instead of stored self.dtype for consistency
-                embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
-                
-                # Convert embeddings to the actual dtype of text_encoder to avoid dtype mismatch
-                embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
-                
-                try:
-                    prototype = text_encoder(embeddings.cuda(), tokens.cuda())  # move to GPU for text encoder
-                except RuntimeError as e:
-                    print(f"Warning: CUDA error in text encoding: {e}")
-                    prototype = text_encoder(embeddings, tokens)  # fallback to current device
-                text_embeddings.append(prototype)
-            
-            text_embeddings = torch.stack(text_embeddings)
-            
-            # Apply GP weighting to fresh embeddings with consistent templates
-            updated_base_features, kl_divergence = self.gp_weighter(text_embeddings)
-            self.adapter.update_base_features(updated_base_features)
-            
-            # Store KL divergence for ELBO loss computation
-            self.latest_kl_divergence = kl_divergence
-        else:
-            # Not in training mode with GP
-            if hasattr(self.adapter, '_is_training'):
-                self.adapter._is_training = False
-            # Reset KL divergence when not using GP
-            self.latest_kl_divergence = None
+    def _update_gp(self):
+        if self.gp_weighter is None:
+            return
+        proto, kl = self.gp_weighter(self.text_embeddings_static)
+        self.adapter.update_base_features(proto)
+        self.latest_kl_divergence = kl
+
+    # ----------------------------------------------------------------- #
+    #  Forward passes                                                   #
+    # ----------------------------------------------------------------- #
+    def _forward_impl(self, x, *, is_feature: bool) -> torch.Tensor:
+        if self._in_training_epoch:
+            self._update_gp()
+
+        feats = x if is_feature else self.image_encoder(x.type(self.dtype))
 
         if "TR" in self.adapter.initialization:
-            logits = self.forward_task_residual(image_features)
+            logits = self.forward_task_residual(feats)
         elif "ClipA" in self.adapter.initialization:
-            logits = self.forward_clipadapter(image_features)
+            logits = self.forward_clipadapter(feats)
         elif "TipA" in self.adapter.initialization:
-            logits = self.forward_tipadapter(image_features)
+            logits = self.forward_tipadapter(feats)
         else:
-            logits = self.forward_lp(image_features)
+            logits = self.forward_lp(feats)
+        return logits
 
+    def forward(self, image, *, return_features: bool = False):
+        logits = self._forward_impl(image, is_feature=False)
         if return_features:
-            return logits, image_features
-        else:
-            return logits
+            feats = self.image_encoder(image.type(self.dtype))
+            return logits, feats
+        return logits
 
     def forward_features(self, features):
-        
-        # Apply GP weighting during training if enabled
-        # This ensures GP learning happens even when using pre-extracted image features
-        # Note: Don't check self.training since model is set to eval mode during training epochs
-        if (self.gp_weighter is not None and 
-            hasattr(self, '_in_training_epoch') and 
-            self._in_training_epoch):
-            
-            # Set training flag for adapter
-            self.adapter._is_training = True
-            
-            # CRITICAL FIX: Use the stored templates instead of regenerating random ones
-            text_encoder = self.text_encoder
-            classnames = self.classnames
-            TEMPLATES = self.templates  # Use the consistent templates stored during initialization
-            
-            # Handle text_encoder device and dtype properly
-            if self.dtype == torch.float16:
-                try:
-                    # Clear GPU cache and check CUDA availability
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        text_encoder = text_encoder.cuda()
-                    else:
-                        print("Warning: CUDA not available during forward pass")
-                except RuntimeError as e:
-                    print(f"CUDA error in forward pass: {e}")
-                    print("Continuing with current device")
-            
-            # FIX: Update text_encoder.dtype to match actual parameter dtype after model conversion
-            text_encoder.dtype = next(text_encoder.parameters()).dtype
-            
-            # Create text embeddings WITH gradients using the SAME templates as baseline
-            text_embeddings = []
-            for text in classnames:
-                tokens = clip.tokenize([template.format(text) for template in TEMPLATES])
-                try:
-                    tokens = tokens.to(next(self.token_embedding.parameters()).device)
-                except RuntimeError as e:
-                    print(f"Warning: Could not move tokens to device: {e}")
-                    tokens = tokens.cuda() if torch.cuda.is_available() else tokens
-                    
-                embeddings = self.token_embedding(tokens).type(next(self.token_embedding.parameters()).dtype)
-                embeddings = embeddings.type(next(text_encoder.parameters()).dtype)
-                
-                try:
-                    prototype = text_encoder(embeddings.cuda(), tokens.cuda())
-                except RuntimeError as e:
-                    print(f"Warning: CUDA error in text encoding: {e}")
-                    prototype = text_encoder(embeddings, tokens)
-                text_embeddings.append(prototype)
-            
-            text_embeddings = torch.stack(text_embeddings)
-            
-            # Apply GP weighting to fresh embeddings with consistent templates
-            updated_base_features, kl_divergence = self.gp_weighter(text_embeddings)
-            self.adapter.update_base_features(updated_base_features)
-            
-            # Store KL divergence for ELBO loss computation
-            self.latest_kl_divergence = kl_divergence
-        else:
-            # Not in training mode with GP
-            if hasattr(self.adapter, '_is_training'):
-                self.adapter._is_training = False
-            # Reset KL divergence when not using GP
-            self.latest_kl_divergence = None
+        return self._forward_impl(features, is_feature=True)
 
-        if "TR" in self.adapter.initialization:
-            logits = self.forward_task_residual(features)
-        elif "ClipA" in self.adapter.initialization:
-            logits = self.forward_clipadapter(features)
-        elif "TipA" in self.adapter.initialization:
-            logits = self.forward_tipadapter(features)
-        else:
-            logits = self.forward_lp(features)
-
-        return logits
-
+    # ----------------------------------------------------------------- #
+    #  Adapter‑specific logits                                          #
+    # ----------------------------------------------------------------- #
     def forward_lp(self, features):
-
-        # Get trained prototype
-        prototypes = self.adapter()
-
-        image_features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-
-        logit_scale = self.logit_scale.exp()
-        logits = image_features_norm @ prototypes_norm.t() * logit_scale
-
-        return logits
+        prot = self.adapter()
+        feats_n = features / features.norm(dim=-1, keepdim=True)
+        prot_n = prot / prot.norm(dim=-1, keepdim=True)
+        return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
     def forward_task_residual(self, features):
-
-        # Get trained prototype
-        prototypes = self.adapter()
-
-        # Sum residual features to base zero-shot prototypes
-        prototypes = self.adapter.base_text_features + self.adapter.alpha * prototypes
-
-        image_features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-
-        logit_scale = self.logit_scale.exp()
-        logits = image_features_norm @ prototypes_norm.t() * logit_scale
-
-        return logits
+        prot = self.adapter()
+        prot = self.adapter.base_text_features + self.adapter.alpha * prot
+        feats_n = features / features.norm(dim=-1, keepdim=True)
+        prot_n = prot / prot.norm(dim=-1, keepdim=True)
+        return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
     def forward_clipadapter(self, features):
-
-        # Get zero-shot weights
-        prototypes = self.adapter()
-
-        # Produce residual features on vision features
+        prot = self.adapter()
         x = self.adapter.mlp(features)
-        features = self.adapter.ratio * x + (1 - self.adapter.ratio) * features
-
-        # Normalize features
-        image_features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-
-        # Obtain logits
-        logit_scale = self.logit_scale.exp()
-        logits = image_features_norm @ prototypes_norm.t() * logit_scale
-
-        return logits
+        feats = self.adapter.ratio * x + (1 - self.adapter.ratio) * features
+        feats_n = feats / feats.norm(dim=-1, keepdim=True)
+        prot_n = prot / prot.norm(dim=-1, keepdim=True)
+        return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
     def forward_tipadapter(self, features):
-
-        # Get zero-shot weights
-        prototypes = self.adapter()
-
-        # Normalize features
-        image_features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-
-        # Obtain  zero-shot logits
-        logit_scale = self.logit_scale.exp()
-        logits = image_features_norm @ prototypes_norm.t() * logit_scale
-
+        prot = self.adapter()
+        feats_n = features / features.norm(dim=-1, keepdim=True)
+        prot_n = prot / prot.norm(dim=-1, keepdim=True)
+        logits = (feats_n @ prot_n.t()) * self.logit_scale.exp()
         if self.adapter.cache_keys is not None:
-            # normalize cache keys
-            cache_keys = self.adapter.cache_keys / self.adapter.cache_keys.norm(dim=-1, keepdim=True)
-
-            # Get affinity betwen train features and test
-            affinity = features @ cache_keys.t().cuda().to(torch.float)
-
-            cache_logits = torch.exp(((-1) * (self.adapter.beta - self.adapter.beta * affinity))) @ self.adapter.cache_values.cuda().to(torch.float)
-
+            ck = self.adapter.cache_keys / self.adapter.cache_keys.norm(dim=-1, keepdim=True)
+            affinity = features @ ck.t().float()
+            cache_logits = torch.exp((-1) * (self.adapter.beta - self.adapter.beta * affinity)) @ self.adapter.cache_values.float()
             logits += self.adapter.alpha * cache_logits
-
         return logits
-
 
 class TrainerXCostume(SimpleTrainer):
     """A base trainer using labeled data only."""
@@ -1044,9 +509,6 @@ class ADAPTER(TrainerXCostume):
     def build_model(self):
         cfg = self.cfg
         classnames = self.dm.dataset.classnames
-
-        # Reset GPU state to avoid CUDA errors
-        reset_gpu_state()
 
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
