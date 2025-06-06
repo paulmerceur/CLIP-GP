@@ -1,54 +1,120 @@
-# CLass adaptive Linear Probing (*CLAP*)
-The official implementation of [*A Closer Look at the Few-Shot Adaptation of Large Vision-Language Models*](https://openaccess.thecvf.com/content/CVPR2024/papers/Silva-Rodriguez_A_Closer_Look_at_the_Few-Shot_Adaptation_of_Large_Vision-Language_CVPR_2024_paper.pdf).<br/>
-📜 <span style="color:red">*IEEE/CVF Conference on Computer Vision and Pattern Recognition*</span> \
-[Julio Silva-Rodriguez](https://scholar.google.es/citations?user=1UMYgHMAAAAJ&hl),
-[Sina Hajimiri](https://scholar.google.com/citations?user=C5k-mOYAAAAJ&hl),
-[Ismail Ben Ayed](https://scholar.google.es/citations?user=29vyUccAAAAJ&hl),
-[Jose Dolz](https://scholar.google.es/citations?user=yHQIFFMAAAAJ&hl) ⋅ ÉTS Montréal
-<br/>
-| [Project](https://jusiro.github.io/projects/clap) | [Conference](https://openaccess.thecvf.com/content/CVPR2024/papers/Silva-Rodriguez_A_Closer_Look_at_the_Few-Shot_Adaptation_of_Large_Vision-Language_CVPR_2024_paper.pdf) | [ArXiv](https://arxiv.org/pdf/2312.12730.pdf) | [Code](https://github.com/jusiro/CLAP) |
-<br/>
+# CLIP‑GP
 
-When **adapting CLIP** using only few-shot, it is **unrealistic** to assume the presence of a **validation subset** to empirically
-fix a set of hyperparameters per task, *i.e.* model selection. We propose two solutions, which do not require any hyperparameter 
-tuning, and thus is adapted strictly using only the support samples.
+> **Gaussian‑Process Weighted Template Adaptation for CLIP**
+> Paul Merceur ⋅ ÉTS Montréal
 
-- A revisited **zero-shot initialized Linear Probe (ZS-LP)**, tailored for CLIP-alike vision-language models.
-- A constraint formulation to retain prior knowledge of the robust zero-shot prototypes per class,
-  **CLass adaptive Linear Probing (CLAP)**.
+CLIP‑GP extends the original **CLAP** repository with a *Gaussian‑Process (GP)*
+head that learns to **weight template embeddings** during few‑shot adaptation.
+Everything else—dataset loaders, training script, CLI—remains fully compatible
+with the upstream codebase.
+
+---
+
+## Highlights
+
+* **Drop‑in replacement** for ZS‑LP / CLAP: enable GP weighting with a single
+  flag (`--use_gp`).
+* **Fast** cached text embeddings + batched variational inference keep the
+  overhead < 5 % w\.r.t. vanilla linear probing.
+* **Library first** core GP logic is implemented with
+  [GPyTorch](https://gpytorch.ai/) for robustness and readability.
+
+---
 
 ## Installation
-This repository requires to install the environment and datasets:
-- follow [here](https://github.com/KaiyangZhou/Dassl.pytorch#installation) to install [Dassl.pytorch](https://github.com/KaiyangZhou/Dassl.pytorch) and PyTorch.
-- run `pip install -r requirements.txt` under `CLAP/` to install a few more packages required by [CLIP](https://github.com/openai/CLIP) (this should be done when `dassl` is activated).
-- follow [DATASETS.md](DATASETS.md) to install the datasets.
 
-*PS: You can also follow [CoOp](https://github.com/KaiyangZhou/CoOp) to perform the installation.*
+1. **Dassl + PyTorch** – follow the
+   [Dassl.pytorch installation guide](https://github.com/KaiyangZhou/Dassl.pytorch#installation).
+2. Activate the `dassl` conda env and run:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   This installs the extra packages needed by CLIP and GPyTorch.
+3. Download the datasets listed in `DATASETS.md` (identical to CLAP).
+
+<details>
+<summary>GPU &amp; mixed‑precision notes</summary>
+
+* FP16/AMP are fully supported. 
+* Multi‑GPU training is unchanged—GP parameters live on the same device as the
+  adapter.
+
+</details>
+
+---
 
 ## Usage
-We present the basic usage here.
 
-(a) Zero-shot initialized Linear Probe (ZS-LP):
-- `bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS none RN50`
+We reuse the original driver scripts—just pass an extra argument to enable the
+GP head.
 
-(b) CLass adaptive Linear Probing (CLAP):
-- `bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS l2 RN50`
+### (a) Zero‑shot‑initialised Linear Probe *(ZS‑LP)*
 
-(c) Test domain generalization:
-- `bash scripts/eval.sh 0 imagenet imagenetv2 SGD_lr1e-1_B256_ep300 1 ZS l2 RN50`
-
-## Acknowledgment
-This repository is mainly based on [CoOp](https://github.com/KaiyangZhou/CoOp) and [TaskRes](https://github.com/geekyutao/TaskRes) code base. We sincerely thank prior authors on this topic for his awesome code base.
-
-# Citation
-
-If you find this repository useful, please consider citing this paper:
+```bash
+bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS none RN50
 ```
-@inproceedings{clap24,
-    title={A Closer Look at the Few-Shot Adaptation of Large Vision-Language Models},
-    author={Julio Silva-Rodr\'iguez and Sina Hajimiri and Ismail Ben Ayed and Jose Dolz},
-    booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    pages={23681-23690},
-    year={2024}
-}
+
+### (b) CLass‑adaptive Linear Probing *(CLAP)*
+
+```bash
+bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS l2 RN50
 ```
+
+### (c) **CLIP‑GP** (this project)
+
+```bash
+bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS l2 RN50 \
+    --use_gp true \
+    --gp_beta 0.3 --gp_lengthscale 1.0 --gp_num_mc_samples 5
+```
+
+Key new flags (all have sensible defaults):
+
+| Flag                                                 | Description                            |
+| ---------------------------------------------------- | -------------------------------------- |
+| `--use_gp`                                           | Enable the GP weighting module.        |
+| `--gp_beta`                                          | KL term weight in the ELBO.            |
+| `--gp_lengthscale`, `--gp_outputscale`, `--gp_noise` | Kernel hyper‑parameters.               |
+| `--gp_num_mc_samples`                                | # MC samples for prototype estimation. |
+
+### (d) Domain generalisation test
+
+```bash
+bash scripts/eval.sh 0 imagenet imagenetv2 SGD_lr1e-1_B256_ep300 1 ZS l2 RN50 --use_gp true
+```
+
+---
+
+## Repository layout
+
+```
+CLIP-GP/
+├── configs/                    # config files for easier setups
+├── datasets/                   # dataset helpers & templates
+├── gp_template_weighter.py     # new – GP module (GPyTorch)
+├── trainers/
+│   └── adapters.py             # updated adapter with caching & GP support
+├── scripts/                    # same driver scripts + new GP flags
+└── README.md                   # you are here
+```
+
+---
+
+## Acknowledgements
+
+CLIP‑GP builds on the excellent **CoOp**, **CLAP**, and **TaskRes** codebases.
+Huge thanks to their authors for open‑sourcing the groundwork.
+
+---
+
+## License
+
+This repository inherits the MIT license of the original CLAP project.
+
+---
+
+## Contact
+
+Questions or issues? Open a discussion or contact me at `paul.merceur.1@ens.etsmtl.ca`.

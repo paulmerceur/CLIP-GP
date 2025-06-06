@@ -5,3 +5,4 @@ seaborn>=0.11.0
 pandas>=1.3.0
 matplotlib>=3.3.0
 numpy>=1.19.0
+gpytorch>=1.14
