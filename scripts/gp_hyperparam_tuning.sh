@@ -64,15 +64,15 @@ cfg=$(mktemp /tmp/gp_cfg.XXXX.yaml)
 cat > "$cfg" <<EOF
 DATALOADER:
   TRAIN_X:
-    BATCH_SIZE: 256
+    BATCH_SIZE: 128
   TEST:
-    BATCH_SIZE: 500
+    BATCH_SIZE: 128
   NUM_WORKERS: 8
 
 OPTIM:
   NAME: "sgd"
   LR: 0.1
-  MAX_EPOCH: 150
+  MAX_EPOCH: 200
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
@@ -87,7 +87,7 @@ TRAINER:
     GP_KERNEL_TYPE: "${kernel}"
     GP_LENGTHSCALE: ${lsc}
     GP_OUTPUTSCALE: ${osc}
-    GP_NOISE_VAR: ${noise}
+    GP_NOISE: ${noise}
     GP_NUM_MC_SAMPLES: ${mc}
     GP_USE_DIAGONAL_COV: ${diag}
 EOF

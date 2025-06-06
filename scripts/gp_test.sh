@@ -38,7 +38,7 @@ for ds in "${datasets[@]}"; do
 done
 
 # Select configuration based on array task ID
-IFS=' ' read -r seed ds optim N init constraint bb nb_templates <<< "${cfg[$SLURM_ARRAY_TASK_ID-1]}"
+IFS=' ' read -r seeds ds optim N init constraint bb nb_templates <<< "${cfg[$SLURM_ARRAY_TASK_ID-1]}"
 
 # Run the selected configuration
-bash scripts/adapt.sh "$seed" "$ds" "$optim" "$N" "$init" "$constraint" "$bb" "$nb_templates" "$experiment_name"
+bash scripts/adapt.sh "$seeds" "$ds" "$optim" "$N" "$init" "$constraint" "$bb" "$nb_templates" "$experiment_name"
