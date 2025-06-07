@@ -103,17 +103,15 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_UPDATE_FREQ = 1  # update GP prototypes every n batches
     cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
     cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
+    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
+    cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
     
     # GP Prior Parameters
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
-    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # kernel lengthscale parameter
-    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # kernel output scale parameter
-    cfg.TRAINER.ADAPTER.GP_NOISE = 1e-4  # noise variance for numerical stability
+    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # only used for rbf kernel
+    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # only used for rbf kernel
+    cfg.TRAINER.ADAPTER.GP_NOISE = 1e-4
     
-    # Variational Inference Parameters
-    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
-    cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
-
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
 

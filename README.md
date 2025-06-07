@@ -1,6 +1,7 @@
 # CLIP‑GP
 
-> **Gaussian‑Process Weighted Template Adaptation for CLIP**
+> **Gaussian‑Process Weighted Template Adaptation for CLIP**  
+
 > Paul Merceur ⋅ ÉTS Montréal
 
 CLIP‑GP extends the original **CLAP** repository with a *Gaussian‑Process (GP)*

@@ -16,7 +16,7 @@ init="ZS"
 constraint="none"
 backbone="RN50"
 templates=10
-seed=3
+seed=1
 root=/scratch/pmerceur/data
 
 # ---------- 2.  Search space --------------------------------------------------

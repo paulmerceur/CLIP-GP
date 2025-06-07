@@ -37,12 +37,20 @@ _RE = {
     "num_templates": re.compile(r"\bNUM_TEMPLATES:\s+(\d+)"),
     "backbone":      re.compile(r"\bbackbone:\s+(\S+)"),
     "max_epoch":     re.compile(r"\bMAX_EPOCH:\s+(\d+)"),
+    "lr":            re.compile(r"\bLR:\s+([\d.]+)"),
+    "weight_decay":  re.compile(r"\bWEIGHT_DECAY:\s+([\d.]+)"),
+    "batch_size":    re.compile(r"\bBATCH_SIZE:\s+(\d+)"),
     "accuracy":      re.compile(r"\*\s+accuracy:\s+([\d.]+)%"),
     "macro_f1":      re.compile(r"\*\s+macro_f1:\s+([\d.]+)%"),
     # Optional GP params
+    "gp_lr":         re.compile(r"\bGP_LR:\s+([\d.]+)"),
+    "gp_beta":       re.compile(r"\bGP_BETA:\s+([\d.]+)"),
     "gp_kernel":     re.compile(r"\bGP_KERNEL_TYPE:\s+(\S+)"),
     "gp_length":     re.compile(r"\bGP_LENGTHSCALE:\s+([\d.]+)"),
+    "gp_output":     re.compile(r"\bGP_OUTPUTSCALE:\s+([\d.]+)"),
+    "gp_noise":      re.compile(r"\bGP_NOISE:\s+([\d.]+)"),
     "gp_samples":    re.compile(r"\bGP_NUM_MC_SAMPLES:\s+(\d+)"),
+    "gp_diag":       re.compile(r"\bGP_USE_DIAGONAL_COV:\s+(True|False)"),
 }
 
 
@@ -67,13 +75,25 @@ def parse_log(path: pathlib.Path) -> Dict[str, Any]:
         "num_templates": int(_first_match(_RE["num_templates"], txt, int) or 0),
         "backbone":      _first_match(_RE["backbone"], txt, str),
         "max_epoch":     int(_first_match(_RE["max_epoch"], txt, int) or 0),
+        "lr":            float(_first_match(_RE["lr"], txt, float) or float("nan")),
+        "weight_decay":  float(_first_match(_RE["weight_decay"], txt, float) or float("nan")),
+        "batch_size":    int(_first_match(_RE["batch_size"], txt, int) or 0),
         "accuracy":      float(_first_match(_RE["accuracy"], txt) or float("nan")),
         "macro_f1":      float(_first_match(_RE["macro_f1"], txt) or float("nan")),
         # GP params
+        "gp_lr":         _first_match(_RE["gp_lr"], txt, float),
+        "gp_beta":       _first_match(_RE["gp_beta"], txt, float),
         "gp_kernel":     _first_match(_RE["gp_kernel"], txt, str),
         "gp_length":     _first_match(_RE["gp_length"], txt, float),
+        "gp_output":     _first_match(_RE["gp_output"], txt, float),
+        "gp_noise":      _first_match(_RE["gp_noise"], txt, float),
         "gp_samples":    _first_match(_RE["gp_samples"], txt, int),
+        "gp_diag":       _first_match(_RE["gp_diag"], txt, str) == "True",
     }
+
+    if info["num_shots"] == 0:
+        return None
+    
     return info
 
 
@@ -101,6 +121,25 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
     base = pathlib.Path("output") / exp_name
     if not base.is_dir():
         raise FileNotFoundError(base)
+    
+    df = pd.DataFrame()
+    for dataset_dir in base.iterdir():
+        if not dataset_dir.is_dir():
+            continue
+        dataset = dataset_dir.name
+        for config_dir in dataset_dir.iterdir():
+            if not config_dir.is_dir():
+                continue
+            for log_file in config_dir.glob("seed*/log.txt"):
+                info = parse_log(log_file)
+                if info is not None:
+                    df = pd.concat([df, pd.DataFrame([info])], ignore_index=True)
+    
+    general_params = ["lr", "weight_decay", "max_epoch", "batch_size", "num_templates"]
+    gp_params = ["gp_lr", "gp_beta", "gp_kernel", "gp_length", "gp_output", "gp_noise", "gp_samples", "gp_diag"]
+    hyperparams = important + [param for param in gp_params if param not in important]
+    hyperparams += [param for param in general_params if param not in important]
+    hyperparams = [param for param in hyperparams if df[param].nunique() > 1]
 
     rows: List[Dict[str, Any]] = []
     for dataset_dir in base.iterdir():
@@ -112,13 +151,16 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
                 continue
             for log_file in config_dir.glob("seed*/log.txt"):
                 info = parse_log(log_file)
-                info.update(
-                    dataset=dataset,
-                    shot=info["num_shots"],
-                    config_label=build_label(info, important),
-                    seed=log_file.parent.name,  # "seed3" etc.
-                )
-                rows.append(info)
+                if info is not None:
+                    info.update(
+                        dataset=dataset,
+                        shot=info["num_shots"],
+                        config_label=build_label(info, hyperparams),
+                        seed=log_file.parent.name,
+                    )
+                    rows.append(info)
+                else:
+                    print(f"No info found for {log_file}")
 
     if not rows:
         raise RuntimeError("No log files found – check path or experiment name.")
@@ -150,7 +192,15 @@ def plot_accuracy(summary: pd.DataFrame, out_dir: pathlib.Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     for dataset in summary.dataset.unique():
         sub = summary[summary["dataset"] == dataset]
+        # Print top 5 configs by accuracy, per dataset and number of shots
+        # for shot in sub["shot"].unique():
+        #     print(f"Top 5 configs for {dataset} with {shot} shots:")
+        #     pd.set_option('display.max_colwidth', None)
+        #     print(sub[sub["shot"] == shot].sort_values("accuracy_mean", ascending=False).head(5)[["config_label", "accuracy_mean"]])
+        #     print("\n")
+
         plt.figure()
+        
         for label, grp in sub.groupby("config_label"):
             plt.plot(grp["shot"], grp["accuracy_mean"], marker="o", label=label)
             # Optional confidence band
