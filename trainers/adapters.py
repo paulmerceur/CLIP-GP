@@ -140,6 +140,8 @@ def _get_base_text_features(
             num_mc_samples=cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES,
             use_diagonal_cov=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
         ).to(device)
+        # NOTE: GP variational mean is 0, so initial weights are uniform
+        # after softmax. The initial proto is therefore a simple average.
         proto, kl = gp(text_embeds)
         return proto, text_embeds, gp, kl
 
@@ -166,7 +168,11 @@ class AdapterMethod(nn.Module):
             self.prototypes = nn.Parameter(torch.nn.init.kaiming_normal_(torch.empty(base_text_features.shape)))
         elif "ZS" in self.initialization:  # Linear Probe initialized with zero-shot weights
             print("Using Zero-Shot initialization in Linear Probing")
-            self.prototypes = nn.Parameter(base_text_features.clone())
+            if self.use_gp:
+                print("GP is active: prototypes are not independent learnable parameters.")
+                self.prototypes = base_text_features.clone()
+            else:
+                self.prototypes = nn.Parameter(base_text_features.clone())
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
             print("Using Task_residual approach for Linear Probing")
             self.init_TR(alpha=0.5)
@@ -304,25 +310,6 @@ class AdapterMethod(nn.Module):
     def forward(self):
         return self.prototypes
 
-    def update_base_features(self, new_base_features):
-        """Update base text features for GP mode."""
-        # Update the base features reference (used for constraints, etc.)
-        self.base_text_features = new_base_features
-        
-        # CRITICAL FIX: Do NOT update prototypes during training when GP is active!
-        # The prototypes should be allowed to learn independently from the base features.
-        # Only update prototypes at initialization or when not training.
-        if hasattr(self, 'prototypes') and "ZS" in self.initialization:
-            # Only update prototypes if we're not in training mode or GP is not active
-            if not self.use_gp or not getattr(self, '_is_training', True):
-                if not self.use_gp:
-                    with torch.no_grad():
-                        self.prototypes.data = new_base_features.clone()
-                else:
-                    # Allow gradients to flow through when GP is active but not training
-                    self.prototypes.data = new_base_features.clone().detach()
-            # If GP is active and we're training, let prototypes learn independently!
-
 
 class CustomCLIP(nn.Module):
     """CLIP + optional GP-weighted template prototypes (cached)."""
@@ -353,7 +340,7 @@ class CustomCLIP(nn.Module):
         if self.gp_weighter is None:
             return
         proto, kl = self.gp_weighter(self.text_embeddings_static)
-        self.adapter.update_base_features(proto)
+        self.adapter.prototypes = proto
         self.latest_kl_divergence = kl
 
     # ----------------------------------------------------------------- #
@@ -841,9 +828,23 @@ class ADAPTER(TrainerXCostume):
                 raise FileNotFoundError('Model not found at "{}"'.format(model_path))
             else:
                 print('Model found at "{}"'.format(model_path))
-
+            
             checkpoint = load_checkpoint(model_path)
             state_dict = checkpoint["state_dict"]
+
+            # Handle cross-dataset evaluation: remove class-specific tensors if size mismatch
+            current_num_classes = self.model.adapter.base_text_features.shape[0]
+            checkpoint_num_classes = state_dict.get('base_text_features', torch.tensor([])).shape[0] if 'base_text_features' in state_dict else current_num_classes
+            
+            if checkpoint_num_classes != current_num_classes:
+                print(f"Cross-dataset evaluation detected: checkpoint has {checkpoint_num_classes} classes, target has {current_num_classes} classes")
+                print("Removing class-specific tensors from checkpoint (prototypes, base_text_features)")
+                
+                # Remove class-specific tensors that would cause size mismatches
+                if 'prototypes' in state_dict:
+                    del state_dict['prototypes']
+                if 'base_text_features' in state_dict:
+                    del state_dict['base_text_features']
 
             if "TipA" in self.model.adapter.initialization:
                 self.model.adapter.cache_keys = nn.Parameter(state_dict['cache_keys'].clone())
