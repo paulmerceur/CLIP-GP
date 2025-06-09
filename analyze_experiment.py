@@ -140,6 +140,7 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
     hyperparams = important + [param for param in gp_params if param not in important]
     hyperparams += [param for param in general_params if param not in important]
     hyperparams = [param for param in hyperparams if df[param].nunique() > 1]
+    hyperparams = []
 
     rows: List[Dict[str, Any]] = []
     for dataset_dir in base.iterdir():

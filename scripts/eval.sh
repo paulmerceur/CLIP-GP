@@ -2,36 +2,47 @@
 
 # custom config
 TRAINER=ADAPTER
+DATA=/scratch/pmerceur/data
 
-DEVICE=$1
-DATASET_SOURCE=$2      # target dataset - i.e. {imagenet, imagenetv2, imagenet_a, imagenet_r, imagenet_sketch}
-DATASET_TARGET=$3      # target dataset - i.e. {imagenetv2, imagenet_a, imagenet_r, imagenet_sketch}
-CFG=$4          # config file - SGD_lr1e-1_B256_ep300
-SHOTS=$5        # number of shots (1, 2, 4, 8, 16)
-INIT=$6         # Method / Linear Probe init - i.e. {RANDOM, ZS, ClipA, TipA, TipA(f), TR, TRenh}
-CONSTRAINT=$7   # apply class-adaptive constraint in Linear Probing (CLAP) - i.e. {none, l2}
-BACKBONE=$8     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
+SEEDS=$1
+DATASET_SOURCE=$2       # source dataset
+DATASET_TARGET=$3       # target dataset
+CFG=$4                  # config file
+SHOTS=$5                # number of shots
+INIT=$6                 # adapter init method
+CONSTRAINT=$7           # constraint type
+BACKBONE=$8             # CLIP backbone
+NB_TEMPLATES=$9         # number of templates
+SOURCE_EXP_NAME=${10}   # experiment name for loading the model
+TARGET_EXP_NAME=${11}   # experiment name for saving the results
 
-for SEED in 1 2 3
-do
-    MODELDIR=output/${DATASET_SOURCE}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
-    OUTDIR=output/${DATASET_TARGET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots/seed${SEED}
+for ((seed=1; seed<=SEEDS; seed++)); do
+    MODELDIR=output/${SOURCE_EXP_NAME}/${DATASET_SOURCE}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots_${NB_TEMPLATES}templates/seed${seed}
+    OUTDIR=output/${TARGET_EXP_NAME}/${DATASET_SOURCE}_to_${DATASET_TARGET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots_${NB_TEMPLATES}templates/seed${seed}
+    
     if [ -d "$OUTDIR" ]; then
         echo "Oops! The results exist at ${OUTDIR} (so skip this job)"
     else
-        CUDA_VISIBLE_DEVICES=${DEVICE} python train.py \
+        # Check if the model directory exists before running
+        if [ ! -d "$MODELDIR" ]; then
+            echo "Warning: Model directory not found at ${MODELDIR}. Skipping this job."
+            continue
+        fi
+
+        CUDA_VISIBLE_DEVICES=0 python train.py \
         --root ${DATA} \
-        --seed ${SEED} \
+        --seed ${seed} \
         --trainer ${TRAINER} \
         --dataset-config-file configs/datasets/${DATASET_TARGET}.yaml \
         --config-file configs/trainers/${CFG}.yaml \
         --output-dir ${OUTDIR} \
         --model-dir ${MODELDIR} \
-        --load-epoch 300 \
         --eval-only \
+        --load-epoch 300 \
         --backbone ${BACKBONE} \
         DATASET.NUM_SHOTS ${SHOTS} \
         TRAINER.ADAPTER.INIT ${INIT} \
-        TRAINER.ADAPTER.CONSTRAINT ${CONSTRAINT}
+        TRAINER.ADAPTER.CONSTRAINT ${CONSTRAINT} \
+        TRAINER.ADAPTER.NUM_TEMPLATES ${NB_TEMPLATES}
     fi
 done

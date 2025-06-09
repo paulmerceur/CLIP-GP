@@ -1,27 +1,27 @@
 #!/bin/bash
 
-#SBATCH --job-name=gp_test_v2
-#SBATCH --account=rrg-josedolz
-#SBATCH --time=02:00:00
+#SBATCH --job-name=gp_test_v3
+#SBATCH --account=def-josedolz
+#SBATCH --time=04:00:00
 #SBATCH --gpus-per-node=v100l:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --array=1-150
-#SBATCH --output=logs/gp_test_v2/%x_%A_%a.out
+#SBATCH --array=1-27
+#SBATCH --output=logs/gp_test_v3/%x_%A_%a.out
 
 source .venv/bin/activate
 
 # Fixed parameters for quick testing
-seeds=5
-datasets=(caltech101 dtd eurosat fgvc_aircraft food101 oxford_flowers oxford_pets sun397 ucf101 stanford_cars)
-#datasets=(caltech101 dtd ucf101)
+seeds=3
+#datasets=(caltech101 dtd eurosat fgvc_aircraft food101 oxford_flowers oxford_pets sun397 ucf101 stanford_cars)
+datasets=(caltech101 dtd ucf101)
 optim_base="SGD_lr1e-1_B128_ep300"
 optim_gp="GP_opt_linear"
-shots=(1 2 4 8 16)
+shots=(1 4 8)
 init="ZS"
 constraint="none"
 backbone="RN50"
-experiment_name="gp_test_v2"
+experiment_name="gp_test_v3"
 
 # Build configurations for testing
 declare -a cfg
