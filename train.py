@@ -105,7 +105,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
-    
+    cfg.TRAINER.ADAPTER.USE_VISUAL_PROJECTION = False  # Disable visual projection for testingw
     # GP Prior Parameters
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
     cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # only used for rbf kernel

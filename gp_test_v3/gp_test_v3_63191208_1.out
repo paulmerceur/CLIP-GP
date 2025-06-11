@@ -1,0 +1,372 @@
+/scratch/pmerceur/CLAP/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:624: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 4, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  warnings.warn(
+/scratch/pmerceur/CLAP/.venv/lib/python3.11/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Setting fixed seed: 1
+***************
+** Arguments **
+***************
+backbone: RN50
+config_file: configs/trainers/SGD_lr1e-1_B128_ep300.yaml
+dataset_config_file: configs/datasets/caltech101.yaml
+enhanced_base: none
+eval_only: False
+head: 
+load_epoch: None
+model_dir: 
+no_train: False
+num_templates: 1
+opts: ['DATASET.NUM_SHOTS', '4', 'TRAINER.ADAPTER.INIT', 'ZS', 'TRAINER.ADAPTER.CONSTRAINT', 'none', 'TRAINER.ADAPTER.NUM_TEMPLATES', '10']
+output_dir: output/gp_test_v3/caltech101/SGD_lr1e-1_B128_ep300_ZSInit_noneConstraint_4shots_10templates/seed1
+resume: 
+root: /scratch/pmerceur/data
+seed: 1
+source_domains: None
+target_domains: None
+trainer: ADAPTER
+transforms: None
+************
+** Config **
+************
+DATALOADER:
+  K_TRANSFORMS: 1
+  NUM_WORKERS: 8
+  RETURN_IMG0: False
+  TEST:
+    BATCH_SIZE: 128
+    SAMPLER: SequentialSampler
+  TRAIN_U:
+    BATCH_SIZE: 32
+    N_DOMAIN: 0
+    N_INS: 16
+    SAME_AS_X: True
+    SAMPLER: RandomSampler
+  TRAIN_X:
+    BATCH_SIZE: 128
+    N_DOMAIN: 0
+    N_INS: 16
+    SAMPLER: RandomSampler
+DATASET:
+  ALL_AS_UNLABELED: False
+  CIFAR_C_LEVEL: 1
+  CIFAR_C_TYPE: 
+  NAME: Caltech101
+  NUM_LABELED: -1
+  NUM_SHOTS: 4
+  ROOT: /scratch/pmerceur/data
+  SOURCE_DOMAINS: ()
+  STL10_FOLD: -1
+  SUBSAMPLE_CLASSES: all
+  TARGET_DOMAINS: ()
+  VAL_PERCENT: 0.1
+INPUT:
+  COLORJITTER_B: 0.4
+  COLORJITTER_C: 0.4
+  COLORJITTER_H: 0.1
+  COLORJITTER_S: 0.4
+  CROP_PADDING: 4
+  CUTOUT_LEN: 16
+  CUTOUT_N: 1
+  GB_K: 21
+  GB_P: 0.5
+  GN_MEAN: 0.0
+  GN_STD: 0.15
+  INTERPOLATION: bicubic
+  NO_TRANSFORM: False
+  PIXEL_MEAN: [0.48145466, 0.4578275, 0.40821073]
+  PIXEL_STD: [0.26862954, 0.26130258, 0.27577711]
+  RANDAUGMENT_M: 10
+  RANDAUGMENT_N: 2
+  RGS_P: 0.2
+  RRCROP_SCALE: (0.08, 1.0)
+  SIZE: (224, 224)
+  TRANSFORMS: ('random_resized_crop', 'random_flip', 'normalize')
+MODEL:
+  BACKBONE:
+    NAME: RN50
+    PRETRAINED: True
+  HEAD:
+    ACTIVATION: relu
+    BN: True
+    DROPOUT: 0.0
+    HIDDEN_LAYERS: ()
+    NAME: 
+  INIT_WEIGHTS: 
+OPTIM:
+  ADAM_BETA1: 0.9
+  ADAM_BETA2: 0.999
+  BASE_LR_MULT: 0.1
+  GAMMA: 0.1
+  LR: 0.01
+  LR_SCHEDULER: cosine
+  MAX_EPOCH: 300
+  MOMENTUM: 0.9
+  NAME: sgd
+  NEW_LAYERS: ()
+  RMSPROP_ALPHA: 0.99
+  SGD_DAMPNING: 0
+  SGD_NESTEROV: False
+  STAGED_LR: False
+  STEPSIZE: (-1,)
+  WARMUP_CONS_LR: 1e-05
+  WARMUP_EPOCH: 1
+  WARMUP_MIN_LR: 1e-05
+  WARMUP_RECOUNT: True
+  WARMUP_TYPE: constant
+  WEIGHT_DECAY: 0.0
+OUTPUT_DIR: output/gp_test_v3/caltech101/SGD_lr1e-1_B128_ep300_ZSInit_noneConstraint_4shots_10templates/seed1
+RESUME: 
+SEED: 1
+TEST:
+  COMPUTE_CMAT: False
+  EVALUATOR: Classification
+  FINAL_MODEL: last_step
+  NO_TEST: False
+  PER_CLASS_RESULT: False
+  SPLIT: test
+TRAIN:
+  CHECKPOINT_FREQ: 0
+  COUNT_ITER: train_x
+  PRINT_FREQ: 5
+TRAINER:
+  ADAPTER:
+    CONSTRAINT: none
+    ENHANCED_BASE: none
+    GP_BETA: 0.1
+    GP_KERNEL_TYPE: rbf
+    GP_LENGTHSCALE: 1.0
+    GP_LR: 0.001
+    GP_NOISE: 0.0001
+    GP_NUM_MC_SAMPLES: 5
+    GP_OUTPUTSCALE: 1.0
+    GP_UPDATE_FREQ: 1
+    GP_USE_DIAGONAL_COV: True
+    INIT: ZS
+    NUM_TEMPLATES: 10
+    PREC: fp16
+    USE_GP: False
+    USE_VISUAL_PROJECTION: False
+  CDAC:
+    CLASS_LR_MULTI: 10
+    P_THRESH: 0.95
+    RAMPUP_COEF: 30
+    RAMPUP_ITRS: 1000
+    STRONG_TRANSFORMS: ()
+    TOPK_MATCH: 5
+  CROSSGRAD:
+    ALPHA_D: 0.5
+    ALPHA_F: 0.5
+    EPS_D: 1.0
+    EPS_F: 1.0
+  DAEL:
+    CONF_THRE: 0.95
+    STRONG_TRANSFORMS: ()
+    WEIGHT_U: 0.5
+  DAELDG:
+    CONF_THRE: 0.95
+    STRONG_TRANSFORMS: ()
+    WEIGHT_U: 0.5
+  DDAIG:
+    ALPHA: 0.5
+    CLAMP: False
+    CLAMP_MAX: 1.0
+    CLAMP_MIN: -1.0
+    G_ARCH: 
+    LMDA: 0.3
+    WARMUP: 0
+  DOMAINMIX:
+    ALPHA: 1.0
+    BETA: 1.0
+    TYPE: crossdomain
+  ENTMIN:
+    LMDA: 0.001
+  FIXMATCH:
+    CONF_THRE: 0.95
+    STRONG_TRANSFORMS: ()
+    WEIGHT_U: 1.0
+  M3SDA:
+    LMDA: 0.5
+    N_STEP_F: 4
+  MCD:
+    N_STEP_F: 4
+  MEANTEACHER:
+    EMA_ALPHA: 0.999
+    RAMPUP: 5
+    WEIGHT_U: 1.0
+  MIXMATCH:
+    MIXUP_BETA: 0.75
+    RAMPUP: 20000
+    TEMP: 2.0
+    WEIGHT_U: 100.0
+  MME:
+    LMDA: 0.1
+  NAME: ADAPTER
+  SE:
+    CONF_THRE: 0.95
+    EMA_ALPHA: 0.999
+    RAMPUP: 300
+USE_CUDA: True
+VERBOSE: True
+VERSION: 1
+Loading trainer: ADAPTER
+Loading dataset: Caltech101
+Reading split from /scratch/pmerceur/data/caltech-101/split_zhou_Caltech101.json
+Loading preprocessed few-shot data from /scratch/pmerceur/data/caltech-101/split_fewshot/shot_4-seed_1.pkl
+Building transform_train
++ random resized crop (size=(224, 224), scale=(0.08, 1.0))
++ random flip
++ to torch tensor of range [0, 1]
++ normalization (mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
+Building transform_test
++ resize the smaller edge to 224
++ 224x224 center crop
++ to torch tensor of range [0, 1]
++ normalization (mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
+---------  ----------
+Dataset    Caltech101
+# classes  100
+# train_x  400
+# val      400
+# test     2,465
+---------  ----------
+Loading CLIP (backbone: RN50)
+Building custom CLIP
+Selected 10 templates for GP weighting:
+  0: a photo of a {}.
+  1: a toy {}.
+  2: art of the {}.
+  3: graffiti of a {}.
+  4: a photo of one {}.
+  5: a bad photo of a {}.
+  6: a good photo of a {}.
+  7: a rendition of the {}.
+  8: the {} in a video game.
+  9: a photo of the large {}.
+Using Zero-Shot initialization in Linear Probing
+Turning off gradients in both the image and the text encoder
+  Parameter adapter.prototypes requires_grad: True
+Loading evaluator: Classification
+Extracting features from: test
+Zero-Shot accuracy on test: 85.56
+Extracting features from: train
+No checkpoint found, train from scratch
+Initialize tensorboard (log_dir=output/gp_test_v3/caltech101/SGD_lr1e-1_B128_ep300_ZSInit_noneConstraint_4shots_10templates/seed1/tensorboard)
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [1/300] batch [1/3] loss 1.3534 (1.3534) acc_train 60.9375 (60.9375) acc_test 85.5578 (85.5578) eta 1:32:01
+epoch [1/300] batch [2/3] loss 1.3518 (1.3526) acc_train 64.8438 (62.8906) acc_test 85.5578 (85.5578) eta 0:48:34
+epoch [1/300] batch [3/3] loss 1.4734 (1.3929) acc_train 63.2812 (63.0208) acc_test 85.5578 (85.5578) eta 0:32:23
+epoch [11/300] batch [1/3] loss 1.1630 (1.1630) acc_train 71.8750 (71.8750) acc_test 88.2759 (88.2759) eta 0:00:06
+epoch [11/300] batch [2/3] loss 1.1074 (1.1352) acc_train 67.9688 (69.9219) acc_test 88.3976 (88.3367) eta 0:00:06
+epoch [11/300] batch [3/3] loss 1.2490 (1.1731) acc_train 67.1875 (69.0104) acc_test 88.5193 (88.3976) eta 0:00:06
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [21/300] batch [1/3] loss 1.1885 (1.1885) acc_train 69.5312 (69.5312) acc_test 89.4929 (89.4929) eta 0:00:05
+epoch [21/300] batch [2/3] loss 1.1053 (1.1469) acc_train 72.6562 (71.0938) acc_test 89.4523 (89.4726) eta 0:00:05
+epoch [21/300] batch [3/3] loss 1.1952 (1.1630) acc_train 70.3125 (70.8333) acc_test 89.4523 (89.4659) eta 0:00:05
+epoch [31/300] batch [1/3] loss 0.9076 (0.9076) acc_train 76.5625 (76.5625) acc_test 90.2231 (90.2231) eta 0:00:05
+epoch [31/300] batch [2/3] loss 1.2502 (1.0789) acc_train 68.7500 (72.6562) acc_test 90.2637 (90.2434) eta 0:00:05
+epoch [31/300] batch [3/3] loss 1.0856 (1.0812) acc_train 72.6562 (72.6562) acc_test 90.2231 (90.2367) eta 0:00:05
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [41/300] batch [1/3] loss 1.1780 (1.1780) acc_train 70.3125 (70.3125) acc_test 90.3448 (90.3448) eta 0:00:05
+epoch [41/300] batch [2/3] loss 1.2715 (1.2247) acc_train 68.7500 (69.5312) acc_test 90.3043 (90.3245) eta 0:00:04
+epoch [41/300] batch [3/3] loss 1.0472 (1.1656) acc_train 71.0938 (70.0521) acc_test 90.2637 (90.3043) eta 0:00:04
+epoch [51/300] batch [1/3] loss 0.9726 (0.9726) acc_train 71.8750 (71.8750) acc_test 90.4665 (90.4665) eta 0:00:04
+epoch [51/300] batch [2/3] loss 0.9213 (0.9469) acc_train 81.2500 (76.5625) acc_test 90.4665 (90.4665) eta 0:00:05
+epoch [51/300] batch [3/3] loss 1.0722 (0.9887) acc_train 72.6562 (75.2604) acc_test 90.4260 (90.4530) eta 0:00:05
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [61/300] batch [1/3] loss 0.9787 (0.9787) acc_train 77.3438 (77.3438) acc_test 90.6694 (90.6694) eta 0:00:04
+epoch [61/300] batch [2/3] loss 0.9527 (0.9657) acc_train 75.7812 (76.5625) acc_test 90.5477 (90.6085) eta 0:00:04
+epoch [61/300] batch [3/3] loss 1.3087 (1.0800) acc_train 68.7500 (73.9583) acc_test 90.5477 (90.5882) eta 0:00:04
+epoch [71/300] batch [1/3] loss 0.8777 (0.8777) acc_train 76.5625 (76.5625) acc_test 90.8316 (90.8316) eta 0:00:04
+epoch [71/300] batch [2/3] loss 1.0316 (0.9546) acc_train 68.7500 (72.6562) acc_test 90.8316 (90.8316) eta 0:00:04
+epoch [71/300] batch [3/3] loss 1.0684 (0.9925) acc_train 72.6562 (72.6562) acc_test 90.9128 (90.8587) eta 0:00:04
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [81/300] batch [1/3] loss 1.0975 (1.0975) acc_train 74.2188 (74.2188) acc_test 90.6694 (90.6694) eta 0:00:05
+epoch [81/300] batch [2/3] loss 0.8016 (0.9496) acc_train 82.8125 (78.5156) acc_test 90.5882 (90.6288) eta 0:00:05
+epoch [81/300] batch [3/3] loss 0.6687 (0.8559) acc_train 81.2500 (79.4271) acc_test 90.5882 (90.6153) eta 0:00:04
+epoch [91/300] batch [1/3] loss 0.7425 (0.7425) acc_train 82.8125 (82.8125) acc_test 90.5477 (90.5477) eta 0:00:04
+epoch [91/300] batch [2/3] loss 1.0934 (0.9179) acc_train 71.0938 (76.9531) acc_test 90.5477 (90.5477) eta 0:00:04
+epoch [91/300] batch [3/3] loss 0.8235 (0.8865) acc_train 80.4688 (78.1250) acc_test 90.5882 (90.5612) eta 0:00:04
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [101/300] batch [1/3] loss 1.0211 (1.0211) acc_train 75.0000 (75.0000) acc_test 90.4665 (90.4665) eta 0:00:04
+epoch [101/300] batch [2/3] loss 0.9902 (1.0056) acc_train 75.0000 (75.0000) acc_test 90.4665 (90.4665) eta 0:00:04
+epoch [101/300] batch [3/3] loss 0.9179 (0.9764) acc_train 75.0000 (75.0000) acc_test 90.4665 (90.4665) eta 0:00:04
+epoch [111/300] batch [1/3] loss 0.8929 (0.8929) acc_train 75.7812 (75.7812) acc_test 90.7911 (90.7911) eta 0:00:03
+epoch [111/300] batch [2/3] loss 0.9106 (0.9017) acc_train 75.0000 (75.3906) acc_test 90.7911 (90.7911) eta 0:00:04
+epoch [111/300] batch [3/3] loss 0.7302 (0.8446) acc_train 82.0312 (77.6042) acc_test 90.8722 (90.8181) eta 0:00:04
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [121/300] batch [1/3] loss 0.7855 (0.7855) acc_train 80.4688 (80.4688) acc_test 90.7911 (90.7911) eta 0:00:03
+epoch [121/300] batch [2/3] loss 0.8027 (0.7941) acc_train 82.8125 (81.6406) acc_test 90.8722 (90.8316) eta 0:00:03
+epoch [121/300] batch [3/3] loss 0.9490 (0.8458) acc_train 76.5625 (79.9479) acc_test 90.8722 (90.8452) eta 0:00:03
+epoch [131/300] batch [1/3] loss 0.7850 (0.7850) acc_train 82.0312 (82.0312) acc_test 90.7505 (90.7505) eta 0:00:03
+epoch [131/300] batch [2/3] loss 0.8355 (0.8102) acc_train 78.1250 (80.0781) acc_test 90.7505 (90.7505) eta 0:00:03
+epoch [131/300] batch [3/3] loss 0.7380 (0.7862) acc_train 82.8125 (80.9896) acc_test 90.7505 (90.7505) eta 0:00:03
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [141/300] batch [1/3] loss 0.7859 (0.7859) acc_train 79.6875 (79.6875) acc_test 90.6288 (90.6288) eta 0:00:05
+epoch [141/300] batch [2/3] loss 0.6287 (0.7073) acc_train 87.5000 (83.5938) acc_test 90.6288 (90.6288) eta 0:00:04
+epoch [141/300] batch [3/3] loss 0.7593 (0.7246) acc_train 76.5625 (81.2500) acc_test 90.5882 (90.6153) eta 0:00:04
+epoch [151/300] batch [1/3] loss 0.8708 (0.8708) acc_train 79.6875 (79.6875) acc_test 90.7505 (90.7505) eta 0:00:02
+epoch [151/300] batch [2/3] loss 0.8251 (0.8479) acc_train 79.6875 (79.6875) acc_test 90.7505 (90.7505) eta 0:00:02
+epoch [151/300] batch [3/3] loss 0.7092 (0.8017) acc_train 82.8125 (80.7292) acc_test 90.7911 (90.7640) eta 0:00:02
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [161/300] batch [1/3] loss 0.7959 (0.7959) acc_train 79.6875 (79.6875) acc_test 90.7099 (90.7099) eta 0:00:02
+epoch [161/300] batch [2/3] loss 0.8975 (0.8467) acc_train 75.0000 (77.3438) acc_test 90.7099 (90.7099) eta 0:00:02
+epoch [161/300] batch [3/3] loss 0.7512 (0.8149) acc_train 80.4688 (78.3854) acc_test 90.7099 (90.7099) eta 0:00:02
+epoch [171/300] batch [1/3] loss 0.6665 (0.6665) acc_train 83.5938 (83.5938) acc_test 90.5882 (90.5882) eta 0:00:02
+epoch [171/300] batch [2/3] loss 0.8850 (0.7758) acc_train 79.6875 (81.6406) acc_test 90.5882 (90.5882) eta 0:00:02
+epoch [171/300] batch [3/3] loss 0.8162 (0.7893) acc_train 75.7812 (79.6875) acc_test 90.5477 (90.5747) eta 0:00:02
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [181/300] batch [1/3] loss 0.6202 (0.6202) acc_train 87.5000 (87.5000) acc_test 90.5071 (90.5071) eta 0:00:02
+epoch [181/300] batch [2/3] loss 0.7676 (0.6939) acc_train 82.0312 (84.7656) acc_test 90.5071 (90.5071) eta 0:00:02
+epoch [181/300] batch [3/3] loss 0.9364 (0.7747) acc_train 76.5625 (82.0312) acc_test 90.4665 (90.4936) eta 0:00:02
+epoch [191/300] batch [1/3] loss 0.7911 (0.7911) acc_train 80.4688 (80.4688) acc_test 90.4260 (90.4260) eta 0:00:02
+epoch [191/300] batch [2/3] loss 0.9342 (0.8627) acc_train 79.6875 (80.0781) acc_test 90.4260 (90.4260) eta 0:00:02
+epoch [191/300] batch [3/3] loss 0.5676 (0.7643) acc_train 89.0625 (83.0729) acc_test 90.4260 (90.4260) eta 0:00:02
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [201/300] batch [1/3] loss 0.8021 (0.8021) acc_train 82.0312 (82.0312) acc_test 90.3448 (90.3448) eta 0:00:02
+epoch [201/300] batch [2/3] loss 0.8773 (0.8397) acc_train 77.3438 (79.6875) acc_test 90.3448 (90.3448) eta 0:00:02
+epoch [201/300] batch [3/3] loss 0.7897 (0.8230) acc_train 80.4688 (79.9479) acc_test 90.3854 (90.3584) eta 0:00:02
+epoch [211/300] batch [1/3] loss 0.8043 (0.8043) acc_train 82.8125 (82.8125) acc_test 90.3854 (90.3854) eta 0:00:01
+epoch [211/300] batch [2/3] loss 0.7391 (0.7717) acc_train 80.4688 (81.6406) acc_test 90.3854 (90.3854) eta 0:00:01
+epoch [211/300] batch [3/3] loss 0.7931 (0.7788) acc_train 82.0312 (81.7708) acc_test 90.4260 (90.3989) eta 0:00:01
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [221/300] batch [1/3] loss 0.8998 (0.8998) acc_train 80.4688 (80.4688) acc_test 90.4665 (90.4665) eta 0:00:01
+epoch [221/300] batch [2/3] loss 0.8495 (0.8746) acc_train 80.4688 (80.4688) acc_test 90.4665 (90.4665) eta 0:00:01
+epoch [221/300] batch [3/3] loss 0.6346 (0.7946) acc_train 88.2812 (83.0729) acc_test 90.5071 (90.4801) eta 0:00:01
+epoch [231/300] batch [1/3] loss 0.7997 (0.7997) acc_train 85.1562 (85.1562) acc_test 90.4260 (90.4260) eta 0:00:01
+epoch [231/300] batch [2/3] loss 0.7345 (0.7671) acc_train 89.0625 (87.1094) acc_test 90.4260 (90.4260) eta 0:00:01
+epoch [231/300] batch [3/3] loss 0.8527 (0.7956) acc_train 81.2500 (85.1562) acc_test 90.4260 (90.4260) eta 0:00:01
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [241/300] batch [1/3] loss 0.7827 (0.7827) acc_train 82.8125 (82.8125) acc_test 90.4665 (90.4665) eta 0:00:01
+epoch [241/300] batch [2/3] loss 0.8294 (0.8060) acc_train 80.4688 (81.6406) acc_test 90.4665 (90.4665) eta 0:00:01
+epoch [241/300] batch [3/3] loss 0.7153 (0.7758) acc_train 82.8125 (82.0312) acc_test 90.4665 (90.4665) eta 0:00:01
+epoch [251/300] batch [1/3] loss 0.6305 (0.6305) acc_train 86.7188 (86.7188) acc_test 90.4260 (90.4260) eta 0:00:01
+epoch [251/300] batch [2/3] loss 0.8287 (0.7296) acc_train 81.2500 (83.9844) acc_test 90.4260 (90.4260) eta 0:00:01
+epoch [251/300] batch [3/3] loss 0.7810 (0.7467) acc_train 84.3750 (84.1146) acc_test 90.4260 (90.4260) eta 0:00:01
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [261/300] batch [1/3] loss 0.9124 (0.9124) acc_train 79.6875 (79.6875) acc_test 90.4665 (90.4665) eta 0:00:00
+epoch [261/300] batch [2/3] loss 0.6397 (0.7760) acc_train 89.0625 (84.3750) acc_test 90.4665 (90.4665) eta 0:00:00
+epoch [261/300] batch [3/3] loss 0.8891 (0.8137) acc_train 78.9062 (82.5521) acc_test 90.4665 (90.4665) eta 0:00:00
+epoch [271/300] batch [1/3] loss 0.6688 (0.6688) acc_train 84.3750 (84.3750) acc_test 90.4665 (90.4665) eta 0:00:00
+epoch [271/300] batch [2/3] loss 0.8024 (0.7356) acc_train 79.6875 (82.0312) acc_test 90.4665 (90.4665) eta 0:00:00
+epoch [271/300] batch [3/3] loss 0.6825 (0.7179) acc_train 82.8125 (82.2917) acc_test 90.4665 (90.4665) eta 0:00:00
+[DEBUG] modes -> adapter.train(): True gp.train(): N/A vision.eval(): True text.eval(): True
+epoch [281/300] batch [1/3] loss 0.7773 (0.7773) acc_train 82.0312 (82.0312) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [281/300] batch [2/3] loss 0.6559 (0.7166) acc_train 84.3750 (83.2031) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [281/300] batch [3/3] loss 0.8147 (0.7493) acc_train 84.3750 (83.5938) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [291/300] batch [1/3] loss 1.0020 (1.0020) acc_train 78.1250 (78.1250) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [291/300] batch [2/3] loss 0.9354 (0.9687) acc_train 75.7812 (76.9531) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [291/300] batch [3/3] loss 0.7490 (0.8955) acc_train 81.2500 (78.3854) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [300/300] batch [1/3] loss 0.7094 (0.7094) acc_train 85.1562 (85.1562) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [300/300] batch [2/3] loss 0.6529 (0.6811) acc_train 85.9375 (85.5469) acc_test 90.5071 (90.5071) eta 0:00:00
+epoch [300/300] batch [3/3] loss 0.8230 (0.7284) acc_train 80.4688 (83.8542) acc_test 90.5071 (90.5071) eta 0:00:00
+Checkpoint saved to output/gp_test_v3/caltech101/SGD_lr1e-1_B128_ep300_ZSInit_noneConstraint_4shots_10templates/seed1/adapter/model.pth.tar-300
+Finish training
+Elapsed: 0:01:42
+Evaluate on the *test* set
+  0%|          | 0/20 [00:00<?, ?it/s]  5%|▌         | 1/20 [00:04<01:28,  4.64s/it] 10%|█         | 2/20 [00:04<00:35,  2.00s/it] 15%|█▌        | 3/20 [00:04<00:19,  1.15s/it] 20%|██        | 4/20 [00:05<00:12,  1.33it/s] 25%|██▌       | 5/20 [00:05<00:07,  1.89it/s] 30%|███       | 6/20 [00:05<00:05,  2.52it/s] 35%|███▌      | 7/20 [00:05<00:04,  3.19it/s] 40%|████      | 8/20 [00:05<00:03,  3.87it/s] 45%|████▌     | 9/20 [00:05<00:03,  3.46it/s] 50%|█████     | 10/20 [00:06<00:02,  4.11it/s] 55%|█████▌    | 11/20 [00:06<00:01,  4.72it/s] 60%|██████    | 12/20 [00:06<00:01,  5.27it/s] 65%|██████▌   | 13/20 [00:06<00:01,  5.72it/s] 70%|███████   | 14/20 [00:06<00:00,  6.09it/s] 75%|███████▌  | 15/20 [00:06<00:00,  6.38it/s] 80%|████████  | 16/20 [00:06<00:00,  6.59it/s] 85%|████████▌ | 17/20 [00:07<00:01,  2.72it/s] 90%|█████████ | 18/20 [00:07<00:00,  3.35it/s] 95%|█████████▌| 19/20 [00:08<00:00,  3.98it/s]100%|██████████| 20/20 [00:08<00:00,  2.43it/s]
+=> result
+* total: 2,465
+* correct: 2,231
+* accuracy: 90.5%
+* error: 9.5%
+* macro_f1: 86.3%

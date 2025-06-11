@@ -15,7 +15,7 @@ INPUT:
 OPTIM:
   NAME: "sgd"
   LR: 0.1
-  MAX_EPOCH: 300
+  MAX_EPOCH: 20
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
@@ -27,9 +27,15 @@ TRAIN:
 
 TRAINER:
   ADAPTER:
+    INIT: ZS  # can be ZS or RANDOM
+    CONSTRAINT: none  
+    PREC: fp16
     USE_GP: True
-    GP_KERNEL_TYPE: "linear"
-    GP_NUM_MC_SAMPLES: 5
-    GP_UPDATE_FREQ: 10
-    GP_LR: 0.02
-    GP_BETA: 0.15
+    NUM_TEMPLATES: 10
+    # GP-specific configuration
+    GP_KERNEL_TYPE: linear
+    GP_NUM_MC_SAMPLES: 10
+    GP_UPDATE_FREQ: 1  # Update every batch for better learning
+    GP_LR: 0.01  # Higher learning rate for GP parameters
+    GP_BETA: 0.01  # Higher beta for stronger regularization
+    USE_VISUAL_PROJECTION: False  # Re-enable visual projection as per math formulation

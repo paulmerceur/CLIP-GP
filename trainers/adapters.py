@@ -91,18 +91,47 @@ class TextEncoder(nn.Module):
         return x
 
 def _build_templates(cfg) -> List[str]:
-    """Deterministic template list for the given dataset."""
+    """Deterministic template list for the given dataset with improved diversity."""
     dataset = cfg.DATASET.NAME
+    
     if dataset == "ImageNet":
         base = IMAGENET_TEMPLATES_SELECT.copy()
     elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-        rng = random.Random(42)
-        base = rng.sample(
-            IMAGENET_TEMPLATES, cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1
-        )
+        # For GP learning, we want diverse templates
+        # Use a deterministic selection that provides good coverage
+        rng = random.Random(42)  # Fixed seed for reproducibility
+        
+        # First, always include the custom template for this dataset
+        base = [CUSTOM_TEMPLATES[dataset]]
+        
+        # Then add diverse general templates
+        remaining_count = cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1
+        if remaining_count > 0:
+            # Select a diverse set of templates rather than purely random
+            # Sort templates by length to get varied styles
+            sorted_templates = sorted(IMAGENET_TEMPLATES, key=len)
+            
+            # Select templates with good spacing
+            if remaining_count >= len(sorted_templates):
+                # If we need more templates than available, use all
+                selected = sorted_templates
+            else:
+                # Select evenly spaced templates for diversity
+                step = len(sorted_templates) // remaining_count
+                selected = []
+                for i in range(remaining_count):
+                    idx = min(i * step, len(sorted_templates) - 1)
+                    selected.append(sorted_templates[idx])
+            
+            base.extend(selected)
     else:
-        base = []
-    base.append(CUSTOM_TEMPLATES[dataset])
+        # Single template case
+        base = [CUSTOM_TEMPLATES[dataset]]
+    
+    print(f"Selected {len(base)} templates for GP weighting:")
+    for i, template in enumerate(base):
+        print(f"  {i}: {template}")
+    
     return base
 
 def _get_base_text_features(
@@ -127,21 +156,18 @@ def _get_base_text_features(
             emb_list.append(emb)
     text_embeds = torch.stack(emb_list)  # [K,M,D]
 
-    # Instantiate GP if requested
+    # Instantiate GP
     if cfg.TRAINER.ADAPTER.USE_GP and text_embeds.size(1) > 1:
         gp = GaussianProcessTemplateWeighter(
-            num_classes=text_embeds.size(0),
-            num_templates=text_embeds.size(1),
-            embedding_dim=text_embeds.size(2),
+            text_embeddings=text_embeds,
             kernel_type=cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE,
             lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
             outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
             noise_var=cfg.TRAINER.ADAPTER.GP_NOISE,
             num_mc_samples=cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES,
-            use_diagonal_cov=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
+            use_diag=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
         ).to(device)
-        # NOTE: GP variational mean is 0, so initial weights are uniform
-        # after softmax. The initial proto is therefore a simple average.
+        # NOTE: Initial weights are uniform after softmax, so the initial proto is a simple average.
         proto, kl = gp(text_embeds)
         return proto, text_embeds, gp, kl
 
@@ -163,6 +189,23 @@ class AdapterMethod(nn.Module):
         self.epochs_aumentation = 20  # 20
         self.use_gp = cfg.TRAINER.ADAPTER.USE_GP  # Store GP usage flag
 
+        # Visual projection matrix W (as per mathematical formulation)
+        # W ∈ R^{d×d} for projecting visual features: v_tilde = Wv
+        feat_dim = base_text_features.shape[-1]
+        
+        # Make visual projection optional via config
+        self.use_visual_projection = getattr(cfg.TRAINER.ADAPTER, 'USE_VISUAL_PROJECTION', True)
+        
+        if self.use_visual_projection:
+            self.visual_projection = nn.Linear(feat_dim, feat_dim, bias=False)
+            # Initialize as identity for stability
+            nn.init.eye_(self.visual_projection.weight)
+            # Ensure correct device and dtype
+            self.visual_projection = self.visual_projection.to(device=base_text_features.device, dtype=base_text_features.dtype)
+        else:
+            # Identity projection (no-op)
+            self.visual_projection = nn.Identity()
+
         if self.initialization == "RANDOM":  # Randomly initialized Linear Probing
             print("Using RANDOM initialization in Linear Probing")
             self.prototypes = nn.Parameter(torch.nn.init.kaiming_normal_(torch.empty(base_text_features.shape)))
@@ -170,7 +213,8 @@ class AdapterMethod(nn.Module):
             print("Using Zero-Shot initialization in Linear Probing")
             if self.use_gp:
                 print("GP is active: prototypes are not independent learnable parameters.")
-                self.prototypes = base_text_features.clone()
+                # When GP is active, prototypes will be updated by GP - initialize as non-parameter
+                self.prototypes = base_text_features.clone().detach()
             else:
                 self.prototypes = nn.Parameter(base_text_features.clone())
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
@@ -189,6 +233,11 @@ class AdapterMethod(nn.Module):
 
         if self.apply_constraint != "none":
             print("Applying constraint to the logistic regression weights: " + str(self.distance))
+            
+        # Ensure all components are on the same device after initialization
+        target_device = base_text_features.device
+        target_dtype = base_text_features.dtype
+        self.to(device=target_device, dtype=target_dtype)
 
     def init_MultiModal(self):
         print("Using Zero-Shot initialization in Linear Probing")
@@ -326,7 +375,7 @@ class CustomCLIP(nn.Module):
         self.dtype = clip_model.dtype
 
         # Use helper to build all text-related tensors 
-        base_proto, self.text_embeddings_all, self.gp_weighter, self.latest_kl_divergence = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
+        base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
 
         # Cache embeddings for fast GP updates
         self.register_buffer("text_embeddings_static", self.text_embeddings_all.float())
@@ -335,31 +384,118 @@ class CustomCLIP(nn.Module):
         self.adapter = AdapterMethod(cfg, clip_model, base_proto)
 
         self._in_training_epoch = False  # toggled by trainer each epoch
+        self._batch_count = 0  # Track batches for GP update frequency
+        self.gp_update_freq = cfg.TRAINER.ADAPTER.GP_UPDATE_FREQ if hasattr(cfg.TRAINER.ADAPTER, 'GP_UPDATE_FREQ') else 1
+        
+        # Cache current prototypes to avoid recomputation every forward pass
+        self._cached_prototypes = None
+        self._last_update_batch = -1
 
-    def _update_gp(self):
+    def _update_prototypes_if_needed(self):
+        """Update GP prototypes only when needed (not every forward pass)."""
+        if self.gp_weighter is None:
+            return  # No GP, nothing to update
+            
+        # Only update periodically to avoid constant recomputation
+        should_update = (
+            self._cached_prototypes is None or
+            (self._in_training_epoch and 
+             self._batch_count % self.gp_update_freq == 0 and
+             self._batch_count != self._last_update_batch)
+        )
+        
+        if should_update:
+            with torch.no_grad():
+                # Use mean for consistent behavior during both training and testing
+                proto, _ = self.gp_weighter(self.text_embeddings_static, use_mean=True)
+                
+                # Ensure prototypes have correct device and dtype
+                target_device = next(self.adapter.parameters()).device
+                target_dtype = self.dtype
+                
+                self._cached_prototypes = proto.to(device=target_device, dtype=target_dtype)
+                self.adapter.prototypes = self._cached_prototypes
+                self._last_update_batch = self._batch_count
+
+    def _gp_prototypes(self):
+        """Get current GP prototypes for gradient computation during training."""
+        if self.gp_weighter is None:
+            return self.adapter.prototypes          # plain LP
+        
+        # Use MC sampling during training, mean during eval
+        if self._in_training_epoch and self._batch_count == 1:
+            mode = 'MC' if self.training else 'mean'
+
+        proto, _ = self.gp_weighter(
+            self.text_embeddings_static,
+            use_mean=not self.training,
+        )
+
+        # --- Lightweight diagnostics (print sparingly) ------------------------
+        if self._in_training_epoch and self._batch_count == 1:
+            with torch.no_grad():
+                q = self.gp_weighter._weight_distribution()
+                probs = F.softmax(q.mean[0], dim=-1)
+                entropy = -(probs * probs.log()).sum().item()
+                mu_std = q.mean.std().item()
+                print(f"[INFO][GP] Entropy={entropy:.3f}, mu_std={mu_std:.4f}")
+
+        return proto
+
+    def get_gp_kl_divergence(self):
+        """Compute KL divergence for GP loss term."""
+        if self.gp_weighter is None:
+            return None
+        # Always use MC sampling to get proper gradients for KL
+        _, kl = self.gp_weighter(self.text_embeddings_static, use_mean=False)
+        
+        return kl
+
+    def update_gp_prototypes(self):
+        """Force update GP prototypes (called externally if needed)."""
         if self.gp_weighter is None:
             return
-        proto, kl = self.gp_weighter(self.text_embeddings_static)
-        self.adapter.prototypes = proto
-        self.latest_kl_divergence = kl
+            
+        with torch.no_grad():
+            proto, _ = self.gp_weighter(self.text_embeddings_static, use_mean=True)
+            
+            # Ensure prototypes have correct device and dtype
+            target_device = next(self.adapter.parameters()).device
+            target_dtype = self.dtype
+            
+            self.adapter.prototypes = proto.to(device=target_device, dtype=target_dtype)
+            self._cached_prototypes = self.adapter.prototypes
 
     # ----------------------------------------------------------------- #
     #  Forward passes                                                   #
     # ----------------------------------------------------------------- #
     def _forward_impl(self, x, *, is_feature: bool) -> torch.Tensor:
+        # Update batch count and prototypes only when needed
         if self._in_training_epoch:
-            self._update_gp()
+            self._batch_count += 1
+            
+        # Update cached prototypes periodically (not every forward pass!)
+        self._update_prototypes_if_needed()
 
         feats = x if is_feature else self.image_encoder(x.type(self.dtype))
 
-        if "TR" in self.adapter.initialization:
-            logits = self.forward_task_residual(feats)
-        elif "ClipA" in self.adapter.initialization:
-            logits = self.forward_clipadapter(feats)
-        elif "TipA" in self.adapter.initialization:
-            logits = self.forward_tipadapter(feats)
+        # ----- GP prototypes with gradients (ONLY during training loss computation) -----
+        if self.cfg.TRAINER.ADAPTER.USE_GP and self.training:
+            # Get GP prototypes with gradients for this forward pass
+            # This is crucial for GP parameter learning
+            current_prototypes = self._gp_prototypes()
         else:
-            logits = self.forward_lp(feats)
+            # Use cached prototypes for inference or when GP is disabled
+            current_prototypes = self.adapter.prototypes
+
+        if "TR" in self.adapter.initialization:
+            logits = self.forward_task_residual(feats, current_prototypes)
+        elif "ClipA" in self.adapter.initialization:
+            logits = self.forward_clipadapter(feats, current_prototypes)
+        elif "TipA" in self.adapter.initialization:
+            logits = self.forward_tipadapter(feats, current_prototypes)
+        else:
+            logits = self.forward_lp(feats, current_prototypes)
         return logits
 
     def forward(self, image, *, return_features: bool = False):
@@ -375,35 +511,76 @@ class CustomCLIP(nn.Module):
     # ----------------------------------------------------------------- #
     #  Adapter‑specific logits                                          #
     # ----------------------------------------------------------------- #
-    def forward_lp(self, features):
-        prot = self.adapter()
-        feats_n = features / features.norm(dim=-1, keepdim=True)
+    def forward_lp(self, features, prototypes=None):
+        if prototypes is None:
+            prot = self.adapter()
+        else:
+            prot = prototypes
+        
+        # Ensure prototypes are on the same device and dtype as features
+        if prot.device != features.device or prot.dtype != features.dtype:
+            prot = prot.to(device=features.device, dtype=features.dtype)
+            
+        # Apply visual projection W: v_tilde = Wv
+        feats_proj = self.adapter.visual_projection(features)
+        # Normalize after projection
+        feats_n = feats_proj / feats_proj.norm(dim=-1, keepdim=True)
         prot_n = prot / prot.norm(dim=-1, keepdim=True)
         return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
-    def forward_task_residual(self, features):
-        prot = self.adapter()
+    def forward_task_residual(self, features, prototypes=None):
+        if prototypes is None:
+            prot = self.adapter()
+        else:
+            prot = prototypes
         prot = self.adapter.base_text_features + self.adapter.alpha * prot
-        feats_n = features / features.norm(dim=-1, keepdim=True)
+        
+        # Ensure prototypes are on the same device and dtype as features
+        if prot.device != features.device or prot.dtype != features.dtype:
+            prot = prot.to(device=features.device, dtype=features.dtype)
+            
+        # Apply visual projection W: v_tilde = Wv
+        feats_proj = self.adapter.visual_projection(features)
+        feats_n = feats_proj / feats_proj.norm(dim=-1, keepdim=True)
         prot_n = prot / prot.norm(dim=-1, keepdim=True)
         return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
-    def forward_clipadapter(self, features):
-        prot = self.adapter()
+    def forward_clipadapter(self, features, prototypes=None):
+        if prototypes is None:
+            prot = self.adapter()
+        else:
+            prot = prototypes
+        
+        # Ensure prototypes are on the same device and dtype as features
+        if prot.device != features.device or prot.dtype != features.dtype:
+            prot = prot.to(device=features.device, dtype=features.dtype)
+            
         x = self.adapter.mlp(features)
         feats = self.adapter.ratio * x + (1 - self.adapter.ratio) * features
-        feats_n = feats / feats.norm(dim=-1, keepdim=True)
+        # Apply visual projection W: v_tilde = Wv  
+        feats_proj = self.adapter.visual_projection(feats)
+        feats_n = feats_proj / feats_proj.norm(dim=-1, keepdim=True)
         prot_n = prot / prot.norm(dim=-1, keepdim=True)
         return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
-    def forward_tipadapter(self, features):
-        prot = self.adapter()
-        feats_n = features / features.norm(dim=-1, keepdim=True)
+    def forward_tipadapter(self, features, prototypes=None):
+        if prototypes is None:
+            prot = self.adapter()
+        else:
+            prot = prototypes
+        
+        # Ensure prototypes are on the same device and dtype as features
+        if prot.device != features.device or prot.dtype != features.dtype:
+            prot = prot.to(device=features.device, dtype=features.dtype)
+            
+        # Apply visual projection W: v_tilde = Wv
+        feats_proj = self.adapter.visual_projection(features)
+        feats_n = feats_proj / feats_proj.norm(dim=-1, keepdim=True)
         prot_n = prot / prot.norm(dim=-1, keepdim=True)
         logits = (feats_n @ prot_n.t()) * self.logit_scale.exp()
         if self.adapter.cache_keys is not None:
             ck = self.adapter.cache_keys / self.adapter.cache_keys.norm(dim=-1, keepdim=True)
-            affinity = features @ ck.t().float()
+            affinity = feats_proj @ ck.t().float()  # Use projected features for consistency
             cache_logits = torch.exp((-1) * (self.adapter.beta - self.adapter.beta * affinity)) @ self.adapter.cache_values.float()
             logits += self.adapter.alpha * cache_logits
         return logits
@@ -415,8 +592,22 @@ class TrainerXCostume(SimpleTrainer):
         # Mark that we're in a training epoch for Fix 2
         self.model._in_training_epoch = True
         
-        # Eval mode - not updating batchnorm statistics
-        self.set_model_mode("eval")
+        # ------------------------------------------------------------------
+        # Train mode for adapter + GP so gradients flow, but keep frozen CLIP
+        # encoders in eval to avoid BatchNorm/Dropout updates.
+        # ------------------------------------------------------------------
+        self.set_model_mode("train")
+        # Explicitly freeze encoders at eval behaviour
+        if hasattr(self.model, "image_encoder"):
+            self.model.image_encoder.eval()
+        if hasattr(self.model, "text_encoder"):
+            self.model.text_encoder.eval()
+        # Sanity-check: log mode of key sub-modules (once every 20 epochs)
+        if self.epoch % 20 == 0:
+            print("[DEBUG] modes -> adapter.train():", self.model.adapter.training,
+                  "gp.train():", self.model.gp_weighter.training if self.model.gp_weighter else "N/A",
+                  "vision.eval():", not self.model.image_encoder.training,
+                  "text.eval():", not self.model.text_encoder.training)
 
         # Init kpis tracker
         losses = MetricMeter()
@@ -522,12 +713,28 @@ class ADAPTER(TrainerXCostume):
         self.model.to(self.device)
         self.model = self.model.float()
         
+        # Force GP update to initialize prototypes properly on correct device
+        if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
+            self.model.update_gp_prototypes()
+        
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Create parameter groups with different learning rates
             adapter_params = list(self.model.adapter.parameters())
             gp_params = list(self.model.gp_weighter.parameters())
             
+            print(f"Number of adapter parameters: {len(adapter_params)}")
+            print(f"Number of GP parameters: {len(gp_params)}")
+            
+            # List actual parameter names and shapes
+            print("Adapter parameters:")
+            for name, param in self.model.adapter.named_parameters():
+                print(f"  {name}: {param.shape}")
+            
+            print("GP parameters:")
+            for name, param in self.model.gp_weighter.named_parameters():
+                print(f"  {name}: {param.shape}")
+                
             # Get weight decay if available
             weight_decay = getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
             gp_lr = getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR)
@@ -754,10 +961,11 @@ class ADAPTER(TrainerXCostume):
                 
                 # ELBO loss: -E[log p(y|α)] + β * KL(q(α)||p(α))
                 if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-                    if self.model.latest_kl_divergence is not None:
-                        kl_divergence = self.model.latest_kl_divergence
+                    kl_divergence = self.model.get_gp_kl_divergence()
+                    if kl_divergence is not None:
                         loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
                     
+                
             self.optim.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optim)
@@ -777,13 +985,14 @@ class ADAPTER(TrainerXCostume):
                 loss = loss_ce
             
             # ELBO loss: -E[log p(y|α)] + β * KL(q(α)||p(α))
+            kl_divergence = None
             if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-                if self.model.latest_kl_divergence is not None:
-                    kl_divergence = self.model.latest_kl_divergence
+                kl_divergence = self.model.get_gp_kl_divergence()
+                if kl_divergence is not None:
                     loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
-
+            
             self.model_backward_and_update(loss)
-
+        
         with torch.no_grad():
             output_test = self.model.forward_features(self.features_test.clone().detach().to(self.device))
 
@@ -794,8 +1003,8 @@ class ADAPTER(TrainerXCostume):
         }
         
         # Add KL divergence to loss summary for monitoring
-        if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.latest_kl_divergence is not None:
-            loss_summary["kl_divergence"] = self.model.latest_kl_divergence.item()
+        if self.cfg.TRAINER.ADAPTER.USE_GP and kl_divergence is not None:
+            loss_summary["kl_divergence"] = kl_divergence.item()
 
         if (self.batch_idx + 1) == self.num_batches:
             self.update_lr()
