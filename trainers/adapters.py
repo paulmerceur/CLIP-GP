@@ -202,6 +202,16 @@ class AdapterMethod(nn.Module):
             nn.init.eye_(self.visual_projection.weight)
             # Ensure correct device and dtype
             self.visual_projection = self.visual_projection.to(device=base_text_features.device, dtype=base_text_features.dtype)
+            # ------------------------------------------------------------------
+            #  If GP is enabled, **freeze** the visual projection so that the
+            #  optimisation pressure is forced onto the GP template weights
+            #  instead of letting the very-large matrix W soak up all the
+            #  gradients (which we observed in the previous runs).
+            # ------------------------------------------------------------------
+            if cfg.TRAINER.ADAPTER.USE_GP:
+                for p in self.visual_projection.parameters():
+                    p.requires_grad = False
+                print("[INFO] Visual projection frozen (GP active) – prototypes must adapt instead.")
         else:
             # Identity projection (no-op)
             self.visual_projection = nn.Identity()
@@ -438,7 +448,13 @@ class CustomCLIP(nn.Module):
                 probs = F.softmax(q.mean[0], dim=-1)
                 entropy = -(probs * probs.log()).sum().item()
                 mu_std = q.mean.std().item()
-                print(f"[INFO][GP] Entropy={entropy:.3f}, mu_std={mu_std:.4f}")
+                temp = self.gp_weighter.weight_temperature.item()
+                top_vals, top_idx = torch.topk(probs, k=min(3, probs.numel()))
+                if self._in_training_epoch and self._batch_count == 1:
+                    print(
+                        f"[INFO][GP] entropy={entropy:.3f} | mu_std={mu_std:.4f} | temp={temp:.2f} | "
+                        f"top idx {top_idx.tolist()} probs {[round(v.item(),4) for v in top_vals]}"
+                    )
 
         return proto
 
@@ -589,8 +605,9 @@ class TrainerXCostume(SimpleTrainer):
     """A base trainer using labeled data only."""
 
     def run_epoch(self):
-        # Mark that we're in a training epoch for Fix 2
+        # Start-of-epoch bookkeeping -------------------------------------------------
         self.model._in_training_epoch = True
+        self.model._batch_count = 0   # ensures per-epoch diagnostics fire
         
         # ------------------------------------------------------------------
         # Train mode for adapter + GP so gradients flow, but keep frozen CLIP
@@ -698,14 +715,15 @@ class ADAPTER(TrainerXCostume):
         print("Building custom CLIP")
         self.model = CustomCLIP(cfg, classnames, clip_model)
 
-        print("Turning off gradients in both the image and the text encoder")
+        print("Turning off gradients in frozen modules and honour pre-set flags")
         for name, param in self.model.named_parameters():
-            if "adapter" not in name and "gp_weighter" not in name:
-                param.requires_grad_(False)
+            # Keep a trainable temperature (logit_scale) even though it's at top-level.
+            if name == "logit_scale":
+                param.requires_grad = True
             else:
-                # Ensure adapter and GP parameters require gradients
-                param.requires_grad_(True)
-                print(f"  Parameter {name} requires_grad: {param.requires_grad}")
+                # Freeze CLIP encoders ➜ no 'adapter' nor 'gp_weighter' in the name
+                if ("adapter" not in name) and ("gp_weighter" not in name):
+                    param.requires_grad = False
 
         if cfg.MODEL.INIT_WEIGHTS:
             load_pretrained_weights(self.model.adapter, cfg.MODEL.INIT_WEIGHTS)
@@ -719,12 +737,13 @@ class ADAPTER(TrainerXCostume):
         
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Create parameter groups with different learning rates
-            adapter_params = list(self.model.adapter.parameters())
-            gp_params = list(self.model.gp_weighter.parameters())
+            # Exclude frozen adapter params (e.g., visual_projection) ---------
+            adapter_params = [p for p in self.model.adapter.parameters() if p.requires_grad]
+            # Add CLIP temperature if trainable
+            if self.model.logit_scale.requires_grad:
+                adapter_params.append(self.model.logit_scale)
             
             print(f"Number of adapter parameters: {len(adapter_params)}")
-            print(f"Number of GP parameters: {len(gp_params)}")
             
             # List actual parameter names and shapes
             print("Adapter parameters:")
@@ -742,7 +761,7 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': gp_params, 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
             ]
             
             # Create optimizer with parameter groups
@@ -898,9 +917,11 @@ class ADAPTER(TrainerXCostume):
             
         # Recreate optimizer considering GP parameters
         if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Create parameter groups with different learning rates
-            adapter_params = list(self.model.adapter.parameters())
-            gp_params = list(self.model.gp_weighter.parameters())
+            # Exclude frozen adapter params (e.g., visual_projection) ---------
+            adapter_params = [p for p in self.model.adapter.parameters() if p.requires_grad]
+            # Add CLIP temperature if trainable
+            if self.model.logit_scale.requires_grad:
+                adapter_params.append(self.model.logit_scale)
             
             # Get weight decay if available
             weight_decay = getattr(self.cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
@@ -909,7 +930,7 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': gp_params, 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
             ]
             
             # Create optimizer with parameter groups

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=gp_test_v3
-#SBATCH --account=def-josedolz
+#SBATCH --account=rrg-josedolz
 #SBATCH --time=04:00:00
 #SBATCH --gpus-per-node=v100l:1
 #SBATCH --cpus-per-task=4

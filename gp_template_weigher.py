@@ -186,8 +186,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Cast weights to the template dtype to avoid mixed-precision errors
         if weights.dtype != self._templates.dtype:
             weights = weights.to(dtype=self._templates.dtype)
-        else:
-            print("GaussianProcessTemplateWeighter._prototype_from_weights: weights.dtype == self._templates.dtype")
 
         return torch.einsum("km,kmd->kd", weights, self._templates)
 
