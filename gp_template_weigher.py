@@ -17,12 +17,8 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self,
         text_embeddings: torch.Tensor,  # [K, M, D]  (frozen)
         *,
-        kernel_type: str = "rbf",
-        num_mc_samples: int = 4,
-        use_diag: bool = True,
-        lengthscale: float = 1.0,
-        outputscale: float = 1.0,
-        noise_var: float = 1e-4,
+        cfg: dict,
+        **kwargs,
     ) -> None:
         # Keep original dtype/device for later but run GP in fp32 for numerical
         # stability (GPyTorch is primarily tested in fp32).
@@ -32,32 +28,36 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         text_embeddings_fp32 = text_embeddings.to(dtype=torch.float32)
 
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
-        self.num_mc_samples = num_mc_samples
+        self.num_mc_samples = cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES
+        self.min_temp = cfg.TRAINER.ADAPTER.GP_MIN_TEMP
 
         # ------------------------------------------------------------------
-        #  Build a batched variational GP
+        #  One independent GP per class (batched). We do NOT wrap the
+        #  strategy in an extra IndependentMultitaskVariationalStrategy
+        #  because the batch dimension **already** indexes the classes. The
+        #  previous double-wrapping duplicated the class dimension, leading
+        #  to a weight matrix of shape [K, K, M] instead of the intended
+        #  [K, M]. This, in turn, produced almost uniform (and thus
+        #  ineffective) template weights during optimisation.
         # ------------------------------------------------------------------
+
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
         # Use the (frozen) template encodings as inducing inputs.
-        inducing_inputs = text_embeddings_fp32.detach().clone().view(-1, self.dim)
+        inducing_inputs = text_embeddings_fp32.detach().clone().view(
+            self.num_classes, self.num_templates, self.dim
+        )
 
-        # Full‑covariance variational posterior (Cholesky factor learnt).
         variational_dist = gpytorch.variational.CholeskyVariationalDistribution(
             num_inducing_points=self.num_templates,
             batch_shape=batch_shape,
         )
 
-        base_vs = gpytorch.variational.VariationalStrategy(
+        variational_strategy = gpytorch.variational.VariationalStrategy(
             self,
-            inducing_inputs.view(self.num_classes, self.num_templates, self.dim),
+            inducing_inputs,
             variational_dist,
             learn_inducing_locations=False,
-        )
-
-        # One independent GP *per class* (tasks are independent).
-        variational_strategy = gpytorch.variational.IndependentMultitaskVariationalStrategy(
-            base_vs, num_tasks=self.num_classes
         )
 
         super().__init__(variational_strategy)
@@ -65,37 +65,35 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Mean and covariance modules -------------------------------------------------
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
 
-        if kernel_type.lower() == "rbf":
+        if cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "rbf":
             base_kernel = gpytorch.kernels.RBFKernel(
                 batch_shape=batch_shape, ard_num_dims=self.dim
             )
-        elif kernel_type.lower() == "cosine":
+        elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "cosine":
             base_kernel = gpytorch.kernels.CosineKernel(batch_shape=batch_shape)
-        elif kernel_type.lower() == "linear":
+        elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "linear":
             base_kernel = gpytorch.kernels.LinearKernel(batch_shape=batch_shape)
         else:
-            raise ValueError(f"Unsupported kernel: {kernel_type}")
+            raise ValueError(f"Unsupported kernel: {cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE}")
 
         self.covar_module = gpytorch.kernels.ScaleKernel(
             base_kernel, batch_shape=batch_shape
         )
 
         # ------------------------------------------------------------------
-        #  Break symmetry: initialise variational mean with a **larger** noise
-        #  so that the subsequent softmax is able to deviate from the uniform
-        #  distribution early in training.  Using too small a std (e.g. 0.05)
-        #  made the initial logits almost zero, resulting in near-uniform
-        #  weights and vanishing gradients. A std≈1 provides logit differences
-        #  of order ±1, i.e. exp(±1)≈{0.37,2.7}, which yields noticeable but
-        #  still moderate departure from the uniform prior.
+        #  Break symmetry: randomise the variational mean so that early
+        #  softmaxes are *not* exactly uniform. The attribute path has changed
+        #  now that we removed the extra multitask wrapper.
         # ------------------------------------------------------------------
         with torch.no_grad():
-            vm = self.variational_strategy.base_variational_strategy._variational_distribution.variational_mean
+            vm = self.variational_strategy._variational_distribution.variational_mean
             vm.normal_(mean=0.0, std=1.0)
 
-        # Learnable temperature (scales α before the softmax); initial value 1.
-        # Larger values sharpen the distribution, smaller values flatten it.
-        self.register_parameter("weight_temperature", nn.Parameter(torch.tensor(1.0)))
+        # Learnable *positive* temperature τ.  We store logτ as a parameter
+        # and map it through softplus to ensure τ>0 and avoid runaway
+        # collapse (τ→0) that was flattening the weights.
+        init_temp = kwargs.pop("init_temperature", 1.0) if "init_temperature" in kwargs else 1.0
+        self.register_parameter("_log_temp", nn.Parameter(torch.log(torch.tensor(init_temp))))
 
         # Register the (fixed) template embeddings (original dtype) for downstream
         # use (e.g., for normalising prototypes/pruning). This buffer is not
@@ -149,10 +147,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     def _kl(self) -> torch.Tensor:
         """Analytic KL(q‖p) with robust device/dtype alignment.
 
-        ``gpytorch`` sometimes memoizes the prior distribution on the device
+        gpytorch sometimes memoizes the prior distribution on the device
         on which the model was *first* called (CPU, in our case). If we later
         move the module to GPU, the cached prior stays on CPU, causing the
-        ``kl_divergence`` call to raise a device-mismatch error.  We catch
+        kl_divergence call to raise a device-mismatch error.  We catch
         that situation and rebuild the prior on the correct device.
         """
 
@@ -232,3 +230,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     # Keep compatibility with the old call signature used in adapters.py
     def __call__(self, *_unused, use_mean: bool = False):  # type: ignore[override]
         return self.forward_and_kl(use_mean=use_mean)
+
+    # Expose positive temperature property ---------------------------------
+    @property
+    def weight_temperature(self) -> torch.Tensor:
+        # softplus: log(1+e^x) ∈ (0,∞)
+        return torch.clamp(F.softplus(self._log_temp) + 1e-6, min=self.min_temp)

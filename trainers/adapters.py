@@ -97,12 +97,8 @@ def _build_templates(cfg) -> List[str]:
     if dataset == "ImageNet":
         base = IMAGENET_TEMPLATES_SELECT.copy()
     elif cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
-        # For GP learning, we want diverse templates
-        # Use a deterministic selection that provides good coverage
         rng = random.Random(42)  # Fixed seed for reproducibility
-        
-        # First, always include the custom template for this dataset
-        base = [CUSTOM_TEMPLATES[dataset]]
+        base = [CUSTOM_TEMPLATES[dataset]] # Always include the custom template for this dataset
         
         # Then add diverse general templates
         remaining_count = cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1
@@ -158,20 +154,12 @@ def _get_base_text_features(
 
     # Instantiate GP
     if cfg.TRAINER.ADAPTER.USE_GP and text_embeds.size(1) > 1:
-        gp = GaussianProcessTemplateWeighter(
-            text_embeddings=text_embeds,
-            kernel_type=cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE,
-            lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTHSCALE,
-            outputscale=cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE,
-            noise_var=cfg.TRAINER.ADAPTER.GP_NOISE,
-            num_mc_samples=cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES,
-            use_diag=cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV,
-        ).to(device)
+        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
         # NOTE: Initial weights are uniform after softmax, so the initial proto is a simple average.
         proto, kl = gp(text_embeds)
         return proto, text_embeds, gp, kl
 
-    # GP disabled → simple average
+    # GP disabled -> simple average
     return text_embeds.mean(1), text_embeds, None, None
 
 class AdapterMethod(nn.Module):
@@ -185,8 +173,8 @@ class AdapterMethod(nn.Module):
         self.register_buffer("base_text_features", base_text_features)
         self.alpha_constraint = torch.zeros((base_text_features.shape[0])).to(self.device)
         self.base_text_features = base_text_features
-        self.augmentations = True  # True
-        self.epochs_aumentation = 20  # 20
+        self.augmentations = True
+        self.epochs_aumentation = 20
         self.use_gp = cfg.TRAINER.ADAPTER.USE_GP  # Store GP usage flag
 
         # Visual projection matrix W (as per mathematical formulation)
@@ -208,10 +196,14 @@ class AdapterMethod(nn.Module):
             #  instead of letting the very-large matrix W soak up all the
             #  gradients (which we observed in the previous runs).
             # ------------------------------------------------------------------
-            if cfg.TRAINER.ADAPTER.USE_GP:
+            # Optionally freeze visual projection when GP is active (helps isolate GP effects)
+            freeze_vp = getattr(cfg.TRAINER.ADAPTER, 'GP_FREEZE_VP', True)
+            if cfg.TRAINER.ADAPTER.USE_GP and freeze_vp:
                 for p in self.visual_projection.parameters():
                     p.requires_grad = False
-                print("[INFO] Visual projection frozen (GP active) – prototypes must adapt instead.")
+                print("[INFO] Visual projection frozen (GP active) - prototypes must adapt instead.")
+            else:
+                print("[INFO] Visual projection TRAINABLE while GP active (experimentation mode)")
         else:
             # Identity projection (no-op)
             self.visual_projection = nn.Identity()
@@ -227,6 +219,7 @@ class AdapterMethod(nn.Module):
                 self.prototypes = base_text_features.clone().detach()
             else:
                 self.prototypes = nn.Parameter(base_text_features.clone())
+                self.prototypes.requires_grad = False
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
             print("Using Task_residual approach for Linear Probing")
             self.init_TR(alpha=0.5)
@@ -395,11 +388,27 @@ class CustomCLIP(nn.Module):
 
         self._in_training_epoch = False  # toggled by trainer each epoch
         self._batch_count = 0  # Track batches for GP update frequency
+        self._epoch_count = 0  # Track epochs for GP update frequency
         self.gp_update_freq = cfg.TRAINER.ADAPTER.GP_UPDATE_FREQ if hasattr(cfg.TRAINER.ADAPTER, 'GP_UPDATE_FREQ') else 1
         
         # Cache current prototypes to avoid recomputation every forward pass
         self._cached_prototypes = None
         self._last_update_batch = -1
+
+        # ------------------------------------------------------------------
+        #  Two-phase fine-tuning helpers
+        #   • During the GP warm-up (epoch < warmup_epochs) we optionally keep
+        #     the visual projection frozen *and* skip prototype ℓ2-normalisation
+        #     to amplify the effect of weight shifts.
+        #   • After the warm-up we re-enable normalisation and (optionally)
+        #     unfreeze the projection matrix.  Both behaviours can be toggled
+        #     at runtime by the trainer via the public attributes below.
+        # ------------------------------------------------------------------
+
+        # Start with normalisation ON – can be disabled via cfg if desired.
+        self.normalize_prototypes: bool = True
+        # Expose a quick helper so the trainer can (un)freeze visual projection
+        self.visual_projection_frozen: bool = cfg.TRAINER.ADAPTER.GP_FREEZE_VP
 
     def _update_prototypes_if_needed(self):
         """Update GP prototypes only when needed (not every forward pass)."""
@@ -448,12 +457,12 @@ class CustomCLIP(nn.Module):
                 probs = F.softmax(q.mean[0], dim=-1)
                 entropy = -(probs * probs.log()).sum().item()
                 mu_std = q.mean.std().item()
+                # Additional sanity checks
                 temp = self.gp_weighter.weight_temperature.item()
-                top_vals, top_idx = torch.topk(probs, k=min(3, probs.numel()))
-                if self._in_training_epoch and self._batch_count == 1:
+                if self._in_training_epoch and self._batch_count == 1 and self._epoch_count % 10 == 0:
                     print(
-                        f"[INFO][GP] entropy={entropy:.3f} | mu_std={mu_std:.4f} | temp={temp:.2f} | "
-                        f"top idx {top_idx.tolist()} probs {[round(v.item(),4) for v in top_vals]}"
+                        f"[INFO][GP] epoch {self._epoch_count} entropy={entropy:.3f} | mu_std={mu_std:.4f} | temp={temp:.2f} | "
+                        f"probs {[round(v.item(),4) for v in probs]}"
                     )
 
         return proto
@@ -539,9 +548,13 @@ class CustomCLIP(nn.Module):
             
         # Apply visual projection W: v_tilde = Wv
         feats_proj = self.adapter.visual_projection(features)
-        # Normalize after projection
         feats_n = feats_proj / feats_proj.norm(dim=-1, keepdim=True)
-        prot_n = prot / prot.norm(dim=-1, keepdim=True)
+
+        if getattr(self, "normalize_prototypes", True):
+            prot_n = prot / prot.norm(dim=-1, keepdim=True)
+        else:
+            prot_n = prot
+
         return (feats_n @ prot_n.t()) * self.logit_scale.exp()
 
     def forward_task_residual(self, features, prototypes=None):
@@ -607,7 +620,8 @@ class TrainerXCostume(SimpleTrainer):
     def run_epoch(self):
         # Start-of-epoch bookkeeping -------------------------------------------------
         self.model._in_training_epoch = True
-        self.model._batch_count = 0   # ensures per-epoch diagnostics fire
+        self.model._batch_count = 0
+        self.model._epoch_count += 1
         
         # ------------------------------------------------------------------
         # Train mode for adapter + GP so gradients flow, but keep frozen CLIP
@@ -672,7 +686,7 @@ class TrainerXCostume(SimpleTrainer):
                 eta_seconds = batch_time.avg * nb_remain
                 eta = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-                if self.epoch % 10 == 0 or self.epoch == self.max_epoch - 1:
+                if (self.epoch+1) % 10 == 0 or self.epoch == 0:
                     info = []
                     info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
                     info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]
@@ -738,9 +752,9 @@ class ADAPTER(TrainerXCostume):
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Exclude frozen adapter params (e.g., visual_projection) ---------
-            adapter_params = [p for p in self.model.adapter.parameters() if p.requires_grad]
-            # Add CLIP temperature if trainable
-            if self.model.logit_scale.requires_grad:
+            adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
+            # Add CLIP temperature if trainable and not already present
+            if self.model.logit_scale.requires_grad and id(self.model.logit_scale) not in {id(p) for p in adapter_params}:
                 adapter_params.append(self.model.logit_scale)
             
             print(f"Number of adapter parameters: {len(adapter_params)}")
@@ -761,7 +775,7 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}
             ]
             
             # Create optimizer with parameter groups
@@ -875,13 +889,67 @@ class ADAPTER(TrainerXCostume):
             df = pd.DataFrame(summary_grid)
             df.to_csv(self.cfg.OUTPUT_DIR + "/grid_search.csv")
         else:
-            # Training of adapter
+            # -------------------- TWO-PHASE TRAIN LOOP --------------------
+            #  Phase-0 setup: expose a mutable β and warm-up configuration
+            self.gp_beta = self.cfg.TRAINER.ADAPTER.GP_BETA
+            warmup_epochs = getattr(self.cfg.TRAINER.ADAPTER, "GP_WARMUP_EPOCHS", 20)
+            phase2_lr_factor = getattr(self.cfg.TRAINER.ADAPTER, "GP_PHASE2_LR_FACTOR", 0.1)
+            phase2_beta = getattr(self.cfg.TRAINER.ADAPTER, "GP_PHASE2_BETA", self.gp_beta)
+            unfreeze_vp = getattr(self.cfg.TRAINER.ADAPTER, "GP_PHASE2_UNFREEZE_VP", True)
+
             self.before_train()
             for self.epoch in range(self.start_epoch, self.max_epoch):
 
                 # Train and update weights per epoch
                 self.before_epoch()
                 self.run_epoch()
+
+                # ---------------- Phase switch -------------------
+                if (self.epoch + 1) == warmup_epochs:
+                    print("[INFO] === Switching to phase-2 (joint fine-tuning) ===")
+
+                    # 1)  Update KL weight β
+                    self.gp_beta = phase2_beta
+                    print(f"[INFO] New GP β = {self.gp_beta}")
+
+                    # 2)  Un-freeze visual projection if requested
+                    if unfreeze_vp and self.model.adapter.visual_projection is not None:
+                        for p in self.model.adapter.visual_projection.parameters():
+                            p.requires_grad = True
+                        # Re-enable prototype normalisation for logits
+                        if hasattr(self.model, "normalize_prototypes"):
+                            self.model.normalize_prototypes = True
+
+                    # 3)  Rebuild optimizer with (optionally) reduced GP LR and new VP params
+                    adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
+                    if self.model.logit_scale.requires_grad and id(self.model.logit_scale) not in {id(p) for p in adapter_params}:
+                        adapter_params.append(self.model.logit_scale)
+
+                    gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
+
+                    # Update GP LR
+                    gp_lr = getattr(self.cfg.TRAINER.ADAPTER, "GP_LR", self.cfg.OPTIM.LR) * phase2_lr_factor
+
+                    from torch.optim import SGD, Adam
+                    weight_decay_val = getattr(self.cfg.OPTIM, "WEIGHT_DECAY", 0.0)
+                    param_groups = [
+                        {"params": adapter_params, "lr": self.cfg.OPTIM.LR, "weight_decay": weight_decay_val},
+                        {"params": gp_params, "lr": gp_lr, "weight_decay": 0.0},
+                    ]
+
+                    # Construct new optimizer of same type
+                    if self.cfg.OPTIM.NAME.lower() == "sgd":
+                        new_optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
+                    else:
+                        new_optim = Adam(param_groups)
+
+                    # Replace in trainer bookkeeping
+                    self.optim = new_optim
+                    self.sched = build_lr_scheduler(self.optim, self.cfg.OPTIM)
+                    # Update registry entry so that checkpoints contain new opt
+                    self.register_model("adapter_phase2", self.model.adapter, self.optim, self.sched)
+
+                # --------------------------------------------------
 
                 # Update lagrangian parameter and multiplier
                 if "adaptative" in self.model.adapter.apply_constraint:
@@ -918,9 +986,9 @@ class ADAPTER(TrainerXCostume):
         # Recreate optimizer considering GP parameters
         if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Exclude frozen adapter params (e.g., visual_projection) ---------
-            adapter_params = [p for p in self.model.adapter.parameters() if p.requires_grad]
-            # Add CLIP temperature if trainable
-            if self.model.logit_scale.requires_grad:
+            adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
+            # Add CLIP temperature if trainable and not already present
+            if self.model.logit_scale.requires_grad and id(self.model.logit_scale) not in {id(p) for p in adapter_params}:
                 adapter_params.append(self.model.logit_scale)
             
             # Get weight decay if available
@@ -930,18 +998,18 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}  # No weight decay for GP params
+                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}
             ]
             
             # Create optimizer with parameter groups
             from torch.optim import SGD, Adam
             if self.cfg.OPTIM.NAME.lower() == "sgd":
-                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, 'MOMENTUM', 0.9))
+                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
             elif self.cfg.OPTIM.NAME.lower() == "adam":
                 self.optim = Adam(param_groups)
             else:
                 # Fallback to SGD
-                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, 'MOMENTUM', 0.9))
+                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
         else:
             self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)
             
@@ -984,7 +1052,8 @@ class ADAPTER(TrainerXCostume):
                 if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
                     kl_divergence = self.model.get_gp_kl_divergence()
                     if kl_divergence is not None:
-                        loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+                        beta = getattr(self, "gp_beta", self.cfg.TRAINER.ADAPTER.GP_BETA)
+                        loss = loss + beta * kl_divergence
                     
                 
             self.optim.zero_grad()
@@ -1010,7 +1079,8 @@ class ADAPTER(TrainerXCostume):
             if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
                 kl_divergence = self.model.get_gp_kl_divergence()
                 if kl_divergence is not None:
-                    loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+                    beta = getattr(self, "gp_beta", self.cfg.TRAINER.ADAPTER.GP_BETA)
+                    loss = loss + beta * kl_divergence
             
             self.model_backward_and_update(loss)
         

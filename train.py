@@ -106,11 +106,20 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
     cfg.TRAINER.ADAPTER.USE_VISUAL_PROJECTION = False  # Disable visual projection for testingw
+    cfg.TRAINER.ADAPTER.GP_FREEZE_VP = True
+    cfg.TRAINER.ADAPTER.MIN_TEMP = 20
     # GP Prior Parameters
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
     cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # only used for rbf kernel
     cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # only used for rbf kernel
     cfg.TRAINER.ADAPTER.GP_NOISE = 1e-4
+    cfg.TRAINER.ADAPTER.GP_MIN_TEMP = 20
+    
+    # Two-phase fine-tuning (GP warm-up followed by joint LP)
+    cfg.TRAINER.ADAPTER.GP_WARMUP_EPOCHS = 20        # epochs to train GP only
+    cfg.TRAINER.ADAPTER.GP_PHASE2_LR_FACTOR = 0.1     # LR multiplier for GP params after warm-up
+    cfg.TRAINER.ADAPTER.GP_PHASE2_BETA = 0.01         # KL weight after warm-up
+    cfg.TRAINER.ADAPTER.GP_PHASE2_UNFREEZE_VP = True  # unfreeze visual projection after warm-up
     
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
@@ -155,7 +164,7 @@ def main(args):
     if torch.cuda.is_available() and cfg.USE_CUDA:
         torch.backends.cudnn.benchmark = True
 
-    print_args(args, cfg)
+    #print_args(args, cfg)
     #print("Collecting env info ...")
     #print("** System info **\n{}\n".format(collect_env_info()))
 
