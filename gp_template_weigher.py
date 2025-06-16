@@ -29,7 +29,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
         self.num_mc_samples = cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES
-        self.min_temp = cfg.TRAINER.ADAPTER.GP_MIN_TEMP
 
         # ------------------------------------------------------------------
         #  One independent GP per class (batched). We do NOT wrap the
@@ -88,12 +87,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         with torch.no_grad():
             vm = self.variational_strategy._variational_distribution.variational_mean
             vm.normal_(mean=0.0, std=1.0)
-
-        # Learnable *positive* temperature τ.  We store logτ as a parameter
-        # and map it through softplus to ensure τ>0 and avoid runaway
-        # collapse (τ→0) that was flattening the weights.
-        init_temp = kwargs.pop("init_temperature", 1.0) if "init_temperature" in kwargs else 1.0
-        self.register_parameter("_log_temp", nn.Parameter(torch.log(torch.tensor(init_temp))))
 
         # Register the (fixed) template embeddings (original dtype) for downstream
         # use (e.g., for normalising prototypes/pruning). This buffer is not
@@ -214,13 +207,13 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             if alpha.dim() == 3 and alpha.size(1) == self.num_templates and alpha.size(2) == self.num_classes:
                 # Transpose to [S, K, M]
                 alpha = alpha.permute(0, 2, 1)
-            w = F.softmax(alpha * self.weight_temperature, dim=-1).mean(0)                 # [K, M]
+            w = F.softmax(alpha, dim=-1).mean(0)                 # [K, M]
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-            w = F.softmax(mu * self.weight_temperature, dim=-1)                             # [K, M]
+            w = F.softmax(mu, dim=-1)                             # [K, M]
 
         prototypes = self._prototype_from_weights(w)              # [K, D]
 
@@ -231,8 +224,3 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     def __call__(self, *_unused, use_mean: bool = False):  # type: ignore[override]
         return self.forward_and_kl(use_mean=use_mean)
 
-    # Expose positive temperature property ---------------------------------
-    @property
-    def weight_temperature(self) -> torch.Tensor:
-        # softplus: log(1+e^x) ∈ (0,∞)
-        return torch.clamp(F.softplus(self._log_temp) + 1e-6, min=self.min_temp)

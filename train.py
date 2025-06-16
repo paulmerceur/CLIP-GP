@@ -98,28 +98,12 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.PREC = "fp16"
     cfg.TRAINER.ADAPTER.NUM_TEMPLATES = 1
     
-    # GP-specific configuration variables
+    # GP-specific configuration variables (simplified)
     cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
-    cfg.TRAINER.ADAPTER.GP_UPDATE_FREQ = 1  # update GP prototypes every n batches
     cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
     cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
-    cfg.TRAINER.ADAPTER.GP_USE_DIAGONAL_COV = True  # use diagonal covariance for efficiency
-    cfg.TRAINER.ADAPTER.USE_VISUAL_PROJECTION = False  # Disable visual projection for testingw
-    cfg.TRAINER.ADAPTER.GP_FREEZE_VP = True
-    cfg.TRAINER.ADAPTER.MIN_TEMP = 20
-    # GP Prior Parameters
-    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
-    cfg.TRAINER.ADAPTER.GP_LENGTHSCALE = 1.0  # only used for rbf kernel
-    cfg.TRAINER.ADAPTER.GP_OUTPUTSCALE = 1.0  # only used for rbf kernel
-    cfg.TRAINER.ADAPTER.GP_NOISE = 1e-4
-    cfg.TRAINER.ADAPTER.GP_MIN_TEMP = 20
-    
-    # Two-phase fine-tuning (GP warm-up followed by joint LP)
-    cfg.TRAINER.ADAPTER.GP_WARMUP_EPOCHS = 20        # epochs to train GP only
-    cfg.TRAINER.ADAPTER.GP_PHASE2_LR_FACTOR = 0.1     # LR multiplier for GP params after warm-up
-    cfg.TRAINER.ADAPTER.GP_PHASE2_BETA = 0.01         # KL weight after warm-up
-    cfg.TRAINER.ADAPTER.GP_PHASE2_UNFREEZE_VP = True  # unfreeze visual projection after warm-up
+    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
     
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1

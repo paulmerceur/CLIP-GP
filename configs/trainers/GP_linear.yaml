@@ -27,22 +27,13 @@ TRAIN:
 
 TRAINER:
   ADAPTER:
-    INIT: ZS  # can be ZS or RANDOM
+    INIT: ZS
     CONSTRAINT: none  
     PREC: fp16
     NUM_TEMPLATES: 10
-    # GP-specific configuration
+    # GP-specific configuration (simplified)
     USE_GP: True
     GP_KERNEL_TYPE: rbf
-    GP_LENGTHSCALE: 0.3
     GP_NUM_MC_SAMPLES: 10
-    GP_UPDATE_FREQ: 1  # Update every batch for better learning
-    GP_LR: 0.1  # Higher learning rate for GP parameters
-    GP_BETA: 0.0
-    USE_VISUAL_PROJECTION: True  # Re-enable visual projection as per math formulation
-    GP_FREEZE_VP: True
-    GP_WARMUP_EPOCHS: 20
-    GP_PHASE2_LR_FACTOR: 0.1     # GP LR ← 0.1 × warm-up LR
-    GP_PHASE2_BETA: 0.02         # stronger KL after warm-up
-    GP_PHASE2_UNFREEZE_VP: True  # unfreeze W after warm-up
-    GP_MIN_TEMP: 20        # try 20–50
+    GP_LR: 1e-2
+    GP_BETA: 0.1  # KL weight for ELBO loss

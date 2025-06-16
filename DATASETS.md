@@ -30,11 +30,13 @@ Datasets list:
 - [ImageNet-R](#imagenet-r)
 
 The instructions to prepare each dataset are detailed below. To ensure reproducibility and fair comparison for future work, we provide fixed train/val/test splits for all datasets except ImageNet where the validation set is used as test set. The fixed splits are either from the original datasets (if available) or created by us.
+For all files stored in Google Drive, it is recommended to use `gdown`: `pip install gdown`
 
 ### ImageNet
 - Create a folder named `imagenet/` under `$DATA`.
 - Create `images/` under `imagenet/`.
-- Download the dataset from the [official website](https://image-net.org/index.php) and extract the training and validation sets to `$DATA/imagenet/images`. The directory structure should look like
+- Download the dataset from the [official website](https://image-net.org/index.php) and extract the training and validation sets to `$DATA/imagenet/images`.
+The directory structure should look like
 ```
 imagenet/
 |–– images/
@@ -43,17 +45,37 @@ imagenet/
 ```
 - If you had downloaded the ImageNet dataset before, you can create symbolic links to map the training and validation sets to `$DATA/imagenet/images`.
 - Download the `classnames.txt` to `$DATA/imagenet/` from this [link](https://drive.google.com/file/d/1-61f_ol79pViBFDG_IDlUQSwoLcn2XXF/view?usp=sharing). The class names are copied from [CLIP](https://github.com/openai/CLIP/blob/main/notebooks/Prompt_Engineering_for_ImageNet.ipynb).
+Run :
+```
+mkdir imagenet
+cd imagenet
+gdown 1-61f_ol79pViBFDG_IDlUQSwoLcn2XXF
+wget https://www.image-net.org/data/imagenet21k_resized.tar.gz
+tar -xfz imagenet21k_resized.tar.gz
+rm imagenet21k_resized.tar.gz
+```
 
 ### Caltech101
 - Create a folder named `caltech-101/` under `$DATA`.
 - Download `101_ObjectCategories.tar.gz` from http://www.vision.caltech.edu/Image_Datasets/Caltech101/101_ObjectCategories.tar.gz and extract the file under `$DATA/caltech-101`.
 - Download `split_zhou_Caltech101.json` from this [link](https://drive.google.com/file/d/1hyarUivQE36mY6jSomru6Fjd-JzwcCzN/view?usp=sharing) and put it under `$DATA/caltech-101`. 
-
 The directory structure should look like
 ```
 caltech-101/
 |–– 101_ObjectCategories/
 |–– split_zhou_Caltech101.json
+```
+Run :
+```
+mkdir caltech-101
+cd caltech-101
+gdown 1hyarUivQE36mY6jSomru6Fjd-JzwcCzN
+wget https://data.caltech.edu/records/mzrjq-6wc02/files/caltech-101.zip
+unzip caltech-101.zip
+mv catech-101/101_ObjectCategories.tar.gz .
+tar -xfz 101_ObjectCategories.tar.gz
+rm -rf catech-101
+rm 101_ObjectCategories.tar.gz
 ```
 
 ### OxfordPets
@@ -61,13 +83,24 @@ caltech-101/
 - Download the images from https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz.
 - Download the annotations from https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz.
 - Download `split_zhou_OxfordPets.json` from this [link](https://drive.google.com/file/d/1501r8Ber4nNKvmlFVQZ8SeUHTcdTTEqs/view?usp=sharing). 
-
 The directory structure should look like
 ```
 oxford_pets/
 |–– images/
 |–– annotations/
 |–– split_zhou_OxfordPets.json
+```
+Run :
+```
+mkdir oxford_pets
+cd oxford_pets
+gdown 1501r8Ber4nNKvmlFVQZ8SeUHTcdTTEqs
+wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz
+wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz
+tar -xfz images.tar.gz
+tar -xfz annotations.tar.gz
+rm images.tar.gz
+rm annotations.tar.gz
 ```
 
 ### StanfordCars
