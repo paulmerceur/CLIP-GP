@@ -165,7 +165,7 @@ class AdapterMethod(nn.Module):
         self.base_text_features = base_text_features
         self.augmentations = True
         self.epochs_aumentation = 20
-        self.use_gp = cfg.TRAINER.ADAPTER.USE_GP  # Store GP usage flag
+        self.use_gp = cfg.TRAINER.ADAPTER.USE_GP
 
         if self.initialization == "RANDOM":  # Randomly initialized Linear Probing
             print("Using RANDOM initialization in Linear Probing")
@@ -177,8 +177,11 @@ class AdapterMethod(nn.Module):
                 # When GP is active, prototypes will be updated by GP - initialize as non-parameter
                 self.prototypes = base_text_features.clone().detach()
             else:
+                # Default: make the zero-shot prototypes *trainable* so that
+                # the linear probe can actually learn from the labelled
+                # data. They start from the zero-shot weights but will be
+                # updated during training.
                 self.prototypes = nn.Parameter(base_text_features.clone())
-                self.prototypes.requires_grad = False
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
             print("Using Task_residual approach for Linear Probing")
             self.init_TR(alpha=0.5)
@@ -337,6 +340,19 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
+        # ---------------------------------------------------------------
+        #  Learnable visual projection (only active when GP is enabled)
+        # ---------------------------------------------------------------
+        self.use_visual_proj = cfg.TRAINER.ADAPTER.USE_GP  # flag for later use
+        self.vision_dim = clip_model.text_projection.shape[1]
+        self.visual_proj = nn.Linear(self.vision_dim, self.vision_dim, bias=False)
+        torch.nn.init.eye_(self.visual_proj.weight)
+
+        # Freeze projection for baseline runs (no GP)
+        if not self.use_visual_proj:
+            for p in self.visual_proj.parameters():
+                p.requires_grad = False
+
         # Use helper to build all text-related tensors 
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
 
@@ -366,7 +382,17 @@ class CustomCLIP(nn.Module):
         if self._in_training_epoch:
             self._batch_count += 1
             
-        feats = x if is_feature else self.image_encoder(x.type(self.dtype))
+        # Obtain image features (pre-computed or freshly encoded)
+        feats = x.type(self.dtype) if is_feature else self.image_encoder(x.type(self.dtype))
+
+        # Optionally apply visual projection (only when GP is used)
+        if self.use_visual_proj:
+            # Ensure dtype consistency
+            if feats.dtype != self.visual_proj.weight.dtype:
+                feats = feats.to(dtype=self.visual_proj.weight.dtype)
+
+            feats = self.visual_proj(feats)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
 
         # Get current prototypes - simple and direct
         if self.gp_weighter is not None:
@@ -401,19 +427,15 @@ class CustomCLIP(nn.Module):
     #  Adapter‑specific logits                                          #
     # ----------------------------------------------------------------- #
     def forward_lp(self, features, prototypes=None):
-        prototypes = prototypes.to(device=features.device)
         if prototypes is None:
-            prot = self.adapter()
-        else:
-            print(f"[DEBUG] Using prototypes from forward_lp, self.adapter() == prototypes: {self.adapter() == prototypes}")
-            prot = prototypes
+            prototypes = self.adapter()
         
         # Ensure prototypes are on the same device and dtype as features
-        if prot.device != features.device or prot.dtype != features.dtype:
-            prot = prot.to(device=features.device, dtype=features.dtype)
+        if prototypes.device != features.device or prototypes.dtype != features.dtype:
+            prototypes = prototypes.to(device=features.device, dtype=features.dtype)
             
         features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prot / prot.norm(dim=-1, keepdim=True)
+        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
 
         return (features_norm @ prototypes_norm.t()) * self.logit_scale.exp()
 
@@ -499,6 +521,14 @@ class TrainerXCostume(SimpleTrainer):
                   "gp.train():", self.model.gp_weighter.training if self.model.gp_weighter else "N/A",
                   "vision.eval():", not self.model.image_encoder.training,
                   "text.eval():", not self.model.text_encoder.training)
+
+            # ---- Extra DEBUG: GP template weights for class 0 ----
+            if self.model.gp_weighter is not None:
+                with torch.no_grad():
+                    dist = self.model.gp_weighter._weight_distribution()
+                    weights_mean = torch.softmax(dist.mean, dim=-1)  # [K, M]
+                    print("[DEBUG] GP weights (class 0, first 10 templates):",
+                          weights_mean[0, :10].detach().cpu().numpy())
 
         # Init kpis tracker
         losses = MetricMeter()
@@ -591,12 +621,13 @@ class ADAPTER(TrainerXCostume):
 
         print("Turning off gradients in frozen modules and honour pre-set flags")
         for name, param in self.model.named_parameters():
-            # Keep a trainable temperature (logit_scale) even though it's at top-level.
             if name == "logit_scale":
                 param.requires_grad = True
+            elif "visual_proj" in name:
+                param.requires_grad = cfg.TRAINER.ADAPTER.USE_GP  # train only with GP
             else:
                 # Freeze CLIP encoders ➜ no 'adapter' nor 'gp_weighter' in the name
-                if ("adapter" not in name) and ("gp_weighter" not in name):
+                if ("adapter" not in name) and ("gp_weighter" not in name) and ("visual_proj" not in name):
                     param.requires_grad = False
 
         if cfg.MODEL.INIT_WEIGHTS:
@@ -609,9 +640,7 @@ class ADAPTER(TrainerXCostume):
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Exclude frozen adapter params (e.g., visual_projection) ---------
             adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
-            # Add CLIP temperature if trainable and not already present
-            if self.model.logit_scale.requires_grad and id(self.model.logit_scale) not in {id(p) for p in adapter_params}:
-                adapter_params.append(self.model.logit_scale)
+            adapter_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
             
             print(f"Number of adapter parameters: {len(adapter_params)}")
             
@@ -619,6 +648,9 @@ class ADAPTER(TrainerXCostume):
             print("Adapter parameters:")
             for name, param in self.model.adapter.named_parameters():
                 print(f"  {name}: {param.shape}")
+            print("Visual projection parameters:")
+            for name, param in self.model.visual_proj.named_parameters():
+                print(f"  {name}: {param.shape}, trainable={param.requires_grad}")
             
             print("GP parameters:")
             for name, param in self.model.gp_weighter.named_parameters():
@@ -628,7 +660,12 @@ class ADAPTER(TrainerXCostume):
             all_params = adapter_params + [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
             self.optim = build_optimizer(all_params, cfg.OPTIM)
         else:
-            self.optim = build_optimizer(self.model.adapter, cfg.OPTIM)
+            # Optimise adapter (+ visual projection if trainable) and logit_scale
+            baseline_params = list(self.model.adapter.parameters())
+            baseline_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
+            if self.model.logit_scale.requires_grad:
+                baseline_params.append(self.model.logit_scale)
+            self.optim = build_optimizer(baseline_params, cfg.OPTIM)
             
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("adapter", self.model.adapter, self.optim, self.sched)
@@ -677,7 +714,10 @@ class ADAPTER(TrainerXCostume):
         if "TipA" in self.model.adapter.initialization:
             # Given the new key features, register again the weights to optimizer
             self.model.adapter.init_tipadapter(self.features_train, self.labels_train)
-            self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)  # Update optimizer with new params
+            # Re-build optimiser including visual projection parameters
+            tipa_params = list(self.model.adapter.parameters())
+            tipa_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
+            self.optim = build_optimizer(tipa_params, self.cfg.OPTIM)  # Update optimizer with new params
             self.sched = build_lr_scheduler(self.optim, self.cfg.OPTIM)
             self.register_model("adapter_tipa-f-", self.model.adapter, self.optim, self.sched)
 
@@ -771,9 +811,7 @@ class ADAPTER(TrainerXCostume):
         if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Exclude frozen adapter params
             adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
-            # Add CLIP temperature if trainable and not already present
-            if self.model.logit_scale.requires_grad and id(self.model.logit_scale) not in {id(p) for p in adapter_params}:
-                adapter_params.append(self.model.logit_scale)
+            adapter_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
             
             # Get weight decay if available
             weight_decay = getattr(self.cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
@@ -795,7 +833,10 @@ class ADAPTER(TrainerXCostume):
                 # Fallback to SGD
                 self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
         else:
-            self.optim = build_optimizer(self.model.adapter, self.cfg.OPTIM)
+            # Re-build optimiser including visual projection parameters
+            baseline_params = list(self.model.adapter.parameters())
+            baseline_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
+            self.optim = build_optimizer(baseline_params, self.cfg.OPTIM)
             
         self.sched = build_lr_scheduler(self.optim, self.cfg.OPTIM)
         self._models.popitem(), self._optims.popitem(),self._scheds.popitem()
@@ -839,7 +880,7 @@ class ADAPTER(TrainerXCostume):
         # ------------------------------------------------------------------
         # Forward + loss under (optional) autocast
         # ------------------------------------------------------------------
-        with autocast(enabled=use_amp):
+        with autocast(enabled=use_amp, device_type=self.device.type):
             # Likelihood term (cross-entropy)
             output = self.model.forward_features(features)
             loss_ce = F.cross_entropy(output, labels)
@@ -884,7 +925,6 @@ class ADAPTER(TrainerXCostume):
 
         if kl_divergence is not None:
             loss_summary["kl_divergence"] = kl_divergence.item()
-            loss_summary["gp_beta"] = self.cfg.TRAINER.ADAPTER.GP_BETA
 
         # Scheduler step once per epoch (when last batch is processed)
         if (self.batch_idx + 1) == self.num_batches:

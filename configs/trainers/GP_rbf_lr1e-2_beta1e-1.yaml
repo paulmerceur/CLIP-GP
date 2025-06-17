@@ -14,7 +14,7 @@ INPUT:
 
 OPTIM:
   NAME: "sgd"
-  LR: 0.1
+  LR: 0.01
   MAX_EPOCH: 300
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
@@ -31,9 +31,9 @@ TRAINER:
     CONSTRAINT: none  
     PREC: fp16
     NUM_TEMPLATES: 10
-    # GP-specific configuration (simplified)
+    # GP-specific configuration
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
     GP_LR: 1e-2
-    GP_BETA: 0.1  # KL weight for ELBO loss
+    GP_BETA: 1e-1

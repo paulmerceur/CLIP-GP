@@ -74,9 +74,6 @@ def reset_cfg(cfg, args):
     if args.head:
         cfg.MODEL.HEAD.NAME = args.head
 
-    if args.num_templates:
-        cfg.TRAINER.ADAPTER.NUM_TEMPLATES = args.num_templates
-
 
 def extend_cfg(cfg):
     """
@@ -178,7 +175,6 @@ if __name__ == "__main__":
     parser.add_argument("--trainer", type=str, default="ADAPTER", help="name of trainer")
     parser.add_argument("--backbone", type=str, default="RN50", help="name of CNN backbone")
     parser.add_argument("--head", type=str, default="", help="name of head")
-    parser.add_argument("--num-templates", type=int, default=1, help="number of templates")
     parser.add_argument("--eval-only", action="store_true", help="evaluation only")
     parser.add_argument("--model-dir", type=str, default="", help="load model from this directory for eval-only mode")
     parser.add_argument("--load-epoch", type=int, help="load model weights at this epoch for evaluation")

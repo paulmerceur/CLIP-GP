@@ -27,5 +27,8 @@ TRAIN:
 
 TRAINER:
   ADAPTER:
+    INIT: ZS
+    CONSTRAINT: none  
+    PREC: fp16
+    NUM_TEMPLATES: 10
     USE_GP: False
-    USE_VISUAL_PROJECTION: False  # Disable visual projection for testing
