@@ -30,12 +30,14 @@ Datasets list:
 - [ImageNet-R](#imagenet-r)
 
 The instructions to prepare each dataset are detailed below. To ensure reproducibility and fair comparison for future work, we provide fixed train/val/test splits for all datasets except ImageNet where the validation set is used as test set. The fixed splits are either from the original datasets (if available) or created by us.
-For all files stored in Google Drive, it is recommended to use `gdown`: `pip install gdown`
+For all files stored in Google Drive, it is recommended to use `gdown`: `pip install gdown`.
+Some datasets are only available on Kaggle, it is recommended to use the Kaggle API (https://www.kaggle.com/docs/api): `pip install kaggle`
 
 ### ImageNet
 - Create a folder named `imagenet/` under `$DATA`.
 - Create `images/` under `imagenet/`.
 - Download the dataset from the [official website](https://image-net.org/index.php) and extract the training and validation sets to `$DATA/imagenet/images`.
+
 The directory structure should look like
 ```
 imagenet/
@@ -45,14 +47,16 @@ imagenet/
 ```
 - If you had downloaded the ImageNet dataset before, you can create symbolic links to map the training and validation sets to `$DATA/imagenet/images`.
 - Download the `classnames.txt` to `$DATA/imagenet/` from this [link](https://drive.google.com/file/d/1-61f_ol79pViBFDG_IDlUQSwoLcn2XXF/view?usp=sharing). The class names are copied from [CLIP](https://github.com/openai/CLIP/blob/main/notebooks/Prompt_Engineering_for_ImageNet.ipynb).
+
 Run :
 ```
-mkdir imagenet
-cd imagenet
-gdown 1-61f_ol79pViBFDG_IDlUQSwoLcn2XXF
-wget https://www.image-net.org/data/imagenet21k_resized.tar.gz
-tar -xfz imagenet21k_resized.tar.gz
-rm imagenet21k_resized.tar.gz
+mkdir imagenet && \
+cd imagenet && \
+gdown 1-61f_ol79pViBFDG_IDlUQSwoLcn2XXF && \
+wget https://www.image-net.org/data/imagenet21k_resized.tar.gz && \
+tar -xzf imagenet21k_resized.tar.gz && \
+rm imagenet21k_resized.tar.gz && \
+cd ..
 ```
 
 ### Caltech101
@@ -65,17 +69,19 @@ caltech-101/
 |–– 101_ObjectCategories/
 |–– split_zhou_Caltech101.json
 ```
+
 Run :
 ```
-mkdir caltech-101
-cd caltech-101
-gdown 1hyarUivQE36mY6jSomru6Fjd-JzwcCzN
-wget https://data.caltech.edu/records/mzrjq-6wc02/files/caltech-101.zip
-unzip caltech-101.zip
-mv catech-101/101_ObjectCategories.tar.gz .
-tar -xfz 101_ObjectCategories.tar.gz
-rm -rf catech-101
-rm 101_ObjectCategories.tar.gz
+mkdir caltech-101 && \
+cd caltech-101 && \
+gdown 1hyarUivQE36mY6jSomru6Fjd-JzwcCzN && \
+wget https://data.caltech.edu/records/mzrjq-6wc02/files/caltech-101.zip && \
+unzip caltech-101.zip && \
+mv catech-101/101_ObjectCategories.tar.gz . && \
+tar -xzf 101_ObjectCategories.tar.gz && \
+rm -rf catech-101 && \
+rm 101_ObjectCategories.tar.gz && \
+cd ..
 ```
 
 ### OxfordPets
@@ -90,17 +96,19 @@ oxford_pets/
 |–– annotations/
 |–– split_zhou_OxfordPets.json
 ```
+
 Run :
 ```
-mkdir oxford_pets
-cd oxford_pets
-gdown 1501r8Ber4nNKvmlFVQZ8SeUHTcdTTEqs
-wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz
-wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz
-tar -xfz images.tar.gz
-tar -xfz annotations.tar.gz
-rm images.tar.gz
-rm annotations.tar.gz
+mkdir oxford_pets && \
+cd oxford_pets && \
+gdown 1501r8Ber4nNKvmlFVQZ8SeUHTcdTTEqs && \
+wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz && \
+wget https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz && \
+tar -xzf images.tar.gz && \
+tar -xzf annotations.tar.gz && \
+rm images.tar.gz && \
+rm annotations.tar.gz && \
+cd ..
 ```
 
 ### StanfordCars
@@ -121,6 +129,16 @@ stanford_cars/
 |–– split_zhou_StanfordCars.json
 ```
 
+Run :
+```
+mkdir stanford_cars && \
+cd stanford_cars && \
+kaggle datasets download eduardo4jesus/stanford-cars-dataset && \
+unzip stanford-cars-dataset.zip && \
+rm stanford-cars-dataset.zip && \
+cd ..
+```
+
 ### Flowers102
 - Create a folder named `oxford_flowers/` under `$DATA`.
 - Download the images and labels from https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz and https://www.robots.ox.ac.uk/~vgg/data/flowers/102/imagelabels.mat respectively.
@@ -134,6 +152,19 @@ oxford_flowers/
 |–– imagelabels.mat
 |–– jpg/
 |–– split_zhou_OxfordFlowers.json
+```
+
+Run :
+```
+mkdir oxford_flowers && \
+cd oxford_flowers && \
+gdown 1AkcxCXeK_RCGCEC_GvmWxjcjaNhu-at0 && \
+gdown 1Pp0sRXzZFZq15zVOzKjKBu4A9i01nozT && \
+wget https://www.robots.ox.ac.uk/~vgg/data/flowers/102/imagelabels.mat && \
+wget https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz && \
+tar -xzf 102flowers.tgz && \
+rm 102flowers.tgz && \
+cd ..
 ```
 
 ### Food101
@@ -150,6 +181,16 @@ food-101/
 |–– split_zhou_Food101.json
 ```
 
+Run :
+```
+wget http://data.vision.ee.ethz.ch/cvl/food-101.tar.gz && \
+tar -xzf food-101.tar.gz && \
+rm food-101.tar.gz && \
+cd food-101 && \
+gdown 1QK0tGi096I0Ba6kggatX1ee6dJFIcEJl && \
+cd ..
+```
+
 ### FGVCAircraft
 - Download the data from https://www.robots.ox.ac.uk/~vgg/data/fgvc-aircraft/archives/fgvc-aircraft-2013b.tar.gz.
 - Extract `fgvc-aircraft-2013b.tar.gz` and keep only `data/`.
@@ -160,6 +201,18 @@ The directory structure should look like
 fgvc_aircraft/
 |–– images/
 |–– ... # a bunch of .txt files
+```
+
+Run :
+```
+mkdir fgvc_aircraft && \
+cd fgvc_aircraft && \
+wget https://www.robots.ox.ac.uk/~vgg/data/fgvc-aircraft/archives/fgvc-aircraft-2013b.tar.gz && \
+tar -xzf fgvc-aircraft-2013b.tar.gz && \
+rm fgvc-aircraft-2013b.tar.gz && \
+mv fgvc-aircraft-2013b/data/* . && \
+rm -rf fgvc-aircraft-2013b && \
+cd ..
 ```
 
 ### SUN397
@@ -177,6 +230,15 @@ sun397/
 |–– ... # a bunch of .txt files
 ```
 
+Run :
+```
+mkdir sun397 && \
+cd sun397 && \
+gdown 1y2RD81BYuiyvebdN-JymPfyWYcd8_MUq && \
+wget http://vision.princeton.edu/projects/2010/SUN/SUN397.tar.gz && \
+wget https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip && \
+```
+
 ### DTD
 - Download the dataset from https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz and extract it to `$DATA`. This should lead to `$DATA/dtd/`.
 - Download `split_zhou_DescribableTextures.json` from this [link](https://drive.google.com/file/d/1u3_QfB467jqHgNXC00UIzbLZRQCg2S7x/view?usp=sharing).
@@ -190,8 +252,17 @@ dtd/
 |–– split_zhou_DescribableTextures.json
 ```
 
+Run :
+```
+wget https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz && \
+tar -xzf dtd-r1.0.1.tar.gz && \
+rm dtd-r1.0.1.tar.gz && \
+cd dtd && \
+gdown 1u3_QfB467jqHgNXC00UIzbLZRQCg2S7x && \
+cd ..
+```
+
 ### EuroSAT
-- Create a folder named `eurosat/` under `$DATA`.
 - Download the dataset from http://madm.dfki.de/files/sentinel/EuroSAT.zip and extract it to `$DATA/eurosat/`.
 - Download `split_zhou_EuroSAT.json` from [here](https://drive.google.com/file/d/1Ip7yaCWFi0eaOFUGga0lUdVi_DDQth1o/view?usp=sharing).
 
@@ -200,6 +271,16 @@ The directory structure should look like
 eurosat/
 |–– 2750/
 |–– split_zhou_EuroSAT.json
+```
+
+Run :
+```
+wget http://madm.dfki.de/files/sentinel/EuroSAT.zip && \
+unzip EuroSAT.zip && \
+rm EuroSAT.zip && \
+cd eurosat && \
+gdown 1Ip7yaCWFi0eaOFUGga0lUdVi_DDQth1o && \
+cd ..
 ```
 
 ### UCF101
@@ -212,6 +293,17 @@ The directory structure should look like
 ucf101/
 |–– UCF-101-midframes/
 |–– split_zhou_UCF101.json
+```
+
+Run :
+```
+mkdir ucf101 && \
+cd ucf101 && \
+gdown 1I0S0q91hJfsV9Gf4xDIjgDq4AqBNJb1y && \
+gdown 10Jqome3vtUA2keJkNanAiFpgbyC9Hc2O && \
+unzip UCF-101-midframes.zip && \
+rm UCF-101-midframes.zip && \
+cd ..
 ```
 
 ### ImageNetV2
