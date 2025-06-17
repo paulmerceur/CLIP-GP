@@ -61,7 +61,7 @@ cd ..
 
 ### Caltech101
 - Create a folder named `caltech-101/` under `$DATA`.
-- Download `101_ObjectCategories.tar.gz` from http://www.vision.caltech.edu/Image_Datasets/Caltech101/101_ObjectCategories.tar.gz and extract the file under `$DATA/caltech-101`.
+- Download `101_ObjectCategories.tar.gz` from [here](http://www.vision.caltech.edu/Image_Datasets/Caltech101/101_ObjectCategories.tar.gz) and extract the file under `$DATA/caltech-101`.
 - Download `split_zhou_Caltech101.json` from this [link](https://drive.google.com/file/d/1hyarUivQE36mY6jSomru6Fjd-JzwcCzN/view?usp=sharing) and put it under `$DATA/caltech-101`. 
 The directory structure should look like
 ```
@@ -86,8 +86,8 @@ cd ..
 
 ### OxfordPets
 - Create a folder named `oxford_pets/` under `$DATA`.
-- Download the images from https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz.
-- Download the annotations from https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz.
+- Download the images from [here](https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz).
+- Download the annotations from [here](https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz).
 - Download `split_zhou_OxfordPets.json` from this [link](https://drive.google.com/file/d/1501r8Ber4nNKvmlFVQZ8SeUHTcdTTEqs/view?usp=sharing). 
 The directory structure should look like
 ```
@@ -113,17 +113,13 @@ cd ..
 
 ### StanfordCars
 - Create a folder named `stanford_cars/` under `$DATA`.
-- Download the train images http://ai.stanford.edu/~jkrause/car196/cars_train.tgz.
-- Download the test images http://ai.stanford.edu/~jkrause/car196/cars_test.tgz.
-- Download the train labels https://ai.stanford.edu/~jkrause/cars/car_devkit.tgz.
-- Download the test labels http://ai.stanford.edu/~jkrause/car196/cars_test_annos_withlabels.mat.
+- Download the data from Kaggle (https://www.kaggle.com/datasets/eduardo4jesus/stanford-cars-dataset).
 - Download `split_zhou_StanfordCars.json` from this [link](https://drive.google.com/file/d/1ObCFbaAgVu0I-k_Au-gIUcefirdAuizT/view?usp=sharing).
 
 The directory structure should look like
 ```
 stanford_cars/
 |–– cars_test\
-|–– cars_test_annos_withlabels.mat
 |–– cars_train\
 |–– devkit\
 |–– split_zhou_StanfordCars.json
@@ -141,7 +137,7 @@ cd ..
 
 ### Flowers102
 - Create a folder named `oxford_flowers/` under `$DATA`.
-- Download the images and labels from https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz and https://www.robots.ox.ac.uk/~vgg/data/flowers/102/imagelabels.mat respectively.
+- Download the images and labels from [here](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz) and [here](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/imagelabels.mat) respectively.
 - Download `cat_to_name.json` from [here](https://drive.google.com/file/d/1AkcxCXeK_RCGCEC_GvmWxjcjaNhu-at0/view?usp=sharing). 
 - Download `split_zhou_OxfordFlowers.json` from [here](https://drive.google.com/file/d/1Pp0sRXzZFZq15zVOzKjKBu4A9i01nozT/view?usp=sharing).
 
@@ -168,7 +164,7 @@ cd ..
 ```
 
 ### Food101
-- Download the dataset from https://data.vision.ee.ethz.ch/cvl/datasets_extra/food-101/ and extract the file `food-101.tar.gz` under `$DATA`, resulting in a folder named `$DATA/food-101/`.
+- Download the dataset from [here](https://data.vision.ee.ethz.ch/cvl/datasets_extra/food-101/) and extract the file `food-101.tar.gz` under `$DATA`, resulting in a folder named `$DATA/food-101/`.
 - Download `split_zhou_Food101.json` from [here](https://drive.google.com/file/d/1QK0tGi096I0Ba6kggatX1ee6dJFIcEJl/view?usp=sharing).
 
 The directory structure should look like
@@ -192,7 +188,7 @@ cd ..
 ```
 
 ### FGVCAircraft
-- Download the data from https://www.robots.ox.ac.uk/~vgg/data/fgvc-aircraft/archives/fgvc-aircraft-2013b.tar.gz.
+- Download the data from [here](https://www.robots.ox.ac.uk/~vgg/data/fgvc-aircraft/archives/fgvc-aircraft-2013b.tar.gz).
 - Extract `fgvc-aircraft-2013b.tar.gz` and keep only `data/`.
 - Move `data/` to `$DATA` and rename the folder to `fgvc_aircraft/`.
 
@@ -217,8 +213,8 @@ cd ..
 
 ### SUN397
 - Create a folder named  `sun397/` under `$DATA`.
-- Download the images http://vision.princeton.edu/projects/2010/SUN/SUN397.tar.gz.
-- Download the partitions https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip.
+- Download the images [here](http://vision.princeton.edu/projects/2010/SUN/SUN397.tar.gz).
+- Download the partitions [here](https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip).
 - Extract these files under `$DATA/sun397/`.
 - Download `split_zhou_SUN397.json` from this [link](https://drive.google.com/file/d/1y2RD81BYuiyvebdN-JymPfyWYcd8_MUq/view?usp=sharing).
 
@@ -240,7 +236,7 @@ wget https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip && \
 ```
 
 ### DTD
-- Download the dataset from https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz and extract it to `$DATA`. This should lead to `$DATA/dtd/`.
+- Download the dataset from [here](https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz) and extract it to `$DATA`. This should lead to `$DATA/dtd/`.
 - Download `split_zhou_DescribableTextures.json` from this [link](https://drive.google.com/file/d/1u3_QfB467jqHgNXC00UIzbLZRQCg2S7x/view?usp=sharing).
 
 The directory structure should look like
@@ -263,7 +259,7 @@ cd ..
 ```
 
 ### EuroSAT
-- Download the dataset from http://madm.dfki.de/files/sentinel/EuroSAT.zip and extract it to `$DATA/eurosat/`.
+- Download the dataset from [here](http://madm.dfki.de/files/sentinel/EuroSAT.zip) and extract it to `$DATA/eurosat/`.
 - Download `split_zhou_EuroSAT.json` from [here](https://drive.google.com/file/d/1Ip7yaCWFi0eaOFUGga0lUdVi_DDQth1o/view?usp=sharing).
 
 The directory structure should look like
