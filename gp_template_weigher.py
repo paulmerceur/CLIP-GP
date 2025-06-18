@@ -61,7 +61,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         if cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "rbf":
             base_kernel = gpytorch.kernels.RBFKernel(
-                batch_shape=batch_shape, ard_num_dims=self.dim
+                batch_shape=batch_shape, ard_num_dims=self.dim, length_scale=cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE
             )
         elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "cosine":
             base_kernel = gpytorch.kernels.CosineKernel(batch_shape=batch_shape)
@@ -142,3 +142,32 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     
     def get_weight_distribution(self):
         return self.variational_strategy(self._templates.to(torch.float32))
+
+    # ------------------------------------------------------------------
+    #  Helper for Monte-Carlo ELBO
+    # ------------------------------------------------------------------
+    def sample_prototypes(self, num_samples: int, *, use_mean: bool = False) -> torch.Tensor:
+        """Draw *num_samples* sets of template-weighted class prototypes.
+
+        Returns
+        -------
+        Tensor
+            A tensor of shape ``[S, K, D]`` where *S* is ``num_samples``,
+            *K* the number of classes and *D* the embedding dimension.
+        """
+        # Always operate in fp32 for GPyk computations; cast to original
+        # dtype just before returning so that downstream code can combine
+        # the prototypes with CLIP features without extra conversions.
+        q = self.get_weight_distribution()
+
+        if use_mean:
+            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M]
+        else:
+            alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
+            w = torch.softmax(alpha, dim=-1)              # [S,K,M]
+
+        # Linear map  weights → prototypes
+        prototypes = torch.einsum("skm,kmd->skd", w.to(dtype=self._templates.dtype), self._templates)
+
+        # Keep original precision/device for compatibility with CLIP.
+        return prototypes.to(dtype=self._templates.dtype, device=self._templates.device)

@@ -101,6 +101,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
+    cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE = 10.0  # length scale for RBF kernel
     
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1

@@ -325,6 +325,42 @@ class AdapterMethod(nn.Module):
         return self.prototypes
 
 
+class LowRankLinear(nn.Module):
+    """
+    Low-rank factorisation of a square projection matrix.
+    W = V ∘ U with U: d → r, V: r → d.
+    A small residual (initially zero) is thus added on top of the identity
+    when r < d.  A `.weight` property exposes V.weight so existing dtype
+    checks that reference `visual_proj.weight` continue to work unchanged.
+    """
+    def __init__(self, dim: int, rank: int = 64, bias: bool = False):
+        super().__init__()
+        self.U = nn.Linear(dim, rank, bias=bias)
+        self.V = nn.Linear(rank, dim, bias=bias)
+
+        # Start close to identity: U initializes to zeros, V to identity rows
+        nn.init.zeros_(self.U.weight)
+        if self.V.weight.shape[0] == self.V.weight.shape[1]:
+            nn.init.eye_(self.V.weight)
+        else:
+            # When rank < dim, use small values to approximate identity effect
+            nn.init.normal_(self.V.weight, mean=0.0, std=1e-4)
+
+    @property
+    def weight(self):
+        # Expose the out-projection weight for dtype checks
+        return self.V.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply low-rank residual on top of identity.
+
+        Returns:  x + V(U(x))  so that the layer starts exactly as the identity
+        mapping (because U is zero-initialised).  This prevents zero vectors
+        which caused division-by-zero issues during \|x\| normalisation.
+        """
+        return x + self.V(self.U(x))
+
+
 class CustomCLIP(nn.Module):
     """CLIP + optional GP-weighted template prototypes (cached)."""
 
@@ -344,13 +380,13 @@ class CustomCLIP(nn.Module):
         # ---------------------------------------------------------------
         self.use_visual_proj = cfg.TRAINER.ADAPTER.USE_GP  # flag for later use
         self.vision_dim = clip_model.text_projection.shape[1]
-        self.visual_proj = nn.Linear(self.vision_dim, self.vision_dim, bias=False)
-        torch.nn.init.eye_(self.visual_proj.weight)
-
-        # Freeze projection for baseline runs (no GP)
-        if not self.use_visual_proj:
-            for p in self.visual_proj.parameters():
-                p.requires_grad = False
+        # Use low-rank projection only when GP template weighting is active
+        if cfg.TRAINER.ADAPTER.USE_GP:
+            # Rank fixed to 64 for an initial experiment (≈13% params of full)
+            self.visual_proj = LowRankLinear(self.vision_dim, rank=64, bias=False)
+        else:
+            # Baseline/no-GP setup keeps an identity mapping (no parameters)
+            self.visual_proj = nn.Identity()
 
         # Use helper to build all text-related tensors 
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
@@ -383,7 +419,7 @@ class CustomCLIP(nn.Module):
 
         # Optionally apply visual projection (only when GP is used)
         if self.use_visual_proj:
-            # Ensure dtype consistency
+            # Cast input to projection dtype to avoid matmul dtype mismatch
             if feats.dtype != self.visual_proj.weight.dtype:
                 feats = feats.to(dtype=self.visual_proj.weight.dtype)
 
@@ -420,6 +456,54 @@ class CustomCLIP(nn.Module):
 
     def forward_features(self, features):
         return self._forward_impl(features, is_feature=True)
+
+    # ----------------------------------------------------------------- #
+    #  Monte-Carlo forward (for ELBO)                                   #
+    # ----------------------------------------------------------------- #
+    def forward_features_mc(self, features, num_samples: int):
+        """Compute logits for *num_samples* GP draws.
+
+        Returns
+        -------
+        logits : Tensor
+            Shape ``[S, B, K]`` where *S* is ``num_samples``.
+        kl : Tensor | None
+            KL divergence term from the GP (or *None* if GP disabled).
+        """
+        # Obtain image features once (shared across samples) ------------------
+        feats = features.type(self.dtype)
+
+        if self.use_visual_proj:
+            # Cast input to projection dtype to avoid matmul dtype mismatch
+            if feats.dtype != self.visual_proj.weight.dtype:
+                feats = feats.to(dtype=self.visual_proj.weight.dtype)
+
+            feats = self.visual_proj(feats)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+
+        # If no GP, fall back to deterministic adapter -----------------------
+        if self.gp_weighter is None:
+            logits = self.forward_lp(feats)  # [B,K]
+            return logits.unsqueeze(0), None
+
+        # Sample prototypes ---------------------------------------------------
+        prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=False)  # [S,K,D]
+        kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
+
+        # Normalise once for stability
+        feats_norm = feats / feats.norm(dim=-1, keepdim=True)          # [B,D]
+        prot_norm = prototypes_s / prototypes_s.norm(dim=-1, keepdim=True)  # [S,K,D]
+
+        # Ensure dtype alignment before matmul
+        if prot_norm.dtype != feats.dtype:
+            prot_norm = prot_norm.to(dtype=feats.dtype)
+
+        # Compute logits:  (B,D)  ·  (S,K,D)ᵀ  →  (S,B,K)
+        logits = torch.einsum("bd,skd->sbk", feats_norm, prot_norm)
+        # Cast logit_scale to logits dtype for safe multiplication
+        logits = logits * self.logit_scale.exp().to(dtype=logits.dtype)
+
+        return logits, kl
 
     # ----------------------------------------------------------------- #
     #  Adapter‑specific logits                                          #
@@ -870,18 +954,24 @@ class ADAPTER(TrainerXCostume):
 
         use_amp = self.cfg.TRAINER.ADAPTER.PREC == "amp"
 
-        # Make sure tensors live on the correct device
+        # Ensure tensors are on correct device
         features = torch.as_tensor(features, device=self.device)
 
-        kl_divergence = None  # For logging later
+        kl_divergence = None  # For logging purposes
 
         # ------------------------------------------------------------------
-        # Forward + loss under (optional) autocast
+        #  Forward pass with Monte-Carlo samples                              
         # ------------------------------------------------------------------
+        S = self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES if (self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None) else 1
+
         with autocast(enabled=use_amp, device_type=self.device.type):
-            # Likelihood term (cross-entropy)
-            output = self.model.forward_features(features)
-            loss_ce = F.cross_entropy(output, labels)
+            logits_mc, kl_divergence = self.model.forward_features_mc(features, S)
+
+            # Flatten samples for CE:   [S,B,K] → [S*B,K]
+            logits_flat = logits_mc.reshape(-1, logits_mc.shape[-1])
+            labels_flat = labels.unsqueeze(0).repeat(S, 1).reshape(-1)
+
+            loss_ce = F.cross_entropy(logits_flat, labels_flat)
 
             # Optional zero-shot constraint (CLAP)
             if self.model.adapter.apply_constraint != "none":
@@ -890,11 +980,9 @@ class ADAPTER(TrainerXCostume):
             else:
                 loss = loss_ce
 
-            # Optional KL term from GP template weighter
-            if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-                kl_divergence = self.model.get_gp_kl_divergence()
-                if kl_divergence is not None:
-                    loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+            # Add β·KL term when GP is active
+            if kl_divergence is not None:
+                loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
 
         # ------------------------------------------------------------------
         # Backward + optimiser step
@@ -911,13 +999,17 @@ class ADAPTER(TrainerXCostume):
         # Diagnostics (test accuracy etc.)
         # ------------------------------------------------------------------
         with torch.no_grad():
+            # Use deterministic prototypes (posterior mean) for evaluation
             output_test = self.model.forward_features(
                 self.features_test.clone().detach().to(self.device)
             )
 
+        # Training accuracy from mean logits across samples
+        output_mean = logits_mc.mean(0).contiguous()  # [B,K]
+
         loss_summary = {
             "loss": loss.item(),
-            "acc_train": compute_accuracy(output, labels)[0].item(),
+            "acc_train": compute_accuracy(output_mean, labels)[0].item(),
             "acc_test": compute_accuracy(output_test, self.labels_test)[0].item(),
         }
 
