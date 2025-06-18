@@ -1,13 +1,13 @@
 #!/bin/bash
 
-#SBATCH --job-name=gp_test_v3
+#SBATCH --job-name=gp_test
 #SBATCH --account=def-josedolz
 #SBATCH --time=04:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --array=1-9
-#SBATCH --output=logs/gp_test_v3/%x_%A_%a.out
+#SBATCH --array=1-3
+#SBATCH --output=logs/gp_test/%x_%A_%a.out
 
 source .venv/bin/activate
 
@@ -20,7 +20,7 @@ shots=(4)
 init="ZS"
 constraint="none"
 backbone="RN50"
-experiment_name="gp_test_v3"
+experiment_name="gp_test"
 
 # Build configurations for testing
 declare -a cfg
@@ -32,14 +32,8 @@ for ds in "${datasets[@]}"; do
 		# Baseline (no GP) with 10 templates  
 		cfg+=("$seeds $ds $optim_base $N $init $constraint $backbone")
 		# GP Linear kernel with 10 templates
-		cfg+=("$seeds $ds GP_linear_lr1e-1_beta1 $N $init $constraint $backbone")
-		cfg+=("$seeds $ds GP_linear_lr1e-2_beta1 $N $init $constraint $backbone")
-		cfg+=("$seeds $ds GP_linear_lr1e-1_beta1e-1 $N $init $constraint $backbone")
 		cfg+=("$seeds $ds GP_linear_lr1e-2_beta1e-1 $N $init $constraint $backbone")
 		# GP RBF kernel with 10 templates
-		cfg+=("$seeds $ds GP_rbf_lr1e-1_beta1 $N $init $constraint $backbone")
-		cfg+=("$seeds $ds GP_rbf_lr1e-2_beta1 $N $init $constraint $backbone")
-		cfg+=("$seeds $ds GP_rbf_lr1e-1_beta1e-1 $N $init $constraint $backbone")
 		cfg+=("$seeds $ds GP_rbf_lr1e-2_beta1e-1 $N $init $constraint $backbone")
 	done
 done

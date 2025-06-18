@@ -145,8 +145,7 @@ def _get_base_text_features(
     # Instantiate GP
     if cfg.TRAINER.ADAPTER.USE_GP and text_embeds.size(1) > 1:
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
-        # NOTE: Initial weights are uniform after softmax, so the initial proto is a simple average.
-        proto, kl = gp(text_embeds)
+        proto, kl = gp.forward_and_kl()
         return proto, text_embeds, gp, kl
 
     # GP disabled -> simple average
@@ -368,11 +367,8 @@ class CustomCLIP(nn.Module):
 
     def get_gp_kl_divergence(self):
         """Compute KL divergence for GP loss term."""
-        if self.gp_weighter is None:
-            return None
-        # Always use MC sampling to get proper gradients for KL
-        _, kl = self.gp_weighter(self.text_embeddings_static, use_mean=False)
-        return kl
+        
+        return getattr(self, "_last_gp_kl", None)
 
     # ----------------------------------------------------------------- #
     #  Forward passes                                                   #
@@ -398,10 +394,12 @@ class CustomCLIP(nn.Module):
         if self.gp_weighter is not None:
             # Use GP prototypes with appropriate sampling
             use_mean = not self.training
-            current_prototypes, _ = self.gp_weighter(use_mean=use_mean)
+            current_prototypes, kl = self.gp_weighter.forward_and_kl(use_mean=use_mean)
+            self._last_gp_kl = kl # cache KL so the trainer can reuse it later
         else:
             # Use standard adapter prototypes
             current_prototypes = self.adapter.prototypes
+            self._last_gp_kl = None
 
         if "TR" in self.adapter.initialization:
             logits = self.forward_task_residual(feats, current_prototypes)
@@ -525,7 +523,7 @@ class TrainerXCostume(SimpleTrainer):
             # ---- Extra DEBUG: GP template weights for class 0 ----
             if self.model.gp_weighter is not None:
                 with torch.no_grad():
-                    dist = self.model.gp_weighter._weight_distribution()
+                    dist = self.model.gp_weighter.get_weight_distribution()
                     weights_mean = torch.softmax(dist.mean, dim=-1)  # [K, M]
                     print("[DEBUG] GP weights (class 0, first 10 templates):",
                           weights_mean[0, :10].detach().cpu().numpy())
@@ -626,7 +624,6 @@ class ADAPTER(TrainerXCostume):
             elif "visual_proj" in name:
                 param.requires_grad = cfg.TRAINER.ADAPTER.USE_GP  # train only with GP
             else:
-                # Freeze CLIP encoders ➜ no 'adapter' nor 'gp_weighter' in the name
                 if ("adapter" not in name) and ("gp_weighter" not in name) and ("visual_proj" not in name):
                     param.requires_grad = False
 
@@ -820,7 +817,8 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0}
+                {'params': self.model.visual_proj.parameters() if self.model.visual_proj.requires_grad else [], 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
+                {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0},
             ]
             
             # Create optimizer with parameter groups
