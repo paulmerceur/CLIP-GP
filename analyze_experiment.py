@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-analyze_experiment.py – aggregate CLAP/GP few‑shot logs
+analyze_experiment.py - aggregate CLAP/GP few-shot logs
 ------------------------------------------------------
 
 The script walks the `output/<exp>/<dataset>/<config>/seedN/` tree, parses every
-`log.txt`, aggregates metrics across seeds and number‑of‑shots, writes a summary
-CSV and draws accuracy‑vs‑shot curves.
+`log.txt`, aggregates metrics across seeds and number-of-shots, writes a summary
+CSV and draws accuracy-vs-shot curves.
 
 Usage
 -----
@@ -16,8 +16,8 @@ python analyze_experiment.py EXP_NAME \
 
 Outputs
 -------
-* <EXP_NAME>_summary.csv       – wide CSV (mean & std for each metric)
-* plots/<dataset>_accuracy.png – per‑dataset line plot
+* <EXP_NAME>_summary.csv       - wide CSV (mean & std for each metric)
+* plots/<dataset>_accuracy.png - per-dataset line plot
 """
 
 import argparse
@@ -42,15 +42,14 @@ _RE = {
     "batch_size":    re.compile(r"\bBATCH_SIZE:\s+(\d+)"),
     "accuracy":      re.compile(r"\*\s+accuracy:\s+([\d.]+)%"),
     "macro_f1":      re.compile(r"\*\s+macro_f1:\s+([\d.]+)%"),
+    "ece":           re.compile(r"\*\s+ece:\s+([\d.]+)%"),
     # Optional GP params
     "gp_lr":         re.compile(r"\bGP_LR:\s+([\d.]+)"),
     "gp_beta":       re.compile(r"\bGP_BETA:\s+([\d.]+)"),
-    "gp_kernel":     re.compile(r"\bGP_KERNEL_TYPE:\s+(\S+)"),
-    "gp_length":     re.compile(r"\bGP_LENGTHSCALE:\s+([\d.]+)"),
-    "gp_output":     re.compile(r"\bGP_OUTPUTSCALE:\s+([\d.]+)"),
-    "gp_noise":      re.compile(r"\bGP_NOISE:\s+([\d.]+)"),
+    "gp_kernel_type":     re.compile(r"\bGP_KERNEL_TYPE:\s+(\S+)"),
+    "gp_length_scale":     re.compile(r"\bGP_LENGTH_SCALE:\s+([\d.]+)"),
     "gp_samples":    re.compile(r"\bGP_NUM_MC_SAMPLES:\s+(\d+)"),
-    "gp_diag":       re.compile(r"\bGP_USE_DIAGONAL_COV:\s+(True|False)"),
+    "gp_beta_warmup": re.compile(r"\bGP_BETA_WARMUP:\s+(\d+)"),
 }
 
 
@@ -63,7 +62,7 @@ def _first_match(regex: re.Pattern, text: str, cast=float):
 
 
 # ───────────────────────────
-# 2. Single‑log parser
+# 2. Single-log parser
 # ───────────────────────────
 
 def parse_log(path: pathlib.Path) -> Dict[str, Any]:
@@ -80,15 +79,14 @@ def parse_log(path: pathlib.Path) -> Dict[str, Any]:
         "batch_size":    int(_first_match(_RE["batch_size"], txt, int) or 0),
         "accuracy":      float(_first_match(_RE["accuracy"], txt) or float("nan")),
         "macro_f1":      float(_first_match(_RE["macro_f1"], txt) or float("nan")),
+        "ece":           float(_first_match(_RE["ece"], txt) or float("nan")),
         # GP params
         "gp_lr":         _first_match(_RE["gp_lr"], txt, float),
         "gp_beta":       _first_match(_RE["gp_beta"], txt, float),
-        "gp_kernel":     _first_match(_RE["gp_kernel"], txt, str),
-        "gp_length":     _first_match(_RE["gp_length"], txt, float),
-        "gp_output":     _first_match(_RE["gp_output"], txt, float),
-        "gp_noise":      _first_match(_RE["gp_noise"], txt, float),
+        "gp_kernel_type":     _first_match(_RE["gp_kernel_type"], txt, str),
+        "gp_length_scale":     _first_match(_RE["gp_length_scale"], txt, float),
         "gp_samples":    _first_match(_RE["gp_samples"], txt, int),
-        "gp_diag":       _first_match(_RE["gp_diag"], txt, str) == "True",
+        "gp_beta_warmup": _first_match(_RE["gp_beta_warmup"], txt, int),
     }
 
     if info["num_shots"] == 0:
@@ -106,10 +104,12 @@ def build_label(info: Dict[str, Any], important: List[str]) -> str:
     prefix = "GP" if info["use_gp"] else "BASELINE"
     label = f"{prefix}_{info['num_templates']}TEMPLATES"
 
-    for param in important:
-        key = param.lower()
-        if key in info and info[key] not in (None, "", float("nan")):
-            label += f"_{param.upper()}={info[key]}"
+    if info["use_gp"]:
+        for param in important:
+            key = param.lower()
+            if key in info and info[key] not in (None, "", float("nan")):
+                label += f"_{param.upper()}={info[key]}"
+                
     return label
 
 
@@ -134,13 +134,6 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
                 info = parse_log(log_file)
                 if info is not None:
                     df = pd.concat([df, pd.DataFrame([info])], ignore_index=True)
-    
-    general_params = ["lr", "weight_decay", "max_epoch", "batch_size", "num_templates"]
-    gp_params = ["gp_lr", "gp_beta", "gp_kernel", "gp_length", "gp_output", "gp_noise", "gp_samples", "gp_diag"]
-    hyperparams = important + [param for param in gp_params if param not in important]
-    hyperparams += [param for param in general_params if param not in important]
-    hyperparams = [param for param in hyperparams if df[param].nunique() > 1]
-    hyperparams = []
 
     rows: List[Dict[str, Any]] = []
     for dataset_dir in base.iterdir():
@@ -156,7 +149,7 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
                     info.update(
                         dataset=dataset,
                         shot=info["num_shots"],
-                        config_label=build_label(info, hyperparams),
+                        config_label=build_label(info, important),
                         seed=log_file.parent.name,
                     )
                     rows.append(info)
@@ -164,7 +157,7 @@ def collect_logs(exp_name: str, important: List[str]) -> pd.DataFrame:
                     print(f"No info found for {log_file}")
 
     if not rows:
-        raise RuntimeError("No log files found – check path or experiment name.")
+        raise RuntimeError("No log files found - check path or experiment name.")
     return pd.DataFrame(rows)
 
 
@@ -193,15 +186,7 @@ def plot_accuracy(summary: pd.DataFrame, out_dir: pathlib.Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     for dataset in summary.dataset.unique():
         sub = summary[summary["dataset"] == dataset]
-        # Print top 5 configs by accuracy, per dataset and number of shots
-        # for shot in sub["shot"].unique():
-        #     print(f"Top 5 configs for {dataset} with {shot} shots:")
-        #     pd.set_option('display.max_colwidth', None)
-        #     print(sub[sub["shot"] == shot].sort_values("accuracy_mean", ascending=False).head(5)[["config_label", "accuracy_mean"]])
-        #     print("\n")
-
         plt.figure()
-        
         for label, grp in sub.groupby("config_label"):
             plt.plot(grp["shot"], grp["accuracy_mean"], marker="o", label=label)
             # Optional confidence band
@@ -218,6 +203,25 @@ def plot_accuracy(summary: pd.DataFrame, out_dir: pathlib.Path):
         plt.savefig(out_dir / f"{dataset}_accuracy.png", dpi=144)
         plt.close()
 
+def plot_ece(summary: pd.DataFrame, out_dir: pathlib.Path):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for dataset in summary.dataset.unique():
+        sub = summary[summary["dataset"] == dataset]
+        plt.figure()
+        for label, grp in sub.groupby("config_label"):
+            plt.plot(grp["shot"], grp["ece_mean"], marker="o", label=label)
+        plt.fill_between(sub["shot"],
+                         sub["ece_mean"] - sub["ece_std"],
+                         sub["ece_mean"] + sub["ece_std"],
+                         alpha=0.15)
+        plt.title(dataset)
+        plt.xlabel("# shots")
+        plt.ylabel("Test ECE (%)")
+        plt.grid(True, linestyle="--", linewidth=0.5)
+        plt.legend(loc="upper right")
+        plt.tight_layout()
+        plt.savefig(out_dir / f"{dataset}_ece.png", dpi=144)
+        plt.close()
 
 # ───────────────────────────
 # 7. CLI
@@ -225,9 +229,9 @@ def plot_accuracy(summary: pd.DataFrame, out_dir: pathlib.Path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("experiment", help="sub‑directory of ./output to analyse")
-    p.add_argument("--important_params", default="", help="comma‑separated list")
-    p.add_argument("--metrics", default="accuracy", help="comma‑separated list")
+    p.add_argument("experiment", help="sub-directory of ./output to analyse")
+    p.add_argument("--important_params", default="", help="comma-separated list")
+    p.add_argument("--metrics", default="accuracy,ece", help="comma-separated list")
     args = p.parse_args()
 
     important = [s.strip() for s in args.important_params.split(',') if s.strip()]
@@ -245,6 +249,10 @@ def main():
 
     if "accuracy" in metrics:
         plot_accuracy(summary, results_dir)
+        print(f"✓ Plots saved to {results_dir}")
+
+    if "ece" in metrics:
+        plot_ece(summary, results_dir)
         print(f"✓ Plots saved to {results_dir}")
 
 

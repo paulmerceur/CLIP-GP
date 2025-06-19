@@ -75,13 +75,17 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         )
 
         # ------------------------------------------------------------------
-        #  Break symmetry: randomise the variational mean so that early
-        #  softmaxes are *not* exactly uniform. The attribute path has changed
-        #  now that we removed the extra multitask wrapper.
+        #  Break symmetry: initialise variational mean with small noise
         # ------------------------------------------------------------------
         with torch.no_grad():
             vm = self.variational_strategy._variational_distribution.variational_mean
-            vm.fill_(1.0 / self.num_templates)
+            # Small random perturbation instead of a perfectly uniform start
+            vm.normal_(mean=0.0, std=1e-2)
+
+        # ------------------------------------------------------------------
+        #  Learnable softmax temperature (log_tau) to control concentration
+        # ------------------------------------------------------------------
+        self.log_tau = nn.Parameter(torch.zeros(()))  # tau = exp(log_tau) >= 0
 
         # Register the (fixed) template embeddings (original dtype) for downstream
         # use (e.g., for normalising prototypes/pruning). This buffer is not
@@ -119,18 +123,29 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # ------------------------------------------------------------------
 
         if self.training and not use_mean:
-            alpha = q.rsample(torch.Size([self.num_mc_samples]))  # Expected shape [S, K, M] but some configs
-            # Handle potential (S, M, K) swap originating from input shape
-            if alpha.dim() == 3 and alpha.size(1) == self.num_templates and alpha.size(2) == self.num_classes:
-                # Transpose to [S, K, M]
-                alpha = alpha.permute(0, 2, 1)
-            w = F.softmax(alpha, dim=-1).mean(0) # [K, M]
+            # ------------------------------------------------------------------
+            #  Draw *one* stochastic sample for each class during training so that
+            #  every forward pass receives a fresh prototype realisation. This
+            #  preserves the Monte-Carlo nature assumed by the ELBO without
+            #  collapsing it into the mean of several samples.
+            # ------------------------------------------------------------------
+
+            alpha = q.rsample()  # Shape: [K, M]
+
+            # Handle potential (M, K) swap originating from input shape
+            if alpha.dim() == 2 and alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
+                # Transpose to [K, M]
+                alpha = alpha.t()
+
+            tau = self.log_tau.exp()
+            w = F.softmax(alpha / tau, dim=-1)  # [K, M]  (temperature-scaled)
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-            w = F.softmax(mu, dim=-1) # [K, M]
+            tau = self.log_tau.exp()
+            w = F.softmax(mu / tau, dim=-1)  # [K, M]  (temperature-scaled)
 
         if w.dtype != self._templates.dtype:
             w = w.to(dtype=self._templates.dtype)
@@ -161,10 +176,12 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         q = self.get_weight_distribution()
 
         if use_mean:
-            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M]
+            tau = self.log_tau.exp()
+            w = torch.softmax(q.mean / tau, dim=-1).unsqueeze(0)  # [1,K,M]
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            w = torch.softmax(alpha, dim=-1)              # [S,K,M]
+            tau = self.log_tau.exp()
+            w = torch.softmax(alpha / tau, dim=-1)              # [S,K,M]
 
         # Linear map  weights → prototypes
         prototypes = torch.einsum("skm,kmd->skd", w.to(dtype=self._templates.dtype), self._templates)

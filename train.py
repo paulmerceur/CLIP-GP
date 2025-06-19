@@ -102,7 +102,8 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
     cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE = 10.0  # length scale for RBF kernel
-    
+    cfg.TRAINER.ADAPTER.GP_BETA_WARMUP = 5  # number of warmup epochs for GP beta
+
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
 
@@ -146,7 +147,7 @@ def main(args):
     if torch.cuda.is_available() and cfg.USE_CUDA:
         torch.backends.cudnn.benchmark = True
 
-    #print_args(args, cfg)
+    print_args(args, cfg)
     #print("Collecting env info ...")
     #print("** System info **\n{}\n".format(collect_env_info()))
 

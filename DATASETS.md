@@ -77,7 +77,7 @@ cd caltech-101 && \
 gdown 1hyarUivQE36mY6jSomru6Fjd-JzwcCzN && \
 wget https://data.caltech.edu/records/mzrjq-6wc02/files/caltech-101.zip && \
 unzip caltech-101.zip && \
-mv catech-101/101_ObjectCategories.tar.gz . && \
+mv caltech-101/101_ObjectCategories.tar.gz . && \
 tar -xzf 101_ObjectCategories.tar.gz && \
 rm -rf catech-101 && \
 rm 101_ObjectCategories.tar.gz && \

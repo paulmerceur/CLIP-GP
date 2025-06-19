@@ -90,36 +90,6 @@ class TextEncoder(nn.Module):
 
         return x
 
-def _build_templates(cfg) -> List[str]:
-    """Fixed diverse set of proven templates based on CoOp paper."""
-    dataset = cfg.DATASET.NAME
-    
-    # Use fixed diverse templates proven effective in CoOp
-    # These are semantically diverse and high-performing
-    FIXED_DIVERSE_TEMPLATES = [
-        "a photo of a {}.",
-        "a photograph of a {}.",
-        "an image of a {}.",
-        "a cropped photo of a {}.",
-        "a good photo of a {}.",
-        "a bad photo of a {}.",
-        "a photo of the {}."
-    ]
-    
-    if cfg.TRAINER.ADAPTER.NUM_TEMPLATES == 1:
-        # Single template case - use dataset specific
-        base = [CUSTOM_TEMPLATES.get(dataset, "a photo of a {}.")]
-    else:
-        # Multiple templates - use fixed diverse set
-        num_needed = min(cfg.TRAINER.ADAPTER.NUM_TEMPLATES, len(FIXED_DIVERSE_TEMPLATES))
-        base = FIXED_DIVERSE_TEMPLATES[:num_needed]
-    
-    print(f"Selected {len(base)} fixed diverse templates:")
-    for i, template in enumerate(base):
-        print(f"  {i}: {template}")
-    
-    return base
-
 def _get_base_text_features(
     cfg,
     classnames: List[str],
@@ -130,7 +100,20 @@ def _get_base_text_features(
     """Computes and caches embeddings inside closure."""
 
     device = next(text_encoder.parameters()).device
-    templates = _build_templates(cfg)
+
+    templates = ["a photo of a {}."]
+
+    if cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+        num_needed = min(
+            cfg.TRAINER.ADAPTER.NUM_TEMPLATES,
+            len(IMAGENET_TEMPLATES_SELECT) - 1,
+        )
+        templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
+
+    # Verbose printout
+    print(f"Selected {len(templates)} fixed diverse templates:")
+    for i, template in enumerate(templates):
+        print(f"  {i}: {template}")
 
     # Encode all prompts once - returned tensor is reused by caller.
     emb_list = []
@@ -719,27 +702,24 @@ class ADAPTER(TrainerXCostume):
         
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Exclude frozen adapter params (e.g., visual_projection) ---------
-            adapter_params = list({id(p): p for p in self.model.adapter.parameters() if p.requires_grad}.values())
-            adapter_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
-            
-            print(f"Number of adapter parameters: {len(adapter_params)}")
-            
-            # List actual parameter names and shapes
-            print("Adapter parameters:")
-            for name, param in self.model.adapter.named_parameters():
-                print(f"  {name}: {param.shape}")
-            print("Visual projection parameters:")
-            for name, param in self.model.visual_proj.named_parameters():
-                print(f"  {name}: {param.shape}, trainable={param.requires_grad}")
-            
-            print("GP parameters:")
-            for name, param in self.model.gp_weighter.named_parameters():
-                print(f"  {name}: {param.shape}")
-                
-            # Combine all parameters into a single list for simplicity
-            all_params = adapter_params + [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
-            self.optim = build_optimizer(all_params, cfg.OPTIM)
+            # ---- param-group 1: adapter, visual proj, logit_scale -----------------
+            base_params = [
+                p for p in self.model.adapter.parameters() if p.requires_grad
+            ] + [p for p in self.model.visual_proj.parameters() if p.requires_grad]
+
+            # make sure logit_scale is updated
+            if self.model.logit_scale.requires_grad:
+                base_params.append(self.model.logit_scale)
+
+            # ---- param-group 2: GP parameters (usually need a smaller LR) ---------
+            gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
+
+            param_groups = [
+                {"params": base_params, "lr": cfg.OPTIM.LR},
+                {"params": gp_params,   "lr": cfg.TRAINER.ADAPTER.GP_LR},
+            ]
+
+            self.optim = build_optimizer(param_groups, cfg.OPTIM)
         else:
             # Optimise adapter (+ visual projection if trainable) and logit_scale
             baseline_params = list(self.model.adapter.parameters())
@@ -982,7 +962,9 @@ class ADAPTER(TrainerXCostume):
 
             # Add β·KL term when GP is active
             if kl_divergence is not None:
-                loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+                warm = min(1.0, (self.epoch+1)/self.cfg.TRAINER.ADAPTER.GP_BETA_WARMUP)
+                beta_now = self.cfg.TRAINER.ADAPTER.GP_BETA * warm
+                loss = loss_ce + beta_now * kl_divergence
 
         # ------------------------------------------------------------------
         # Backward + optimiser step
