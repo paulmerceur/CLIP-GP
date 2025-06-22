@@ -33,8 +33,9 @@ TRAINER:
     NUM_TEMPLATES: 10
     # GP-specific configuration
     USE_GP: True
-    GP_KERNEL_TYPE: linear
-    GP_NUM_MC_SAMPLES: 10
-    GP_LR: 1e-2
-    GP_BETA: 0.1
-    GP_BETA_WARMUP: 5
+    GP_KERNEL_TYPE: rbf
+    GP_LENGTH_SCALE: 10.0
+    GP_NUM_MC_SAMPLES: 5
+    GP_LR: 0.1
+    GP_BETA: 1.0
+    GP_BETA_WARMUP: 50

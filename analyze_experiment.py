@@ -42,9 +42,10 @@ _RE = {
     "batch_size":    re.compile(r"\bBATCH_SIZE:\s+(\d+)"),
     "accuracy":      re.compile(r"\*\s+accuracy:\s+([\d.]+)%"),
     "macro_f1":      re.compile(r"\*\s+macro_f1:\s+([\d.]+)%"),
-    "ece":           re.compile(r"\*\s+ece:\s+([\d.]+)%"),
+    "ece":           re.compile(r"\*\s+ECE:\s+([\d.]+)%"),
     # Optional GP params
     "gp_lr":         re.compile(r"\bGP_LR:\s+([\d.]+)"),
+    "gp_num_mc_samples": re.compile(r"\bGP_NUM_MC_SAMPLES:\s+(\d+)"),
     "gp_beta":       re.compile(r"\bGP_BETA:\s+([\d.]+)"),
     "gp_kernel_type":     re.compile(r"\bGP_KERNEL_TYPE:\s+(\S+)"),
     "gp_length_scale":     re.compile(r"\bGP_LENGTH_SCALE:\s+([\d.]+)"),
@@ -82,6 +83,7 @@ def parse_log(path: pathlib.Path) -> Dict[str, Any]:
         "ece":           float(_first_match(_RE["ece"], txt) or float("nan")),
         # GP params
         "gp_lr":         _first_match(_RE["gp_lr"], txt, float),
+        "gp_num_mc_samples": _first_match(_RE["gp_num_mc_samples"], txt, int),
         "gp_beta":       _first_match(_RE["gp_beta"], txt, float),
         "gp_kernel_type":     _first_match(_RE["gp_kernel_type"], txt, str),
         "gp_length_scale":     _first_match(_RE["gp_length_scale"], txt, float),
@@ -101,8 +103,9 @@ def parse_log(path: pathlib.Path) -> Dict[str, Any]:
 
 def build_label(info: Dict[str, Any], important: List[str]) -> str:
     """Compose a readable config label."""
-    prefix = "GP" if info["use_gp"] else "BASELINE"
-    label = f"{prefix}_{info['num_templates']}TEMPLATES"
+    label = "GP" if info["use_gp"] else "BASELINE"
+    if not info["use_gp"]:
+        label = f"{label}_{info['num_templates']}TEMPLATES"
 
     if info["use_gp"]:
         for param in important:

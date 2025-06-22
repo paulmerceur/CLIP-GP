@@ -126,9 +126,12 @@ def _get_base_text_features(
     text_embeds = torch.stack(emb_list)  # [K,M,D]
 
     # Instantiate GP
-    if cfg.TRAINER.ADAPTER.USE_GP and text_embeds.size(1) > 1:
+    print(f"Using GP: {cfg.TRAINER.ADAPTER.USE_GP}")
+    print(f"Templates: {templates}")
+    if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
         proto, kl = gp.forward_and_kl()
+        print(f"GP is active: {gp}")
         return proto, text_embeds, gp, kl
 
     # GP disabled -> simple average
@@ -159,10 +162,7 @@ class AdapterMethod(nn.Module):
                 # When GP is active, prototypes will be updated by GP - initialize as non-parameter
                 self.prototypes = base_text_features.clone().detach()
             else:
-                # Default: make the zero-shot prototypes *trainable* so that
-                # the linear probe can actually learn from the labelled
-                # data. They start from the zero-shot weights but will be
-                # updated during training.
+                # Make the zero-shot prototypes trainable
                 self.prototypes = nn.Parameter(base_text_features.clone())
         elif "TR" in self.initialization:  # Task Residual Adapter form Yu et al. (2023)
             print("Using Task_residual approach for Linear Probing")
@@ -373,6 +373,8 @@ class CustomCLIP(nn.Module):
 
         # Use helper to build all text-related tensors 
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
+        gp = self.gp_weighter is not None
+        print(f"GP is active: {gp}")
 
         # Cache embeddings for fast GP updates
         self.register_buffer("text_embeddings_static", self.text_embeddings_all.float())
@@ -592,8 +594,23 @@ class TrainerXCostume(SimpleTrainer):
                 with torch.no_grad():
                     dist = self.model.gp_weighter.get_weight_distribution()
                     weights_mean = torch.softmax(dist.mean, dim=-1)  # [K, M]
-                    print("[DEBUG] GP weights (class 0, first 10 templates):",
-                          weights_mean[0, :10].detach().cpu().numpy())
+                    n = min(10, weights_mean.shape[1])
+                    print(f"[DEBUG] GP weights (class 0, first {n} templates): {weights_mean[0, :n].detach().cpu().numpy()}")
+
+        # --------------------------------------------------------------
+        #  Late-freeze schedule for visual projection (LowRankLinear)
+        # --------------------------------------------------------------
+        # Train visual_proj during the early/mid stages and freeze it in
+        # the final phase so that learning pressure shifts to the GP. The
+        # freeze window is hard-coded to the last 50 epochs for now.
+        freeze_start = max(0, self.max_epoch - 50)  # e.g. 250 if max_epoch=300
+        if hasattr(self.model, "visual_proj") and any(p.requires_grad for p in self.model.visual_proj.parameters()):
+            if self.epoch >= freeze_start:
+                for p in self.model.visual_proj.parameters():
+                    p.requires_grad = False
+            else:
+                for p in self.model.visual_proj.parameters():
+                    p.requires_grad = True
 
         # Init kpis tracker
         losses = MetricMeter()
@@ -727,6 +744,7 @@ class ADAPTER(TrainerXCostume):
             if self.model.logit_scale.requires_grad:
                 baseline_params.append(self.model.logit_scale)
             self.optim = build_optimizer(baseline_params, cfg.OPTIM)
+            print(f"Params: {baseline_params}")
             
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("adapter", self.model.adapter, self.optim, self.sched)
@@ -1098,7 +1116,8 @@ class ADAPTER(TrainerXCostume):
             data_loader = torch.utils.data.DataLoader(
                 copy.deepcopy(self.train_loader_x.dataset), batch_size=self.train_loader_x.batch_size,
                 sampler=self.train_loader_x.sampler, num_workers=self.train_loader_x.num_workers,
-                drop_last=False, pin_memory=self.train_loader_x.pin_memory)
+                drop_last=False, pin_memory=False)
+            print(f"Pin memory: {self.train_loader_x.pin_memory}")
 
         elif partition == "val":
             data_loader = copy.deepcopy(self.val_loader)

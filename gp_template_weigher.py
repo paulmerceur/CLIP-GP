@@ -2,16 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gpytorch
+import numpy as np
 
 
 class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     """
-    Simplified GP-based template weighter that leans *entirely* on
-    GPyTorchʼs built-ins.
+    Simplified GP-based template weighter that leans entirely on GPyTorch's built-ins.
 
-    ➤ *No* hand-rolled KL, priors, or extra regularisation.
-    ➤ One batched variational GP (one task == one class).
-    ➤ Templates are the *inducing* points - nothing to learn there.
+    * No hand-rolled KL, priors, or extra regularisation.
+    * One batched variational GP (one task == one class).
+    * Templates are the *inducing* points - nothing to learn there.
     """
 
     def __init__(self, text_embeddings: torch.Tensor, cfg: dict, **kwargs) -> None:
@@ -85,7 +85,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # ------------------------------------------------------------------
         #  Learnable softmax temperature (log_tau) to control concentration
         # ------------------------------------------------------------------
-        self.log_tau = nn.Parameter(torch.zeros(()))  # tau = exp(log_tau) >= 0
+        self.log_tau = nn.Parameter(torch.tensor(np.log(0.1)))  # tau = exp(log_tau) >= 0
 
         # Register the (fixed) template embeddings (original dtype) for downstream
         # use (e.g., for normalising prototypes/pruning). This buffer is not

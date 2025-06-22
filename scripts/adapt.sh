@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # custom config
-DATA=/scratch/pmerceur/data
+#DATA=/scratch/pmerceur/data
+DATA=/export/datasets/public
+
 TRAINER=ADAPTER
 
 SEEDS=$1
@@ -9,17 +11,16 @@ DATASET=$2      # target dataset - i.e. {imagenet, caltech101, oxford_pets, stan
                 #                        fgvc_aircraft, sun397, dtd, eurosat, ucf101}
 CFG=$3          # config file - SGD_lr1e-1_B256_ep300
 SHOTS=$4        # number of shots (1, 2, 4, 8, 16)
-INIT=$5         # Method / Linear Probe init - i.e. {RANDOM, ZS, ClipA, TipA, TipA-f-, TR, TRenh}
-CONSTRAINT=$6   # apply class-adaptive constraint in Linear Probing (CLAP) - i.e. {none, l2}
-BACKBONE=$7     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
-EXPERIMENT_NAME=${8:-"single_test"}  # experiment name for organizing outputs
+BACKBONE=$5     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
+EXPERIMENT_NAME=${6:-"single_test"}  # experiment name for organizing outputs
+GPU_ID=${7:-0}
 
 for ((seed=1; seed<=SEEDS; seed++)); do
-    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${INIT}Init_${CONSTRAINT}Constraint_${SHOTS}shots_/seed${seed}
+    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots/seed${seed}
     if [ -d "$DIR" ]; then
         echo "Oops! The results exist at ${DIR} (so skip this job)"
     else
-        CUDA_VISIBLE_DEVICES=0 python train.py \
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
         --root ${DATA} \
         --seed ${seed} \
         --trainer ${TRAINER} \
@@ -27,8 +28,6 @@ for ((seed=1; seed<=SEEDS; seed++)); do
         --config-file configs/trainers/${CFG}.yaml \
         --output-dir ${DIR} \
         --backbone ${BACKBONE} \
-        DATASET.NUM_SHOTS ${SHOTS} \
-        TRAINER.ADAPTER.INIT ${INIT} \
-        TRAINER.ADAPTER.CONSTRAINT ${CONSTRAINT}
+        DATASET.NUM_SHOTS ${SHOTS}
     fi
 done
