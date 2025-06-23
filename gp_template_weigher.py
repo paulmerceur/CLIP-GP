@@ -87,7 +87,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # ------------------------------------------------------------------
         #  Learnable softmax temperature (log_tau) to control concentration
         # ------------------------------------------------------------------
-        self.log_tau = nn.Parameter(torch.tensor(np.log(0.1)))  # tau = exp(log_tau) >= 0
+        self.log_tau = nn.Parameter(torch.tensor(0.0))  # softplus(0) ≈ 0.693
 
         # Register the (fixed) template embeddings (original dtype) for downstream
         # use (e.g., for normalising prototypes/pruning). This buffer is not
@@ -114,9 +114,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         ----
         use_mean:  Use posterior mean instead of MC sampling (deterministic).
         """
-        # Ensure stale memoized quantities are cleared using the **public** helper
-        # provided by GPyTorch rather than the private `_clear_cache()` API.
-        clear_cache_hook(self.variational_strategy)
 
         q = self.variational_strategy(self._templates.to(torch.float32))  # MultivariateNormal (batch)
 
@@ -139,14 +136,14 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
                 # Transpose to [K, M]
                 alpha = alpha.t()
 
-            tau = self.log_tau.exp()
+            tau = F.softplus(self.log_tau) + 1e-4
             w = F.softmax(alpha / tau, dim=-1)  # [K, M]  (temperature-scaled)
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-            tau = self.log_tau.exp()
+            tau = F.softplus(self.log_tau) + 1e-4
             w = F.softmax(mu / tau, dim=-1)  # [K, M]  (temperature-scaled)
 
         # Keep all GP maths in fp32 for numerical stability; cast back *only* at the end
@@ -155,7 +152,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Return in the original dtype/device so downstream CLIP code stays unchanged
         prototypes = prototypes.to(dtype=self.orig_dtype, device=self.orig_device)
-        kl = self.variational_strategy.kl_divergence().sum()
+        kl = self.variational_strategy.kl_divergence().sum() / self.num_classes
         return prototypes, kl
     
     def get_weight_distribution(self):
@@ -179,11 +176,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         q = self.get_weight_distribution()
 
         if use_mean:
-            tau = self.log_tau.exp()
+            tau = F.softplus(self.log_tau) + 1e-4
             w = torch.softmax(q.mean / tau, dim=-1).unsqueeze(0)  # [1,K,M] – fp32
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            tau = self.log_tau.exp()
+            tau = F.softplus(self.log_tau) + 1e-4
             w = torch.softmax(alpha / tau, dim=-1)              # [S,K,M] – fp32
 
         # Compute prototypes in fp32 then cast back to CLIP precision

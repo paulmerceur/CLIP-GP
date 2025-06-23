@@ -729,9 +729,21 @@ class ADAPTER(TrainerXCostume):
             # ---- param-group 2: GP parameters (usually need a smaller LR) ---------
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
 
+            # Ensure visual projection parameters are included only once
+            if self.model.visual_proj.requires_grad_:
+                base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
+
+            # De-duplicate parameters while preserving order
+            seen = set()
+            base_params_unique = []
+            for p in base_params:
+                if id(p) not in seen:
+                    base_params_unique.append(p)
+                    seen.add(id(p))
+
             param_groups = [
-                {"params": base_params, "lr": cfg.OPTIM.LR},
-                {"params": gp_params,   "lr": cfg.TRAINER.ADAPTER.GP_LR},
+                {'params': base_params_unique, 'lr': cfg.OPTIM.LR, 'weight_decay': getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)},
+                {'params': [p for p in gp_params if p.requires_grad], 'lr': getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR), 'weight_decay': 0.0},
             ]
 
             self.optim = build_optimizer(param_groups, cfg.OPTIM)
