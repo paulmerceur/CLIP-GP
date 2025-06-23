@@ -131,7 +131,6 @@ def _get_base_text_features(
     if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
         proto, kl = gp.forward_and_kl()
-        print(f"GP is active: {gp}")
         return proto, text_embeds, gp, kl
 
     # GP disabled -> simple average
@@ -374,7 +373,6 @@ class CustomCLIP(nn.Module):
         # Use helper to build all text-related tensors 
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
         gp = self.gp_weighter is not None
-        print(f"GP is active: {gp}")
 
         # Cache embeddings for fast GP updates
         self.register_buffer("text_embeddings_static", self.text_embeddings_all.float())

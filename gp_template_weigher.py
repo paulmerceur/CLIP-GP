@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import gpytorch
 import numpy as np
+from gpytorch.utils.memoize import clear_cache_hook
 
 
 class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
@@ -57,12 +58,13 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         super().__init__(variational_strategy)
 
         # Mean and covariance modules -------------------------------------------------
-        self.mean_module = gpytorch.means.ConstantMean(batch_shape=batch_shape)
+        self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
         if cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "rbf":
-            base_kernel = gpytorch.kernels.RBFKernel(
-                batch_shape=batch_shape, ard_num_dims=self.dim, length_scale=cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE
-            )
+            base_kernel = gpytorch.kernels.RBFKernel(batch_shape=batch_shape, ard_num_dims=self.dim)
+            base_kernel.initialize(lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE)
+            # Debug: verify that the initial length-scale is set as expected
+            print(f"[DEBUG] RBF kernel initial length-scale: {base_kernel.lengthscale.detach().cpu().view(-1)}")
         elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "cosine":
             base_kernel = gpytorch.kernels.CosineKernel(batch_shape=batch_shape)
         elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "linear":
@@ -112,9 +114,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         ----
         use_mean:  Use posterior mean instead of MC sampling (deterministic).
         """
-        # Ensure we are not using memoised distributions from a different device
-        if hasattr(self.variational_strategy, "_clear_cache"):
-            self.variational_strategy._clear_cache()
+        # Ensure stale memoized quantities are cleared using the **public** helper
+        # provided by GPyTorch rather than the private `_clear_cache()` API.
+        clear_cache_hook(self.variational_strategy)
 
         q = self.variational_strategy(self._templates.to(torch.float32))  # MultivariateNormal (batch)
 
@@ -147,11 +149,12 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             tau = self.log_tau.exp()
             w = F.softmax(mu / tau, dim=-1)  # [K, M]  (temperature-scaled)
 
-        if w.dtype != self._templates.dtype:
-            w = w.to(dtype=self._templates.dtype)
-        prototypes = torch.einsum("km,kmd->kd", w, self._templates)
+        # Keep all GP maths in fp32 for numerical stability; cast back *only* at the end
+        # Compute prototypes using fp32 representations of templates
+        prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
 
-        prototypes = prototypes.to(dtype=self._templates.dtype, device=self._templates.device)
+        # Return in the original dtype/device so downstream CLIP code stays unchanged
+        prototypes = prototypes.to(dtype=self.orig_dtype, device=self.orig_device)
         kl = self.variational_strategy.kl_divergence().sum()
         return prototypes, kl
     
@@ -177,14 +180,41 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         if use_mean:
             tau = self.log_tau.exp()
-            w = torch.softmax(q.mean / tau, dim=-1).unsqueeze(0)  # [1,K,M]
+            w = torch.softmax(q.mean / tau, dim=-1).unsqueeze(0)  # [1,K,M] – fp32
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
             tau = self.log_tau.exp()
-            w = torch.softmax(alpha / tau, dim=-1)              # [S,K,M]
+            w = torch.softmax(alpha / tau, dim=-1)              # [S,K,M] – fp32
 
-        # Linear map  weights → prototypes
-        prototypes = torch.einsum("skm,kmd->skd", w.to(dtype=self._templates.dtype), self._templates)
+        # Compute prototypes in fp32 then cast back to CLIP precision
+        prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
+        return prototypes.to(dtype=self.orig_dtype, device=self._templates.device)
 
-        # Keep original precision/device for compatibility with CLIP.
-        return prototypes.to(dtype=self._templates.dtype, device=self._templates.device)
+
+class PerTemplateMean(gpytorch.means.Mean):
+    """Learnable mean of shape [K, M] (one bias per class & template)."""
+
+    def __init__(self, num_classes: int, num_templates: int):
+        super().__init__()
+        # One scalar per (class, template) pair – initialised at 0.
+        self.mean_param = torch.nn.Parameter(torch.zeros(num_classes, num_templates))
+
+    def forward(self, x):  # noqa: D401 – simple forward override
+        """Return mean of shape [K, N] where N = x.size(-2).
+
+        If *N* equals the number of stored template biases (*M*), we use them
+        directly.  Otherwise (e.g. when *x* is the concatenation of inducing
+        and test points, hence N = 2 M) we broadcast the **average** bias of
+        each class across all points.  This keeps shapes compatible while still
+        learning a per-class offset.  Feel free to refine this later.
+        """
+
+        N = x.size(-2)
+        K, M = self.mean_param.shape
+
+        if N == M:
+            return self.mean_param
+
+        # Otherwise use per-class scalar (mean over templates) and broadcast
+        per_class_bias = self.mean_param.mean(dim=-1, keepdim=True)  # [K,1]
+        return per_class_bias.expand(K, N)
