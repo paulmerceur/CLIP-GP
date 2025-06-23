@@ -19,16 +19,13 @@ from dassl.utils import load_pretrained_weights, load_checkpoint, AverageMeter, 
 from dassl.optim import build_optimizer, build_lr_scheduler
 
 from clip import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
-from datasets.imagenet_templates import IMAGENET_TEMPLATES, IMAGENET_TEMPLATES_SELECT
+from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT
 from gp_template_weigher import GaussianProcessTemplateWeighter
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
-
-_tokenizer = _Tokenizer()
 
 
 CUSTOM_TEMPLATES = {
@@ -90,13 +87,8 @@ class TextEncoder(nn.Module):
 
         return x
 
-def _get_base_text_features(
-    cfg,
-    classnames: List[str],
-    clip_model,
-    text_encoder: TextEncoder,
-    pretrained_projection: Optional[str] = None,
-):
+
+def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder: TextEncoder, pretrained_projection: Optional[str] = None):
     """Computes and caches embeddings inside closure."""
 
     device = next(text_encoder.parameters()).device
@@ -135,6 +127,7 @@ def _get_base_text_features(
 
     # GP disabled -> simple average
     return text_embeds.mean(1), text_embeds, None, None
+
 
 class AdapterMethod(nn.Module):
     def __init__(self, cfg, clip_model, base_text_features):
@@ -357,41 +350,33 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-        # ---------------------------------------------------------------
-        #  Learnable visual projection (only active when GP is enabled)
-        # ---------------------------------------------------------------
+        # Learnable visual projection (only active when GP is enabled)
         self.use_visual_proj = cfg.TRAINER.ADAPTER.USE_GP  # flag for later use
         self.vision_dim = clip_model.text_projection.shape[1]
-        # Use low-rank projection only when GP template weighting is active
         if cfg.TRAINER.ADAPTER.USE_GP:
-            # Rank fixed to 64 for an initial experiment (≈13% params of full)
             self.visual_proj = LowRankLinear(self.vision_dim, rank=64, bias=False)
         else:
-            # Baseline/no-GP setup keeps an identity mapping (no parameters)
             self.visual_proj = nn.Identity()
 
-        # Use helper to build all text-related tensors 
+        # Build all text-related tensors 
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(cfg, classnames, clip_model, self.text_encoder)
         gp = self.gp_weighter is not None
 
-        # Cache embeddings for fast GP updates
+        # Cache embeddings for fast GP updates (no need to keep in original dtype)
         self.register_buffer("text_embeddings_static", self.text_embeddings_all.float())
 
-        # Adapter
+        # Adapter (prototypes)
         self.adapter = AdapterMethod(cfg, clip_model, base_proto)
 
         self._in_training_epoch = False  # toggled by trainer each epoch
         self._batch_count = 0  # Track batches for diagnostics
-        self._epoch_count = 0  # Track epochs for diagnostics
+        self._epoch_count = 0  # Track epochs for diagnostics (for debugging)
 
     def get_gp_kl_divergence(self):
         """Compute KL divergence for GP loss term."""
         
         return getattr(self, "_last_gp_kl", None)
 
-    # ----------------------------------------------------------------- #
-    #  Forward passes                                                   #
-    # ----------------------------------------------------------------- #
     def _forward_impl(self, x, *, is_feature: bool) -> torch.Tensor:
         # Update batch count for diagnostics
         if self._in_training_epoch:
@@ -431,6 +416,32 @@ class CustomCLIP(nn.Module):
         return logits
 
     def forward(self, image, *, return_features: bool = False):
+        """Forward pass.
+
+        During **evaluation** (i.e. ``self.training == False``) and when the GP
+        template weighter is active, we average the logits obtained from multiple
+        Monte-Carlo draws of the GP posterior. This retains predictive
+        uncertainty at test time and noticeably improves calibration.
+        """
+
+        if (not self.training) and (self.gp_weighter is not None):
+            # Encode images once to visual features
+            feats = self.image_encoder(image.type(self.dtype))
+
+            # Draw several sets of prototypes and average the resulting probabilities rather than logits.
+            num_mc = max(10, self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES * 3)
+            logits_mc, _ = self.forward_features_mc(feats, num_samples=num_mc)  # [S,B,K]
+
+            # Convert to probabilities, average, and map back to log-space
+            probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)  # [B,K]
+            # Clamp for numerical stability before log
+            logits = torch.log(probs_mean.clamp(min=1e-8))
+
+            if return_features:
+                return logits, feats
+            return logits
+
+        # Default behaviour (training or GP disabled)
         logits = self._forward_impl(image, is_feature=False)
         if return_features:
             feats = self.image_encoder(image.type(self.dtype))
@@ -438,11 +449,23 @@ class CustomCLIP(nn.Module):
         return logits
 
     def forward_features(self, features):
+        """Forward pass for **pre-computed visual features**.
+
+        During evaluation and when the GP weighter is present we average
+        probabilities over multiple Monte-Carlo samples, identical to the
+        behaviour implemented in :py:meth:`forward`.
+        """
+
+        if (not self.training) and (self.gp_weighter is not None):
+            num_mc = max(10, self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES * 3)
+            logits_mc, _ = self.forward_features_mc(features, num_samples=num_mc)
+
+            probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)
+            logits = torch.log(probs_mean.clamp(min=1e-8))
+            return logits.to(self.dtype)
+
         return self._forward_impl(features, is_feature=True)
 
-    # ----------------------------------------------------------------- #
-    #  Monte-Carlo forward (for ELBO)                                   #
-    # ----------------------------------------------------------------- #
     def forward_features_mc(self, features, num_samples: int):
         """Compute logits for *num_samples* GP draws.
 
@@ -453,7 +476,7 @@ class CustomCLIP(nn.Module):
         kl : Tensor | None
             KL divergence term from the GP (or *None* if GP disabled).
         """
-        # Obtain image features once (shared across samples) ------------------
+        # Obtain image features once (shared across samples)
         feats = features.type(self.dtype)
 
         if self.use_visual_proj:
@@ -464,14 +487,15 @@ class CustomCLIP(nn.Module):
             feats = self.visual_proj(feats)
             feats = feats / feats.norm(dim=-1, keepdim=True)
 
-        # If no GP, fall back to deterministic adapter -----------------------
+        # If no GP, fall back to deterministic adapter
         if self.gp_weighter is None:
             logits = self.forward_lp(feats)  # [B,K]
             return logits.unsqueeze(0), None
 
-        # Sample prototypes ---------------------------------------------------
+        # Sample prototypes
         prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=False)  # [S,K,D]
-        kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
+        # Normalise KL by the number of classes so its magnitude is consistent with forward_and_kl()
+        kl = self.gp_weighter.variational_strategy.kl_divergence().sum() / self.gp_weighter.num_classes
 
         # Normalise once for stability
         feats_norm = feats / feats.norm(dim=-1, keepdim=True)          # [B,D]
@@ -488,9 +512,6 @@ class CustomCLIP(nn.Module):
 
         return logits, kl
 
-    # ----------------------------------------------------------------- #
-    #  Adapter‑specific logits                                          #
-    # ----------------------------------------------------------------- #
     def forward_lp(self, features, prototypes=None):
         if prototypes is None:
             prototypes = self.adapter()
@@ -595,12 +616,8 @@ class TrainerXCostume(SimpleTrainer):
                     n = min(10, weights_mean.shape[1])
                     print(f"[DEBUG] GP weights (class 0, first {n} templates): {weights_mean[0, :n].detach().cpu().numpy()}")
 
-        # --------------------------------------------------------------
-        #  Late-freeze schedule for visual projection (LowRankLinear)
-        # --------------------------------------------------------------
-        # Train visual_proj during the early/mid stages and freeze it in
-        # the final phase so that learning pressure shifts to the GP. The
-        # freeze window is hard-coded to the last 50 epochs for now.
+        # Late-freeze schedule for visual projection (LowRankLinear)
+        # Train visual_proj during the early/mid stages and freeze it in the final phase so that learning pressure shifts to the GP. The freeze window is hard-coded to the last 50 epochs for now.
         freeze_start = max(0, self.max_epoch - 50)  # e.g. 250 if max_epoch=300
         if hasattr(self.model, "visual_proj") and any(p.requires_grad for p in self.model.visual_proj.parameters()):
             if self.epoch >= freeze_start:
@@ -702,7 +719,7 @@ class ADAPTER(TrainerXCostume):
         print("Turning off gradients in frozen modules and honour pre-set flags")
         for name, param in self.model.named_parameters():
             if name == "logit_scale":
-                param.requires_grad = True
+                param.requires_grad = True  # allow adaptation with regularisation
             elif "visual_proj" in name:
                 param.requires_grad = cfg.TRAINER.ADAPTER.USE_GP  # train only with GP
             else:
@@ -712,12 +729,15 @@ class ADAPTER(TrainerXCostume):
         if cfg.MODEL.INIT_WEIGHTS:
             load_pretrained_weights(self.model.adapter, cfg.MODEL.INIT_WEIGHTS)
 
+        # Store reference value of logit_scale for later regularisation
+        self.logit_scale_ref = self.model.logit_scale.clone().detach()
+
         self.model.to(self.device)
         self.model = self.model.float()
         
         # NOTE: only give adapter (and optionally GP) parameters to the optimizer
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # ---- param-group 1: adapter, visual proj, logit_scale -----------------
+            # param-group 1: adapter, visual proj, logit_scale
             base_params = [
                 p for p in self.model.adapter.parameters() if p.requires_grad
             ] + [p for p in self.model.visual_proj.parameters() if p.requires_grad]
@@ -726,14 +746,10 @@ class ADAPTER(TrainerXCostume):
             if self.model.logit_scale.requires_grad:
                 base_params.append(self.model.logit_scale)
 
-            # ---- param-group 2: GP parameters (usually need a smaller LR) ---------
+            # param-group 2: GP parameters (usually need a smaller LR)
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
 
-            # Ensure visual projection parameters are included only once
-            if self.model.visual_proj.requires_grad_:
-                base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
-
-            # De-duplicate parameters while preserving order
+            # visual_proj parameters are already in the list above – avoid double insertion
             seen = set()
             base_params_unique = []
             for p in base_params:
@@ -965,11 +981,8 @@ class ADAPTER(TrainerXCostume):
         # Ensure tensors are on correct device
         features = torch.as_tensor(features, device=self.device)
 
+        # Forward pass with Monte-Carlo samples
         kl_divergence = None  # For logging purposes
-
-        # ------------------------------------------------------------------
-        #  Forward pass with Monte-Carlo samples                              
-        # ------------------------------------------------------------------
         S = self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES if (self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None) else 1
 
         with autocast(enabled=use_amp, device_type=self.device.type):
@@ -988,15 +1001,18 @@ class ADAPTER(TrainerXCostume):
             else:
                 loss = loss_ce
 
-            # Add β·KL term when GP is active
+            # β·KL (GP regulariser)
             if kl_divergence is not None:
-                warm = min(1.0, (self.epoch+1)/self.cfg.TRAINER.ADAPTER.GP_BETA_WARMUP)
+                warm = min(1.0, (self.epoch + 1) / self.cfg.TRAINER.ADAPTER.GP_BETA_WARMUP)
                 beta_now = self.cfg.TRAINER.ADAPTER.GP_BETA * warm
-                loss = loss_ce + beta_now * kl_divergence
+                loss = loss + beta_now * kl_divergence
 
-        # ------------------------------------------------------------------
+            # Regularise logit_scale towards its initial value to mitigate under/over-confidence
+            if self.model.logit_scale.requires_grad:
+                lam = getattr(self.cfg.TRAINER.ADAPTER, "LOGIT_SCALE_L2", 1e-3)
+                loss = loss + lam * (self.model.logit_scale - self.logit_scale_ref).pow(2)
+
         # Backward + optimiser step
-        # ------------------------------------------------------------------
         if use_amp:
             self.optim.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
@@ -1005,9 +1021,7 @@ class ADAPTER(TrainerXCostume):
         else:
             self.model_backward_and_update(loss)
 
-        # ------------------------------------------------------------------
         # Diagnostics (test accuracy etc.)
-        # ------------------------------------------------------------------
         with torch.no_grad():
             # Use deterministic prototypes (posterior mean) for evaluation
             output_test = self.model.forward_features(

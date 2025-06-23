@@ -213,10 +213,13 @@ def plot_ece(summary: pd.DataFrame, out_dir: pathlib.Path):
         plt.figure()
         for label, grp in sub.groupby("config_label"):
             plt.plot(grp["shot"], grp["ece_mean"], marker="o", label=label)
-        plt.fill_between(sub["shot"],
-                         sub["ece_mean"] - sub["ece_std"],
-                         sub["ece_mean"] + sub["ece_std"],
-                         alpha=0.15)
+            # Add per-configuration confidence band matching the plotted line
+            plt.fill_between(
+                grp["shot"],
+                grp["ece_mean"] - grp["ece_std"],
+                grp["ece_mean"] + grp["ece_std"],
+                alpha=0.15,
+            )
         plt.title(dataset)
         plt.xlabel("# shots")
         plt.ylabel("Test ECE (%)")

@@ -104,6 +104,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE = 10.0  # length scale for RBF kernel
     cfg.TRAINER.ADAPTER.GP_BETA_WARMUP = 5  # number of warmup epochs for GP beta
 
+    # Regularisation strength for logit_scale (L2 to initial value)
+    cfg.TRAINER.ADAPTER.LOGIT_SCALE_L2 = 1e-3
+
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
 
