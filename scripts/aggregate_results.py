@@ -32,24 +32,37 @@ _RE_SHOTS_IN_DIR = re.compile(r"_(\d+)shots?", re.IGNORECASE)
 # Pattern for sub-directory naming the GP learning-rate & β (created by scripts/adapt.sh)
 _RE_LR_BETA_DIR = re.compile(r"LR([\d.eE+-]+)_B([\d.eE+-]+)")
 
+# Parse hyper-parameters from log files (TRAINER.ADAPTER.* entries)
+_RE_LOG_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)")
+_RE_LOG_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)")
+_RE_LOG_LS = re.compile(r"GP_LENGTH_SCALE:\s+([\d.eE+-]+)")
+
 
 # ───────────────────────────
 # Single-file parser
 # ───────────────────────────
 
-def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None]:
-    """Return (accuracy, ece) parsed from *log_path* (may return None)."""
+def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None]:
+    """Return (accuracy, ece, lr, beta, length_scale) extracted from *log_path*."""
     try:
         text = log_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
         print(f"! Could not read {log_path}: {e}")
-        return None, None
+        return None, None, None, None, None
 
     acc_match = _RE_ACC.search(text)
     ece_match = _RE_ECE.search(text)
+    lr_match = _RE_LOG_LR.search(text)
+    beta_match = _RE_LOG_BETA.search(text)
+    ls_match = _RE_LOG_LS.search(text)
+
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
-    return acc, ece
+    lr = lr_match.group(1) if lr_match else None
+    beta = beta_match.group(1) if beta_match else None
+    length_scale = ls_match.group(1) if ls_match else None
+
+    return acc, ece, lr, beta, length_scale
 
 
 # ───────────────────────────
@@ -101,13 +114,23 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
 
                 acc_values: List[float] = []
                 ece_values: List[float] = []
+                lr_val: str | None = None
+                beta_val: str | None = None
+                ls_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece = parse_log(log_file)
+                    acc, ece, lr, beta, ls = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
                         ece_values.append(ece)
+                    # Take first non-None hyper-param value (should be same across seeds)
+                    if lr_val is None and lr is not None:
+                        lr_val = lr
+                    if beta_val is None and beta is not None:
+                        beta_val = beta
+                    if ls_val is None and ls is not None:
+                        ls_val = ls
 
                 if not acc_values and not ece_values:
                     continue  # skip empty variant
@@ -116,6 +139,7 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                     "config": variant_label,
                     "lr": lr_val,
                     "beta": beta_val,
+                    "length_scale": ls_val,
                     "shots": num_shots,
                     "n_seeds": max(len(acc_values), len(ece_values)),
                     "acc_mean": statistics.mean(acc_values) if acc_values else float("nan"),
@@ -142,14 +166,14 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
             continue
         print("\n=== Dataset:", dataset, "===")
         header = (
-            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'LS':>8} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
         )
         print(header)
         print("-" * len(header))
         for r in records:
             print(
-                f"{r['config']:<25} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
+                f"{r['config']:<25} {r['lr'] or '-':>8} {r['beta'] or '-':>8} {r['length_scale'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
                 f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f}"

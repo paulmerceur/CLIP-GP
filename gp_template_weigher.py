@@ -17,21 +17,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Keep original dtype/device for later but run GP in fp32 for numerical stability (GPyTorch is primarily tested in fp32).
         self.orig_dtype = text_embeddings.dtype
         self.orig_device = text_embeddings.device
-
         text_embeddings_fp32 = text_embeddings.to(dtype=torch.float32)
 
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
         self.num_mc_samples = cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES
-
-        # ------------------------------------------------------------------
-        #  One independent GP per class (batched). We do NOT wrap the
-        #  strategy in an extra IndependentMultitaskVariationalStrategy
-        #  because the batch dimension **already** indexes the classes. The
-        #  previous double-wrapping duplicated the class dimension, leading
-        #  to a weight matrix of shape [K, K, M] instead of the intended
-        #  [K, M]. This, in turn, produced almost uniform (and thus
-        #  ineffective) template weights during optimisation.
-        # ------------------------------------------------------------------
 
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
@@ -58,10 +47,17 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
         if cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "rbf":
+            # Compute length-scale as average pair-wise L2 distance between templates.
+            with torch.no_grad():
+                # Compute average pair-wise L2 distance (in fp32 for stability)
+                flat_emb = text_embeddings_fp32.reshape(-1, self.dim)  # [(K*M), D]
+                dists = torch.cdist(flat_emb, flat_emb)
+                ls_cfg = dists.mean().item()
+            print(f"[GP] Auto length-scale based on template distances: {ls_cfg:.4f}")
+
             base_kernel = gpytorch.kernels.RBFKernel(batch_shape=batch_shape, ard_num_dims=self.dim)
-            base_kernel.initialize(lengthscale=cfg.TRAINER.ADAPTER.GP_LENGTH_SCALE)
-        elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "cosine":
-            base_kernel = gpytorch.kernels.CosineKernel(batch_shape=batch_shape)
+            base_kernel.initialize(lengthscale=ls_cfg)
+            base_kernel.raw_lengthscale.requires_grad = True
         elif cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "linear":
             base_kernel = gpytorch.kernels.LinearKernel(batch_shape=batch_shape)
         else:
@@ -74,11 +70,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Break symmetry: initialise variational mean with small noise
         with torch.no_grad():
             vm = self.variational_strategy._variational_distribution.variational_mean
-            vm.normal_(mean=0.0, std=1e-2) # Small random perturbation
-
-        # Learnable softmax temperature (log_tau) to control concentration
-        # Parameterise so that τ ≥ 1 (never sharpens); start at τ≈1.5
-        self.log_tau = nn.Parameter(torch.tensor(0.0))
+            vm.normal_(mean=0.0, std=0.1)
 
         # Register the (fixed) template embeddings for downstream use.
         self.register_buffer("_templates", text_embeddings.detach())
@@ -106,16 +98,13 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             if alpha.dim() == 2 and alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
                 # Transpose to [K, M]
                 alpha = alpha.t()
-
-            tau = 1.0 + F.softplus(self.log_tau)  # >=1.0
-            w = F.softmax(alpha / tau, dim=-1)  # [K, M]  (temperature-scaled)
+            w = F.softmax(alpha, dim=-1)  # [K, M]  (temperature-scaled)
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-            tau = 1.0 + F.softplus(self.log_tau)
-            w = F.softmax(mu / tau, dim=-1)  # [K, M]  (temperature-scaled)
+            w = F.softmax(mu, dim=-1)  # [K, M]  (temperature-scaled)
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
@@ -141,12 +130,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         q = self.get_weight_distribution()
 
         if use_mean:
-            tau = 1.0 + F.softplus(self.log_tau)
-            w = torch.softmax(q.mean * tau, dim=-1).unsqueeze(0)  # [1,K,M] – fp32
+            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M] – fp32 (consistent with forward_and_kl)
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            tau = 1.0 + F.softplus(self.log_tau)
-            w = torch.softmax(alpha * tau, dim=-1)              # [S,K,M] – fp32
+            w = torch.softmax(alpha, dim=-1)              # [S,K,M] – fp32 (consistent with forward_and_kl)
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
@@ -166,7 +153,7 @@ class PerTemplateMean(gpytorch.means.Mean):
 
         If *N* equals the number of stored template biases (*M*), we use them
         directly.  Otherwise (e.g. when *x* is the concatenation of inducing
-        and test points, hence N = 2 M) we broadcast the **average** bias of
+        and test points, hence N = 2 M) we broadcast the **average** bias of
         each class across all points.  This keeps shapes compatible while still
         learning a per-class offset.  Feel free to refine this later.
         """

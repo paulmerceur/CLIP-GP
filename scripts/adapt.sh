@@ -12,10 +12,10 @@ DATASET=$2      # target dataset - i.e. {imagenet, caltech101, oxford_pets, stan
 CFG=$3          # config file - SGD_lr1e-1_B256_ep300
 SHOTS=$4        # number of shots (1, 2, 4, 8, 16)
 BACKBONE=$5     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
-GP_LR=$6        # GP learning rate
-GP_BETA=$7      # GP beta
+GP_LR=$6        # GP learning rate for GP parameters
+GP_BETA=$7      # GP beta (KL weight)
 EXPERIMENT_NAME=${8:-"single_test"}  # experiment name for organizing outputs
-GPU_ID=${9:-0}
+GPU_ID=${10:-0}
 
 for ((seed=1; seed<=SEEDS; seed++)); do
     DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots_LR${GP_LR}_B${GP_BETA}/seed${seed}

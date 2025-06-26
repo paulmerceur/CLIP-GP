@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.amp import GradScaler, autocast
 import numpy as np
+import math
 
 from dassl.engine import TRAINER_REGISTRY, SimpleTrainer
 from dassl.metrics import compute_accuracy
@@ -102,11 +103,6 @@ def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder
         )
         templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
 
-    # Verbose printout
-    print(f"Selected {len(templates)} fixed diverse templates:")
-    for i, template in enumerate(templates):
-        print(f"  {i}: {template}")
-
     # Encode all prompts once - returned tensor is reused by caller.
     emb_list = []
     with torch.no_grad():
@@ -118,8 +114,6 @@ def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder
     text_embeds = torch.stack(emb_list)  # [K,M,D]
 
     # Instantiate GP
-    print(f"Using GP: {cfg.TRAINER.ADAPTER.USE_GP}")
-    print(f"Templates: {templates}")
     if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
         proto, kl = gp.forward_and_kl()
@@ -603,22 +597,20 @@ class TrainerXCostume(SimpleTrainer):
             self.model.text_encoder.eval()
         # Sanity-check: log mode of key sub-modules
         if self.epoch % 10 == 0:
-            print("[DEBUG] modes -> adapter.train():", self.model.adapter.training,
-                  "gp.train():", self.model.gp_weighter.training if self.model.gp_weighter else "N/A",
-                  "vision.eval():", not self.model.image_encoder.training,
-                  "text.eval():", not self.model.text_encoder.training)
 
-            # ---- Extra DEBUG: GP template weights for class 0 ----
+            # ---- DEBUG: GP template weights for class 0 ----
             if self.model.gp_weighter is not None:
                 with torch.no_grad():
                     dist = self.model.gp_weighter.get_weight_distribution()
-                    weights_mean = torch.softmax(dist.mean, dim=-1)  # [K, M]
-                    n = min(10, weights_mean.shape[1])
-                    print(f"[DEBUG] GP weights (class 0, first {n} templates): {weights_mean[0, :n].detach().cpu().numpy()}")
+                    w_mean = torch.softmax(dist.mean, dim=-1)      # K × M
+                    w_std  = torch.softmax(dist.variance.sqrt(), -1)
+                    print("\n")
+                    print(f"[DEBUG] w_mean[0]: {w_mean[0,:7].cpu().numpy()}")
+                    print(f"[DEBUG] w_std [0]: {w_std [0,:7].cpu().numpy()}")
 
         # Late-freeze schedule for visual projection (LowRankLinear)
         # Train visual_proj during the early/mid stages and freeze it in the final phase so that learning pressure shifts to the GP. The freeze window is hard-coded to the last 50 epochs for now.
-        freeze_start = max(0, self.max_epoch - 50)  # e.g. 250 if max_epoch=300
+        freeze_start = 100
         if hasattr(self.model, "visual_proj") and any(p.requires_grad for p in self.model.visual_proj.parameters()):
             if self.epoch >= freeze_start:
                 for p in self.model.visual_proj.parameters():
@@ -691,6 +683,13 @@ class TrainerXCostume(SimpleTrainer):
         # Unmark training epoch flag  
         self.model._in_training_epoch = False
         
+        if self.model.gp_weighter is not None and self.epoch % 10 == 0:
+            w_dist = self.model.gp_weighter.get_weight_distribution()
+            ls_tensor = self.model.gp_weighter.covar_module.base_kernel.lengthscale
+            # Handle both scalar and ARD (dim-specific) length-scales
+            ls_val = ls_tensor.mean().item() if ls_tensor.numel() > 1 else ls_tensor.item()
+            print(f"ℓ = {ls_val:.3f}  KL = {self.model.gp_weighter.variational_strategy.kl_divergence().mean().item():.3f}  weight std = {w_dist.variance.mean().item():.3f}")
+
         return loss_summary
 
 
@@ -716,7 +715,6 @@ class ADAPTER(TrainerXCostume):
         print("Building custom CLIP")
         self.model = CustomCLIP(cfg, classnames, clip_model)
 
-        print("Turning off gradients in frozen modules and honour pre-set flags")
         for name, param in self.model.named_parameters():
             if name == "logit_scale":
                 param.requires_grad = True  # allow adaptation with regularisation
@@ -758,11 +756,35 @@ class ADAPTER(TrainerXCostume):
                     seen.add(id(p))
 
             param_groups = [
-                {'params': base_params_unique, 'lr': cfg.OPTIM.LR, 'weight_decay': getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)},
-                {'params': [p for p in gp_params if p.requires_grad], 'lr': getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR), 'weight_decay': 0.0},
+                {
+                    'params': base_params_unique,
+                    'lr': cfg.OPTIM.LR,
+                    'weight_decay': getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+                },
+                {
+                    'params': [p for p in gp_params if p.requires_grad],
+                    'lr': float(getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR)),
+                    'weight_decay': 0.0
+                },
             ]
 
-            self.optim = build_optimizer(param_groups, cfg.OPTIM)
+            # -----------------------------------------------------------------
+            # Use a plain torch.optim optimizer so group-specific learning rates
+            # are guaranteed to be honoured without any hidden overwriting.
+            # -----------------------------------------------------------------
+            if cfg.OPTIM.NAME.lower() == "adam":
+                self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
+            else:
+                # Default to SGD (most common in these configs)
+                self.optim = torch.optim.SGD(
+                    param_groups,
+                    momentum=cfg.OPTIM.MOMENTUM,
+                    dampening=cfg.OPTIM.SGD_DAMPNING,
+                    nesterov=cfg.OPTIM.SGD_NESTEROV,
+                )
+
+            # Quick sanity-check
+            print("[Optimizer] param group LRs:", [pg['lr'] for pg in self.optim.param_groups])
         else:
             # Optimise adapter (+ visual projection if trainable) and logit_scale
             baseline_params = list(self.model.adapter.parameters())
@@ -988,11 +1010,15 @@ class ADAPTER(TrainerXCostume):
         with autocast(enabled=use_amp, device_type=self.device.type):
             logits_mc, kl_divergence = self.model.forward_features_mc(features, S)
 
-            # Flatten samples for CE:   [S,B,K] → [S*B,K]
-            logits_flat = logits_mc.reshape(-1, logits_mc.shape[-1])
-            labels_flat = labels.unsqueeze(0).repeat(S, 1).reshape(-1)
+            # logits_mc: [S,B,K]
+            # 1) Integrate out MC samples → log-mean-exp across S
+            logit_mean = torch.logsumexp(logits_mc, dim=0) - math.log(S)  # [B,K]
 
-            loss_ce = F.cross_entropy(logits_flat, labels_flat)
+            # 2) Convert to valid log-probabilities across classes
+            logprob = F.log_softmax(logit_mean, dim=-1)  # [B,K]
+
+            # 3) Negative log-likelihood
+            loss_ce = F.nll_loss(logprob, labels)
 
             # Optional zero-shot constraint (CLAP)
             if self.model.adapter.apply_constraint != "none":
@@ -1006,6 +1032,7 @@ class ADAPTER(TrainerXCostume):
                 warm = min(1.0, (self.epoch + 1) / self.cfg.TRAINER.ADAPTER.GP_BETA_WARMUP)
                 beta_now = self.cfg.TRAINER.ADAPTER.GP_BETA * warm
                 loss = loss + beta_now * kl_divergence
+                #loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
 
             # Regularise logit_scale towards its initial value to mitigate under/over-confidence
             if self.model.logit_scale.requires_grad:
@@ -1141,7 +1168,6 @@ class ADAPTER(TrainerXCostume):
                 copy.deepcopy(self.train_loader_x.dataset), batch_size=self.train_loader_x.batch_size,
                 sampler=self.train_loader_x.sampler, num_workers=self.train_loader_x.num_workers,
                 drop_last=False, pin_memory=False)
-            print(f"Pin memory: {self.train_loader_x.pin_memory}")
 
         elif partition == "val":
             data_loader = copy.deepcopy(self.val_loader)
