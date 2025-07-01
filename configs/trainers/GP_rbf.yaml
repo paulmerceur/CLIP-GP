@@ -15,12 +15,12 @@ INPUT:
 OPTIM:
   NAME: "sgd"
   LR: 0.01
-  MAX_EPOCH: 300
+  MAX_EPOCH: 100
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
   WARMUP_CONS_LR: 1e-5
-  WEIGHT_DECAY: 0.0
+  WEIGHT_DECAY: 0.001
 
 TRAIN:
   PRINT_FREQ: 5
@@ -30,11 +30,11 @@ TRAINER:
     INIT: ZS
     CONSTRAINT: none  
     PREC: fp16
-    NUM_TEMPLATES: 10
+    NUM_TEMPLATES: 20
     # GP-specific configuration
+    GP_OPT: adam
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
-    GP_LR: 0.1
-    GP_BETA: 0.01
-    GP_BETA_WARMUP: 100
+    GP_LR: 0.05
+    GP_BETA: 0.05

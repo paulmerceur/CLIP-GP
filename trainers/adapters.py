@@ -1,16 +1,13 @@
-import os
 import os.path as osp
-from typing import List, Optional
-import random
-from re import template
+from typing import List
 import time
-import os.path as osp
 import datetime
 import copy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.amp import GradScaler, autocast
+from torch.amp.grad_scaler import GradScaler    
+from torch.amp.autocast_mode import autocast
 import numpy as np
 import math
 
@@ -89,7 +86,7 @@ class TextEncoder(nn.Module):
         return x
 
 
-def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder: TextEncoder, pretrained_projection: Optional[str] = None):
+def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder: TextEncoder, pretrained_projection: str = None):
     """Computes and caches embeddings inside closure."""
 
     device = next(text_encoder.parameters()).device
@@ -115,7 +112,9 @@ def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder
 
     # Instantiate GP
     if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
-        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg).to(device)
+        # Initialise GP prior mean with uniform (zero-logit) soft prompts and freeze it
+        mean_init = torch.zeros(text_embeds.shape[0], text_embeds.shape[1], device=device, dtype=torch.float32)
+        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
         return proto, text_embeds, gp, kl
 
@@ -294,42 +293,6 @@ class AdapterMethod(nn.Module):
         return self.prototypes
 
 
-class LowRankLinear(nn.Module):
-    """
-    Low-rank factorisation of a square projection matrix.
-    W = V ∘ U with U: d → r, V: r → d.
-    A small residual (initially zero) is thus added on top of the identity
-    when r < d.  A `.weight` property exposes V.weight so existing dtype
-    checks that reference `visual_proj.weight` continue to work unchanged.
-    """
-    def __init__(self, dim: int, rank: int = 64, bias: bool = False):
-        super().__init__()
-        self.U = nn.Linear(dim, rank, bias=bias)
-        self.V = nn.Linear(rank, dim, bias=bias)
-
-        # Start close to identity: U initializes to zeros, V to identity rows
-        nn.init.zeros_(self.U.weight)
-        if self.V.weight.shape[0] == self.V.weight.shape[1]:
-            nn.init.eye_(self.V.weight)
-        else:
-            # When rank < dim, use small values to approximate identity effect
-            nn.init.normal_(self.V.weight, mean=0.0, std=1e-4)
-
-    @property
-    def weight(self):
-        # Expose the out-projection weight for dtype checks
-        return self.V.weight
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply low-rank residual on top of identity.
-
-        Returns:  x + V(U(x))  so that the layer starts exactly as the identity
-        mapping (because U is zero-initialised).  This prevents zero vectors
-        which caused division-by-zero issues during \|x\| normalisation.
-        """
-        return x + self.V(self.U(x))
-
-
 class CustomCLIP(nn.Module):
     """CLIP + optional GP-weighted template prototypes (cached)."""
 
@@ -348,7 +311,8 @@ class CustomCLIP(nn.Module):
         self.use_visual_proj = cfg.TRAINER.ADAPTER.USE_GP  # flag for later use
         self.vision_dim = clip_model.text_projection.shape[1]
         if cfg.TRAINER.ADAPTER.USE_GP:
-            self.visual_proj = LowRankLinear(self.vision_dim, rank=64, bias=False)
+            self.visual_proj = nn.Linear(self.vision_dim, self.vision_dim, bias=False)
+            nn.init.eye_(self.visual_proj.weight)
         else:
             self.visual_proj = nn.Identity()
 
@@ -460,7 +424,7 @@ class CustomCLIP(nn.Module):
 
         return self._forward_impl(features, is_feature=True)
 
-    def forward_features_mc(self, features, num_samples: int):
+    def forward_features_mc(self, features, num_samples: int, *, use_mean: bool | None = None):
         """Compute logits for *num_samples* GP draws.
 
         Returns
@@ -486,25 +450,29 @@ class CustomCLIP(nn.Module):
             logits = self.forward_lp(feats)  # [B,K]
             return logits.unsqueeze(0), None
 
-        # Sample prototypes
-        prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=False)  # [S,K,D]
-        # Normalise KL by the number of classes so its magnitude is consistent with forward_and_kl()
+        # Decide whether to draw stochastic samples or use the deterministic posterior mean.
+        if use_mean is None:
+            use_mean = not self.training  # deterministic outside .train()
+
+        prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=use_mean)  # [S,K,D]
+
+        # Normalise KL by the number of classes
         kl = self.gp_weighter.variational_strategy.kl_divergence().sum() / self.gp_weighter.num_classes
 
         # Normalise once for stability
         feats_norm = feats / feats.norm(dim=-1, keepdim=True)          # [B,D]
         prot_norm = prototypes_s / prototypes_s.norm(dim=-1, keepdim=True)  # [S,K,D]
 
-        # Ensure dtype alignment before matmul
-        if prot_norm.dtype != feats.dtype:
-            prot_norm = prot_norm.to(dtype=feats.dtype)
+        # Perform computation in float32 for numerical stability
+        feats32 = feats_norm.float()
+        prot32  = prot_norm.float()
 
-        # Compute logits:  (B,D)  ·  (S,K,D)ᵀ  →  (S,B,K)
-        logits = torch.einsum("bd,skd->sbk", feats_norm, prot_norm)
-        # Cast logit_scale to logits dtype for safe multiplication
-        logits = logits * self.logit_scale.exp().to(dtype=logits.dtype)
+        # Compute logits in fp32:  (B,D)  ·  (S,K,D)ᵀ  →  (S,B,K)
+        logits_fp32 = torch.einsum("bd,skd->sbk", feats32, prot32)
+        logits_fp32 = logits_fp32 * self.logit_scale.exp().float()
 
-        return logits, kl
+        # Cast back to the original CLIP dtype (usually fp16) before returning
+        return logits_fp32.to(self.dtype), kl
 
     def forward_lp(self, features, prototypes=None):
         if prototypes is None:
@@ -514,10 +482,12 @@ class CustomCLIP(nn.Module):
         if prototypes.device != features.device or prototypes.dtype != features.dtype:
             prototypes = prototypes.to(device=features.device, dtype=features.dtype)
             
-        features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
+        # Compute logits in fp32 to prevent numerical underflow
+        feats32 = (features / features.norm(dim=-1, keepdim=True)).float()
+        prot32  = (prototypes / prototypes.norm(dim=-1, keepdim=True)).float()
 
-        return (features_norm @ prototypes_norm.t()) * self.logit_scale.exp()
+        logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
+        return logits_fp32.to(self.dtype)
 
     def forward_task_residual(self, features, prototypes=None):
         if prototypes is None:
@@ -530,10 +500,11 @@ class CustomCLIP(nn.Module):
         if prot.device != features.device or prot.dtype != features.dtype:
             prot = prot.to(device=features.device, dtype=features.dtype)
             
-        features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prot / prot.norm(dim=-1, keepdim=True)
+        feats32 = (features / features.norm(dim=-1, keepdim=True)).float()
+        prot32  = (prot / prot.norm(dim=-1, keepdim=True)).float()
 
-        return (features_norm @ prototypes_norm.t()) * self.logit_scale.exp()
+        logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
+        return logits_fp32.to(self.dtype)
 
     def forward_clipadapter(self, features, prototypes=None):
         if prototypes is None:
@@ -545,13 +516,14 @@ class CustomCLIP(nn.Module):
         if prot.device != features.device or prot.dtype != features.dtype:
             prot = prot.to(device=features.device, dtype=features.dtype)
             
+        # CLIP-Adapter feature blend
         x = self.adapter.mlp(features)
         feats = self.adapter.ratio * x + (1 - self.adapter.ratio) * features
 
-        features_norm = feats / feats.norm(dim=-1, keepdim=True)
-        prototypes_norm = prot / prot.norm(dim=-1, keepdim=True)
-
-        return (features_norm @ prototypes_norm.t()) * self.logit_scale.exp()
+        feats32 = (feats / feats.norm(dim=-1, keepdim=True)).float()
+        prot32 = (prot / prot.norm(dim=-1, keepdim=True)).float()
+        logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
+        return logits_fp32.to(self.dtype)
 
     def forward_tipadapter(self, features, prototypes=None):
         if prototypes is None:
@@ -563,18 +535,19 @@ class CustomCLIP(nn.Module):
         if prot.device != features.device or prot.dtype != features.dtype:
             prot = prot.to(device=features.device, dtype=features.dtype)
             
-        features_norm = features / features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prot / prot.norm(dim=-1, keepdim=True)
-        
-        logits = (features_norm @ prototypes_norm.t()) * self.logit_scale.exp()
-        
+        feats32 = (features / features.norm(dim=-1, keepdim=True)).float()
+        prot32  = (prot / prot.norm(dim=-1, keepdim=True)).float()
+
+        logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
+        logits = logits_fp32
+
         if self.adapter.cache_keys is not None:
             ck = self.adapter.cache_keys / self.adapter.cache_keys.norm(dim=-1, keepdim=True)
-            affinity = features_norm @ ck.t().float()  # Use projected features for consistency
+            affinity = feats32 @ ck.t().float()  # Use projected features for consistency
             cache_logits = torch.exp((-1) * (self.adapter.beta - self.adapter.beta * affinity)) @ self.adapter.cache_values.float()
             logits += self.adapter.alpha * cache_logits
         
-        return logits
+        return logits.to(self.dtype)
 
 class TrainerXCostume(SimpleTrainer):
     """A base trainer using labeled data only."""
@@ -603,21 +576,10 @@ class TrainerXCostume(SimpleTrainer):
                 with torch.no_grad():
                     dist = self.model.gp_weighter.get_weight_distribution()
                     w_mean = torch.softmax(dist.mean, dim=-1)      # K × M
-                    w_std  = torch.softmax(dist.variance.sqrt(), -1)
+                    w_std  = dist.variance.sqrt()
                     print("\n")
                     print(f"[DEBUG] w_mean[0]: {w_mean[0,:7].cpu().numpy()}")
                     print(f"[DEBUG] w_std [0]: {w_std [0,:7].cpu().numpy()}")
-
-        # Late-freeze schedule for visual projection (LowRankLinear)
-        # Train visual_proj during the early/mid stages and freeze it in the final phase so that learning pressure shifts to the GP. The freeze window is hard-coded to the last 50 epochs for now.
-        freeze_start = 100
-        if hasattr(self.model, "visual_proj") and any(p.requires_grad for p in self.model.visual_proj.parameters()):
-            if self.epoch >= freeze_start:
-                for p in self.model.visual_proj.parameters():
-                    p.requires_grad = False
-            else:
-                for p in self.model.visual_proj.parameters():
-                    p.requires_grad = True
 
         # Init kpis tracker
         losses = MetricMeter()
@@ -682,14 +644,6 @@ class TrainerXCostume(SimpleTrainer):
         
         # Unmark training epoch flag  
         self.model._in_training_epoch = False
-        
-        if self.model.gp_weighter is not None and self.epoch % 10 == 0:
-            w_dist = self.model.gp_weighter.get_weight_distribution()
-            ls_tensor = self.model.gp_weighter.covar_module.base_kernel.lengthscale
-            # Handle both scalar and ARD (dim-specific) length-scales
-            ls_val = ls_tensor.mean().item() if ls_tensor.numel() > 1 else ls_tensor.item()
-            print(f"ℓ = {ls_val:.3f}  KL = {self.model.gp_weighter.variational_strategy.kl_divergence().mean().item():.3f}  weight std = {w_dist.variance.mean().item():.3f}")
-
         return loss_summary
 
 
@@ -719,7 +673,9 @@ class ADAPTER(TrainerXCostume):
             if name == "logit_scale":
                 param.requires_grad = True  # allow adaptation with regularisation
             elif "visual_proj" in name:
-                param.requires_grad = cfg.TRAINER.ADAPTER.USE_GP  # train only with GP
+                # Train visual projection only if explicitly requested
+                train_vproj = cfg.TRAINER.ADAPTER.USE_GP and cfg.TRAINER.ADAPTER.TRAIN_VISUAL_PROJ
+                param.requires_grad = train_vproj
             else:
                 if ("adapter" not in name) and ("gp_weighter" not in name) and ("visual_proj" not in name):
                     param.requires_grad = False
@@ -768,23 +724,32 @@ class ADAPTER(TrainerXCostume):
                 },
             ]
 
-            # -----------------------------------------------------------------
-            # Use a plain torch.optim optimizer so group-specific learning rates
-            # are guaranteed to be honoured without any hidden overwriting.
-            # -----------------------------------------------------------------
-            if cfg.OPTIM.NAME.lower() == "adam":
-                self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
-            else:
-                # Default to SGD (most common in these configs)
-                self.optim = torch.optim.SGD(
-                    param_groups,
-                    momentum=cfg.OPTIM.MOMENTUM,
-                    dampening=cfg.OPTIM.SGD_DAMPNING,
-                    nesterov=cfg.OPTIM.SGD_NESTEROV,
-                )
+            # Choose optimiser according to requested GP_OPT (falls back to global OPTIM.NAME)
+            base_opt_name = cfg.OPTIM.NAME.lower()
+            gp_opt_name   = getattr(cfg.TRAINER.ADAPTER, "GP_OPT", base_opt_name).lower()
 
-            # Quick sanity-check
-            print("[Optimizer] param group LRs:", [pg['lr'] for pg in self.optim.param_groups])
+            if base_opt_name == gp_opt_name:
+                # Both groups share the same optimiser type → feed *both* param groups
+                if base_opt_name == "adam":
+                    self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
+                else:
+                    self.optim = torch.optim.SGD(
+                        param_groups,
+                        momentum=getattr(cfg.OPTIM, "MOMENTUM", 0.0),
+                        dampening=getattr(cfg.OPTIM, "SGD_DAMPNING", 0.0),
+                        nesterov=getattr(cfg.OPTIM, "SGD_NESTEROV", False),
+                    )
+            else:
+                # Different optimiser for GP requested (e.g., base SGD, GP Adam)
+                if gp_opt_name == "adam":
+                    self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
+                else:
+                    self.optim = torch.optim.SGD(
+                        param_groups,
+                        momentum=getattr(cfg.OPTIM, "MOMENTUM", 0.0),
+                        dampening=getattr(cfg.OPTIM, "SGD_DAMPNING", 0.0),
+                        nesterov=getattr(cfg.OPTIM, "SGD_NESTEROV", False),
+                    )
         else:
             # Optimise adapter (+ visual projection if trainable) and logit_scale
             baseline_params = list(self.model.adapter.parameters())
@@ -792,7 +757,9 @@ class ADAPTER(TrainerXCostume):
             if self.model.logit_scale.requires_grad:
                 baseline_params.append(self.model.logit_scale)
             self.optim = build_optimizer(baseline_params, cfg.OPTIM)
-            print(f"Params: {baseline_params}")
+            for i, pg in enumerate(self.optim.param_groups):
+                n_params = sum(p.numel() for p in pg['params'])
+                print(f"[DEBUG] Optim group {i}: {n_params} params · lr={pg['lr']} · wd={pg.get('weight_decay',0)}")
             
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("adapter", self.model.adapter, self.optim, self.sched)
@@ -954,12 +921,12 @@ class ADAPTER(TrainerXCostume):
             # Create optimizer with parameter groups
             from torch.optim import SGD, Adam
             if self.cfg.OPTIM.NAME.lower() == "sgd":
-                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
+                self.optim = SGD([param_groups[0]], momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
             elif self.cfg.OPTIM.NAME.lower() == "adam":
                 self.optim = Adam(param_groups)
             else:
                 # Fallback to SGD
-                self.optim = SGD(param_groups, momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
+                self.optim = SGD([param_groups[0]], momentum=getattr(self.cfg.OPTIM, "MOMENTUM", 0.9))
         else:
             # Re-build optimiser including visual projection parameters
             baseline_params = list(self.model.adapter.parameters())
@@ -1011,42 +978,46 @@ class ADAPTER(TrainerXCostume):
             logits_mc, kl_divergence = self.model.forward_features_mc(features, S)
 
             # logits_mc: [S,B,K]
-            # 1) Integrate out MC samples → log-mean-exp across S
-            logit_mean = torch.logsumexp(logits_mc, dim=0) - math.log(S)  # [B,K]
+            # 1) Compute per-sample log-probabilities
+            logprob_mc = F.log_softmax(logits_mc, dim=-1)  # [S,B,K]
 
-            # 2) Convert to valid log-probabilities across classes
-            logprob = F.log_softmax(logit_mean, dim=-1)  # [B,K]
+            # 2) Monte-Carlo estimate of expected log-probability  E_q[log p(y|⋅)]
+            logprob = logprob_mc.mean(dim=0)  # [B,K]
 
-            # 3) Negative log-likelihood
+            # 3) Negative log-likelihood (cross-entropy)
             loss_ce = F.nll_loss(logprob, labels)
 
-            # Optional zero-shot constraint (CLAP)
-            if self.model.adapter.apply_constraint != "none":
-                loss_constraint = self.model.adapter.zero_shot_constraint()
-                loss = loss_ce + loss_constraint
-            else:
-                loss = loss_ce
+            # No extra regularisation terms—keep only CE and optional GP KL
+            loss = loss_ce
 
-            # β·KL (GP regulariser)
+            # β·KL (GP regulariser) from GP posterior
             if kl_divergence is not None:
-                warm = min(1.0, (self.epoch + 1) / self.cfg.TRAINER.ADAPTER.GP_BETA_WARMUP)
-                beta_now = self.cfg.TRAINER.ADAPTER.GP_BETA * warm
-                loss = loss + beta_now * kl_divergence
-                #loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+                loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
 
-            # Regularise logit_scale towards its initial value to mitigate under/over-confidence
-            if self.model.logit_scale.requires_grad:
-                lam = getattr(self.cfg.TRAINER.ADAPTER, "LOGIT_SCALE_L2", 1e-3)
-                loss = loss + lam * (self.model.logit_scale - self.logit_scale_ref).pow(2)
+        # -------------------
+        # Backward + optimiser step with optional gradient clipping on GP
+        # -------------------
+        clip_val = 1.0  # hard-coded max-norm for GP parameters
 
-        # Backward + optimiser step
         if use_amp:
             self.optim.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
+
+            # Unscale before clipping so the norm is computed in fp32
+            self.scaler.unscale_(self.optim)
+            if self.model.gp_weighter is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.gp_weighter.parameters(), clip_val)
+
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
-            self.model_backward_and_update(loss)
+            self.optim.zero_grad(set_to_none=True)
+            loss.backward()
+
+            if self.model.gp_weighter is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.gp_weighter.parameters(), clip_val)
+
+            self.optim.step()
 
         # Diagnostics (test accuracy etc.)
         with torch.no_grad():

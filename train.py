@@ -98,11 +98,9 @@ def extend_cfg(cfg):
     # GP-specific configuration variables (simplified)
     cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
     cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
-    cfg.TRAINER.ADAPTER.GP_BETA = 0.1  # KL weight for ELBO loss
+    cfg.TRAINER.ADAPTER.GP_BETA = 0.05  # KL weight for ELBO loss
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
-    cfg.TRAINER.ADAPTER.GP_BETA_WARMUP = 5  # number of warmup epochs for GP beta
-    cfg.TRAINER.ADAPTER.LOGIT_SCALE_L2 = 1e-2 # Regularisation strength for logit_scale (L2 to initial value)
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1

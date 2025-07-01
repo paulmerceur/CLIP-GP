@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,7 +14,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     * Templates are the *inducing* points - nothing to learn there.
     """
 
-    def __init__(self, text_embeddings: torch.Tensor, cfg: dict, **kwargs) -> None:
+    def __init__(self, text_embeddings: torch.Tensor, cfg: dict, mean_init: torch.Tensor = None, **kwargs) -> None:
         # Keep original dtype/device for later but run GP in fp32 for numerical stability (GPyTorch is primarily tested in fp32).
         self.orig_dtype = text_embeddings.dtype
         self.orig_device = text_embeddings.device
@@ -46,14 +47,20 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Mean and covariance modules -------------------------------------------------
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
+        # Optionally initialise the per-template mean with external logits (e.g. zero-shot soft prompts)
+        if mean_init is not None:
+            assert mean_init.shape == (self.num_classes, self.num_templates), \
+                "mean_init must have shape [num_classes, num_templates]"
+            # Store in fp32 for numerical stability – same dtype used by GP modules
+            self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
+
         if cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE.lower() == "rbf":
-            # Compute length-scale as average pair-wise L2 distance between templates.
             with torch.no_grad():
-                # Compute average pair-wise L2 distance (in fp32 for stability)
-                flat_emb = text_embeddings_fp32.reshape(-1, self.dim)  # [(K*M), D]
-                dists = torch.cdist(flat_emb, flat_emb)
-                ls_cfg = dists.mean().item()
-            print(f"[GP] Auto length-scale based on template distances: {ls_cfg:.4f}")
+                flat_emb = F.normalize(text_embeddings_fp32.reshape(-1, self.dim), p=2, dim=-1)  # [(K*M), D]
+                pdist = torch.cdist(flat_emb, flat_emb)
+                # Exclude the zero diagonal before taking the median
+                ls_cfg = pdist[pdist > 0].median().item()
+            print(f"[GP] Auto length-scale (normalised median): {ls_cfg:.4f}")
 
             base_kernel = gpytorch.kernels.RBFKernel(batch_shape=batch_shape, ard_num_dims=self.dim)
             base_kernel.initialize(lengthscale=ls_cfg)
@@ -74,7 +81,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Register the (fixed) template embeddings for downstream use.
         self.register_buffer("_templates", text_embeddings.detach())
-    
+
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
@@ -98,13 +105,15 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             if alpha.dim() == 2 and alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
                 # Transpose to [K, M]
                 alpha = alpha.t()
-            w = F.softmax(alpha, dim=-1)  # [K, M]  (temperature-scaled)
+
+            w = F.softmax(alpha, dim=-1)  # [K, M]
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-            w = F.softmax(mu, dim=-1)  # [K, M]  (temperature-scaled)
+
+            w = F.softmax(mu, dim=-1)  # [K, M]
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
@@ -130,15 +139,14 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         q = self.get_weight_distribution()
 
         if use_mean:
-            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M] – fp32 (consistent with forward_and_kl)
+            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M]
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            w = torch.softmax(alpha, dim=-1)              # [S,K,M] – fp32 (consistent with forward_and_kl)
+            w = torch.softmax(alpha, dim=-1)              # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
         return prototypes.to(dtype=self.orig_dtype, device=self._templates.device)
-
 
 class PerTemplateMean(gpytorch.means.Mean):
     """Learnable mean of shape [K, M] (one bias per class & template)."""

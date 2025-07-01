@@ -14,11 +14,13 @@ SHOTS=$4        # number of shots (1, 2, 4, 8, 16)
 BACKBONE=$5     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
 GP_LR=$6        # GP learning rate for GP parameters
 GP_BETA=$7      # GP beta (KL weight)
-EXPERIMENT_NAME=${8:-"single_test"}  # experiment name for organizing outputs
+RESID_LAMBDA=${8:-0.003}
+EXPERIMENT_NAME=${9:-"single_test"}  # experiment name for organizing outputs
 GPU_ID=${10:-0}
+MAX_EPOCH=${11:-100}
 
 for ((seed=1; seed<=SEEDS; seed++)); do
-    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots_LR${GP_LR}_B${GP_BETA}/seed${seed}
+    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots_LR${GP_LR}_B${GP_BETA}_L${RESID_LAMBDA}/seed${seed}
     if [ -d "$DIR" ]; then
         echo "Oops! The results exist at ${DIR} (so skip this job)"
     else
@@ -32,6 +34,11 @@ for ((seed=1; seed<=SEEDS; seed++)); do
         --backbone ${BACKBONE} \
         DATASET.NUM_SHOTS ${SHOTS} \
         TRAINER.ADAPTER.GP_LR ${GP_LR} \
-        TRAINER.ADAPTER.GP_BETA ${GP_BETA}
+        TRAINER.ADAPTER.GP_BETA ${GP_BETA} \
+        OPTIM.MAX_EPOCH ${MAX_EPOCH} \
+        TRAINER.ADAPTER.USE_RESIDUAL True \
+        TRAINER.ADAPTER.RESID_LAMBDA ${RESID_LAMBDA} \
+        TRAINER.ADAPTER.TRAIN_VISUAL_PROJ False \
+        TRAIN.EARLY_STOP False
     fi
 done
