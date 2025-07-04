@@ -1,26 +1,24 @@
 #!/bin/bash
 
-NUM_SHOTS=${1:-4}
+DATASET=${1:-caltech101}
 GPU_ID=${2:-0}
 
-EXPERIMENT_NAME=gp_test
+EXPERIMENT_NAME=gp_test6
 
 # Grids
-GP_LRS=(0.003 0.005 0.01)
-BETAS=(0.05 0.1 0.2)
-LAMBDA_RES=(0.001 0.01)
+SHOTS=(1 4 8 16)
+GP_LRS=(0.1)
+BETAS=(0.01)
+W_REGS=(0.0001)
 
-# Shorter training schedule
-MAX_EPOCH=100
+for shot in ${SHOTS[@]}; do
+  bash scripts/adapt.sh 3 $DATASET baseline_10templates  $shot RN50 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
 
-#bash scripts/adapt.sh 1 caltech101 baseline_1template    $NUM_SHOTS RN50 0.0 0.0 0.01 10 $EXPERIMENT_NAME $GPU_ID
-#bash scripts/adapt.sh 1 caltech101 baseline_10templates  $NUM_SHOTS RN50 0.0 0.0 $EXPERIMENT_NAME $GPU_ID $MAX_EPOCH
-
-# Loop over all combinations of length-scale, LR, and Beta
-for lr in ${GP_LRS[@]}; do
-  for beta in ${BETAS[@]}; do
-    for lam in ${LAMBDA_RES[@]}; do
-      bash scripts/adapt.sh 1 caltech101 GP_rbf $NUM_SHOTS RN50 ${lr} ${beta} ${lam} $EXPERIMENT_NAME $GPU_ID $MAX_EPOCH
+  for lr in ${GP_LRS[@]}; do
+    for beta in ${BETAS[@]}; do
+      for w_reg in ${W_REGS[@]}; do
+        bash scripts/adapt.sh 3 $DATASET GP_rbf $shot RN50 ${lr} ${beta} ${w_reg} $EXPERIMENT_NAME $GPU_ID
+      done
     done
   done
 done

@@ -17,7 +17,7 @@ from dassl.utils import load_pretrained_weights, load_checkpoint, AverageMeter, 
 from dassl.optim import build_optimizer, build_lr_scheduler
 
 from clip import clip
-from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT
+from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
 from gp_template_weigher import GaussianProcessTemplateWeighter
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -99,6 +99,10 @@ def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder
             len(IMAGENET_TEMPLATES_SELECT) - 1,
         )
         templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
+    if cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1 + len(IMAGENET_TEMPLATES_SELECT):
+        # Add templates from IMAGENET_TEMPLATES
+        templates += IMAGENET_TEMPLATES[:cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1 - len(IMAGENET_TEMPLATES_SELECT)]
+    print(f"[DEBUG] templates: {templates}")
 
     # Encode all prompts once - returned tensor is reused by caller.
     emb_list = []
@@ -307,12 +311,14 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-        # Learnable visual projection (only active when GP is enabled)
-        self.use_visual_proj = cfg.TRAINER.ADAPTER.USE_GP  # flag for later use
         self.vision_dim = clip_model.text_projection.shape[1]
+
         if cfg.TRAINER.ADAPTER.USE_GP:
+            # Use a full learnable d×d projection initialised as identity
+            print("[VP] Using FULL Linear projection (d×d matrix)")
             self.visual_proj = nn.Linear(self.vision_dim, self.vision_dim, bias=False)
-            nn.init.eye_(self.visual_proj.weight)
+            with torch.no_grad():
+                self.visual_proj.weight.copy_(torch.eye(self.vision_dim))
         else:
             self.visual_proj = nn.Identity()
 
@@ -343,23 +349,19 @@ class CustomCLIP(nn.Module):
         # Obtain image features (pre-computed or freshly encoded)
         feats = x.type(self.dtype) if is_feature else self.image_encoder(x.type(self.dtype))
 
-        # Optionally apply visual projection (only when GP is used)
-        if self.use_visual_proj:
-            # Cast input to projection dtype to avoid matmul dtype mismatch
+        # Apply visual projection if trainable
+        if isinstance(self.visual_proj, nn.Linear):
             if feats.dtype != self.visual_proj.weight.dtype:
                 feats = feats.to(dtype=self.visual_proj.weight.dtype)
-
             feats = self.visual_proj(feats)
             feats = feats / feats.norm(dim=-1, keepdim=True)
 
-        # Get current prototypes - simple and direct
+        # Determine current prototypes
         if self.gp_weighter is not None:
-            # Use GP prototypes with appropriate sampling
             use_mean = not self.training
             current_prototypes, kl = self.gp_weighter.forward_and_kl(use_mean=use_mean)
-            self._last_gp_kl = kl # cache KL so the trainer can reuse it later
+            self._last_gp_kl = kl
         else:
-            # Use standard adapter prototypes
             current_prototypes = self.adapter.prototypes
             self._last_gp_kl = None
 
@@ -437,11 +439,10 @@ class CustomCLIP(nn.Module):
         # Obtain image features once (shared across samples)
         feats = features.type(self.dtype)
 
-        if self.use_visual_proj:
-            # Cast input to projection dtype to avoid matmul dtype mismatch
+        # Apply visual projection if trainable
+        if isinstance(self.visual_proj, nn.Linear):
             if feats.dtype != self.visual_proj.weight.dtype:
                 feats = feats.to(dtype=self.visual_proj.weight.dtype)
-
             feats = self.visual_proj(feats)
             feats = feats / feats.norm(dim=-1, keepdim=True)
 
@@ -559,6 +560,39 @@ class TrainerXCostume(SimpleTrainer):
         self.model._epoch_count += 1
         
         # ------------------------------------------------------------------
+        # Dynamic GP/VP switch controlled by GP_FREEZE_EPOCH
+        #   • epochs < GP_FREEZE_EPOCH → GP frozen, VP trainable
+        #   • epochs >= GP_FREEZE_EPOCH → GP trainable, VP frozen
+        # ------------------------------------------------------------------
+        switch_epoch = getattr(self.cfg.TRAINER.ADAPTER, "GP_FREEZE_EPOCH", 0)
+
+        # if self.model.gp_weighter is not None and switch_epoch > 0:
+        #     if self.epoch < switch_epoch:
+        #         # Freeze GP, unfreeze VP
+        #         for p in self.model.gp_weighter.parameters():
+        #             p.requires_grad_(False)
+        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
+        #             for p in self.model.visual_proj.parameters():
+        #                 p.requires_grad_(True)
+        #         if self.epoch == 0:
+        #             print(f"[INFO] GP frozen, VP trainable until epoch {switch_epoch-1}")
+        #     elif self.epoch == switch_epoch:
+        #         # Switch happens here
+        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
+        #             for p in self.model.visual_proj.parameters():
+        #                 p.requires_grad_(False)
+        #         for p in self.model.gp_weighter.parameters():
+        #             p.requires_grad_(True)
+        #         print(f"[INFO] Switched at epoch {self.epoch}: VP frozen, GP unfrozen")
+        #     else:
+        #         # After switch: ensure correct state
+        #         for p in self.model.gp_weighter.parameters():
+        #             p.requires_grad_(True)
+        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
+        #             for p in self.model.visual_proj.parameters():
+        #                 p.requires_grad_(False)
+
+        # ------------------------------------------------------------------
         # Train mode for adapter + GP so gradients flow, but keep frozen CLIP
         # encoders in eval to avoid BatchNorm/Dropout updates.
         # ------------------------------------------------------------------
@@ -672,10 +706,8 @@ class ADAPTER(TrainerXCostume):
         for name, param in self.model.named_parameters():
             if name == "logit_scale":
                 param.requires_grad = True  # allow adaptation with regularisation
-            elif "visual_proj" in name:
-                # Train visual projection only if explicitly requested
-                train_vproj = cfg.TRAINER.ADAPTER.USE_GP and cfg.TRAINER.ADAPTER.TRAIN_VISUAL_PROJ
-                param.requires_grad = train_vproj
+            elif "visual_proj" in name and cfg.TRAINER.ADAPTER.USE_GP:
+                param.requires_grad = True
             else:
                 if ("adapter" not in name) and ("gp_weighter" not in name) and ("visual_proj" not in name):
                     param.requires_grad = False
@@ -728,34 +760,15 @@ class ADAPTER(TrainerXCostume):
             base_opt_name = cfg.OPTIM.NAME.lower()
             gp_opt_name   = getattr(cfg.TRAINER.ADAPTER, "GP_OPT", base_opt_name).lower()
 
-            if base_opt_name == gp_opt_name:
-                # Both groups share the same optimiser type → feed *both* param groups
-                if base_opt_name == "adam":
-                    self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
-                else:
-                    self.optim = torch.optim.SGD(
-                        param_groups,
-                        momentum=getattr(cfg.OPTIM, "MOMENTUM", 0.0),
-                        dampening=getattr(cfg.OPTIM, "SGD_DAMPNING", 0.0),
-                        nesterov=getattr(cfg.OPTIM, "SGD_NESTEROV", False),
-                    )
-            else:
-                # Different optimiser for GP requested (e.g., base SGD, GP Adam)
-                if gp_opt_name == "adam":
-                    self.optim = torch.optim.Adam(param_groups, betas=(cfg.OPTIM.ADAM_BETA1, cfg.OPTIM.ADAM_BETA2))
-                else:
-                    self.optim = torch.optim.SGD(
-                        param_groups,
-                        momentum=getattr(cfg.OPTIM, "MOMENTUM", 0.0),
-                        dampening=getattr(cfg.OPTIM, "SGD_DAMPNING", 0.0),
-                        nesterov=getattr(cfg.OPTIM, "SGD_NESTEROV", False),
-                    )
+            optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
+            BaseOptim = optim_map.get(base_opt_name, torch.optim.SGD)
+
+            # Use the global optimiser type for all parameter groups
+                self.optim = BaseOptim(param_groups)
         else:
             # Optimise adapter (+ visual projection if trainable) and logit_scale
             baseline_params = list(self.model.adapter.parameters())
             baseline_params += [p for p in self.model.visual_proj.parameters() if p.requires_grad]
-            if self.model.logit_scale.requires_grad:
-                baseline_params.append(self.model.logit_scale)
             self.optim = build_optimizer(baseline_params, cfg.OPTIM)
             for i, pg in enumerate(self.optim.param_groups):
                 n_params = sum(p.numel() for p in pg['params'])
@@ -914,7 +927,6 @@ class ADAPTER(TrainerXCostume):
             # Create parameter groups
             param_groups = [
                 {'params': adapter_params, 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
-                {'params': self.model.visual_proj.parameters() if self.model.visual_proj.requires_grad else [], 'lr': self.cfg.OPTIM.LR, 'weight_decay': weight_decay},
                 {'params': [p for p in self.model.gp_weighter.parameters() if p.requires_grad], 'lr': gp_lr, 'weight_decay': 0.0},
             ]
             
@@ -990,9 +1002,70 @@ class ADAPTER(TrainerXCostume):
             # No extra regularisation terms—keep only CE and optional GP KL
             loss = loss_ce
 
+            # -------------------------------------------------------------
+            # Dynamic β and visual-projection regularisation coefficient
+            # -------------------------------------------------------------
+            shots = max(1, int(self.cfg.DATASET.NUM_SHOTS))  # safety guard
+            num_classes = self.model.adapter.base_text_features.shape[0]
+
+            # New scaling rules (no warm-up):
+            #   β_eff  = β0 · M / (K · shots)
+            #   W_reg  = W0 · D² / (K · shots)
+
+            # Retrieve metadata
+            num_templates = (
+                self.model.text_embeddings_all.shape[1]
+                if hasattr(self.model, "text_embeddings_all") else 1
+            )
+            embedding_dim = getattr(self.model, "vision_dim", self.model.adapter.base_text_features.shape[-1])
+
+            base_beta = self.cfg.TRAINER.ADAPTER.GP_BETA
+            beta_effective = base_beta * num_templates / (num_classes * shots)
+
+            base_w_reg = self.cfg.TRAINER.ADAPTER.GP_W_REG_COEF
+            w_reg_dynamic = (
+                base_w_reg * (embedding_dim ** 2) / (num_classes * shots)
+                if base_w_reg > 0 else 0.0
+            )
+
+            # ---------------------------------------------------------
+            # Debugging print (first batch of every 10th epoch)
+            # ---------------------------------------------------------
+            if self.batch_idx == 0 and (self.epoch % 10 == 0):
+                # Previous (legacy) scaling for comparison
+                old_beta_eff = base_beta * shots / math.sqrt(num_classes)
+                old_w_reg_eff = base_w_reg * math.sqrt(num_classes) / shots
+
+                # Compute equivalent base values (for reference task 32cls·16shot)
+                K_ref, shots_ref = 32, 16
+                old_beta_eff_ref = base_beta * shots_ref / math.sqrt(K_ref)
+                base_beta_equiv = old_beta_eff_ref * (K_ref * shots_ref) / num_templates
+
+                old_w_reg_ref = base_w_reg * math.sqrt(K_ref) / shots_ref
+                base_w_reg_equiv = old_w_reg_ref * (K_ref * shots_ref) / (embedding_dim ** 2)
+
+                print(
+                    f"[DEBUG] Scaling params — shots={shots}, K={num_classes}, M={num_templates}, D={embedding_dim}\n"
+                    f"        beta_eff={beta_effective:.4g} (legacy {old_beta_eff:.4g}); "
+                    f"w_reg_dyn={w_reg_dynamic:.4g} (legacy {old_w_reg_eff:.4g})\n"
+                    f"        Equivalent base values for 32cls·16shot → β0≈{base_beta_equiv:.3e}, "
+                    f"W0≈{base_w_reg_equiv:.3e}"
+                )
+
+            # -------------------------------------------------------------
             # β·KL (GP regulariser) from GP posterior
+            # -------------------------------------------------------------
             if kl_divergence is not None:
-                loss = loss + self.cfg.TRAINER.ADAPTER.GP_BETA * kl_divergence
+                loss = loss + beta_effective * kl_divergence
+
+            # -------------------------------------------------------------
+            # L2 regularization on visual projection
+            # -------------------------------------------------------------
+            if self.model.visual_proj is not None and isinstance(self.model.visual_proj, nn.Linear):
+                if w_reg_dynamic > 0:
+                    device = self.model.visual_proj.weight.device
+                    eye = torch.eye(self.model.visual_proj.weight.shape[0], device=device)
+                    loss = loss + w_reg_dynamic * (self.model.visual_proj.weight - eye).pow(2).sum()
 
         # -------------------
         # Backward + optimiser step with optional gradient clipping on GP
@@ -1008,6 +1081,7 @@ class ADAPTER(TrainerXCostume):
             if self.model.gp_weighter is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.gp_weighter.parameters(), clip_val)
 
+            # _JointOptimizer.step() will forward to both underlying optimisers
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
@@ -1017,6 +1091,7 @@ class ADAPTER(TrainerXCostume):
             if self.model.gp_weighter is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.gp_weighter.parameters(), clip_val)
 
+            # _JointOptimizer forwards .step() to each underlying optimiser
             self.optim.step()
 
         # Diagnostics (test accuracy etc.)
@@ -1187,3 +1262,59 @@ class ADAPTER(TrainerXCostume):
             features_ds = torch.cat(features_ds, dim=0).mean(0)
 
         return labels_ds, logits_ds, features_ds
+
+# -----------------------------------------------------------------------------
+# Helper class: wrap multiple optimisers so the training loop can treat them as
+# a single object supporting .zero_grad(), .step(), .param_groups, ...
+# -----------------------------------------------------------------------------
+
+
+class _JointOptimizer(torch.optim.Optimizer):
+    """Thin wrapper that forwards calls to several underlying optimisers.
+
+    Only the subset of the *torch.optim.Optimizer* interface used in this
+    training code is implemented (``zero_grad``, ``step``, ``state_dict``,
+    ``load_state_dict`` and the *param_groups* property).
+    """
+
+    def __init__(self, optim_list):
+        if not isinstance(optim_list, (list, tuple)) or len(optim_list) == 0:
+            raise ValueError("optim_list must be a non-empty list/tuple")
+        self._optimisers = list(optim_list)
+
+    # -------------------------------------------------------------
+    # Minimal interface required by the rest of the codebase
+    # -------------------------------------------------------------
+
+    def zero_grad(self, set_to_none: bool | None = None):  # noqa: D401
+        for opt in self._optimisers:
+            if set_to_none is None:
+                opt.zero_grad()
+            else:
+                opt.zero_grad(set_to_none=set_to_none)
+
+    def step(self):  # noqa: D401
+        for opt in self._optimisers:
+            opt.step()
+
+    # ----------------------
+    # Checkpoint utilities
+    # ----------------------
+    def state_dict(self):  # noqa: D401
+        return [opt.state_dict() for opt in self._optimisers]
+
+    def load_state_dict(self, state_dict):  # noqa: D401
+        if not isinstance(state_dict, (list, tuple)) or len(state_dict) != len(self._optimisers):
+            raise ValueError("state_dict must match the optimisers list length")
+        for opt, sd in zip(self._optimisers, state_dict):
+            opt.load_state_dict(sd)
+
+    # --------------
+    # Param groups
+    # --------------
+    @property
+    def param_groups(self):  # noqa: D401
+        groups = []
+        for opt in self._optimisers:
+            groups.extend(opt.param_groups)
+        return groups

@@ -228,11 +228,6 @@ sun397/
 
 Run :
 ```
-mkdir sun397 && \
-cd sun397 && \
-gdown 1y2RD81BYuiyvebdN-JymPfyWYcd8_MUq && \
-wget http://vision.princeton.edu/projects/2010/SUN/SUN397.tar.gz && \
-wget https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip && \
 ```
 
 ### DTD

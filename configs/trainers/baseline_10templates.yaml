@@ -15,7 +15,7 @@ INPUT:
 OPTIM:
   NAME: "sgd"
   LR: 0.01
-  MAX_EPOCH: 300
+  MAX_EPOCH: 100
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
@@ -30,5 +30,5 @@ TRAINER:
     INIT: ZS
     CONSTRAINT: none  
     PREC: fp16
-    NUM_TEMPLATES: 10
+    NUM_TEMPLATES: 7
     USE_GP: False

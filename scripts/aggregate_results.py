@@ -35,8 +35,7 @@ _RE_LR_BETA_DIR = re.compile(r"LR([\d.eE+-]+)_B([\d.eE+-]+)")
 # Parse hyper-parameters from log files (TRAINER.ADAPTER.* entries)
 _RE_LOG_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)")
 _RE_LOG_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)")
-_RE_LOG_LAMBDA = re.compile(r"RESID_LAMBDA:\s+([\d.eE+-]+)")
-
+_RE_LOG_W_REG = re.compile(r"GP_W_REG_COEF:\s+([\d.eE+-]+)")
 
 # ───────────────────────────
 # Single-file parser
@@ -54,15 +53,15 @@ def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str |
     ece_match = _RE_ECE.search(text)
     lr_match = _RE_LOG_LR.search(text)
     beta_match = _RE_LOG_BETA.search(text)
-    lambda_resid_match = _RE_LOG_LAMBDA.search(text)
+    w_reg_match = _RE_LOG_W_REG.search(text)
 
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
     lr = lr_match.group(1) if lr_match else None
     beta = beta_match.group(1) if beta_match else None
-    lambda_resid = lambda_resid_match.group(1) if lambda_resid_match else None
+    w_reg = w_reg_match.group(1) if w_reg_match else None
 
-    return acc, ece, lr, beta, lambda_resid
+    return acc, ece, lr, beta, w_reg
 
 
 # ───────────────────────────
@@ -115,10 +114,10 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                 ece_values: List[float] = []
                 lr_val: str | None = None
                 beta_val: str | None = None
-                lambda_resid_val: str | None = None
+                w_reg_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece, lr, beta, lambda_resid = parse_log(log_file)
+                    acc, ece, lr, beta, w_reg = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
@@ -128,8 +127,8 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                         lr_val = lr
                     if beta_val is None and beta is not None:
                         beta_val = beta
-                    if lambda_resid_val is None and lambda_resid is not None:
-                        lambda_resid_val = lambda_resid
+                    if w_reg_val is None and w_reg is not None:
+                        w_reg_val = w_reg
                 if not acc_values and not ece_values:
                     continue  # skip empty variant
 
@@ -137,7 +136,7 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                     "config": variant_label,
                     "lr": lr_val,
                     "beta": beta_val,
-                    "lambda_resid": lambda_resid_val,
+                    "w_reg": w_reg_val,
                     "shots": num_shots,
                     "n_seeds": max(len(acc_values), len(ece_values)),
                     "acc_mean": statistics.mean(acc_values) if acc_values else float("nan"),
@@ -164,7 +163,7 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
             continue
         print("\n=== Dataset:", dataset, "===")
         header = (
-            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'Lambda':>8} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'W_REG':>8} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
         )
         print(header)
@@ -172,7 +171,7 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
         for r in records:
             print(
                 f"{r['config']:<25} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
-                f"{r['lambda_resid'] or '-':>8} "
+                f"{r['w_reg'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
                 f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f}"

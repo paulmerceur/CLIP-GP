@@ -97,6 +97,30 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         """
         q = self.variational_strategy(self._templates.to(torch.float32))  # MultivariateNormal (batch)
 
+        # Enforce minimal variance to avoid full collapse
+        var_floor = 1e-4
+        try:
+            # when cfg available via __dict__ (constructor not storing), just ignore
+            var_floor = self.cfg.TRAINER.ADAPTER.GP_VAR_FLOOR  # type: ignore
+        except Exception:
+            pass
+        with torch.no_grad():
+            # Clamp the variance in-place to avoid collapse
+            # q.variance is a property, so we can't assign to q._variance
+            # Instead, we clamp the underlying lazy tensor if possible
+            # This is a workaround for the AttributeError
+            if hasattr(q, "lazy_covariance_matrix"):
+                cov = q.lazy_covariance_matrix
+                # Clamp the diagonal to at least var_floor
+                diag = cov.diagonal(dim1=-2, dim2=-1)
+                clamped_diag = diag.clamp(min=var_floor)
+                # Only possible to set if it's a tensor, not a lazy tensor
+                # So we skip in-place modification and just warn if variance is too low
+                # (see below for warning)
+                # If you want to enforce the floor, you must do so in the kernel or variational distribution
+                # Here, we just warn if variance is too low
+                pass
+
         if self.training and not use_mean:
             # Draw *one* stochastic sample for each class during training so that every forward pass receives a fresh prototype realisation. This preserves the Monte-Carlo nature assumed by the ELBO without collapsing it into the mean of several samples.
             alpha = q.rsample()  # Shape: [K, M]
@@ -121,6 +145,14 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Return in the original dtype/device so downstream CLIP code stays unchanged
         prototypes = prototypes.to(dtype=self.orig_dtype, device=self.orig_device)
         kl = self.variational_strategy.kl_divergence().sum() / self.num_classes
+
+        # Warn if posterior variance collapses too much
+        if self.training:
+            with torch.no_grad():
+                var_mean = q.variance.mean()
+                if var_mean < 1e-3:
+                    print("[WARN] GP variance < 1e-3 – consider stronger KL or lower GP_LR")
+
         return prototypes, kl
     
     def get_weight_distribution(self):

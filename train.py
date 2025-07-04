@@ -97,13 +97,20 @@ def extend_cfg(cfg):
     
     # GP-specific configuration variables (simplified)
     cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
+    cfg.TRAINER.ADAPTER.GP_OPT = "adam"  # adam, sgd
     cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
     cfg.TRAINER.ADAPTER.GP_BETA = 0.05  # KL weight for ELBO loss
     cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
     cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
+    cfg.TRAINER.ADAPTER.GP_W_REG_COEF = 0.0  # visual projection regularization
+    # Epoch at which we switch: freeze visual projection and unfreeze GP
+    # 0 = no switch (GP always trainable)
+    cfg.TRAINER.ADAPTER.GP_FREEZE_EPOCH = 0
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
+
+    cfg.TRAINER.ADAPTER.RES_L2_COEF = 1e-4
 
 
 def setup_cfg(args):
