@@ -389,8 +389,8 @@ class CustomCLIP(nn.Module):
             feats = self.image_encoder(image.type(self.dtype))
 
             # Draw several sets of prototypes and average the resulting probabilities rather than logits.
-            num_mc = max(10, self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES * 3)
-            logits_mc, _ = self.forward_features_mc(feats, num_samples=num_mc)  # [S,B,K]
+            num_mc = max(10, self.cfg.TRAINER.ADAPTER.x * 3)
+            logits_mc, _ = self.forward_features_mc(feats, num_samples=num_mc, use_mean=False)  # [S,B,K]
 
             # Convert to probabilities, average, and map back to log-space
             probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)  # [B,K]
@@ -417,8 +417,8 @@ class CustomCLIP(nn.Module):
         """
 
         if (not self.training) and (self.gp_weighter is not None):
-            num_mc = max(10, self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES * 3)
-            logits_mc, _ = self.forward_features_mc(features, num_samples=num_mc)
+            num_mc = max(10, self.cfg.TRAINER.ADAPTER.x * 3)
+            logits_mc, _ = self.forward_features_mc(features, num_samples=num_mc, use_mean=False)
 
             probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)
             logits = torch.log(probs_mean.clamp(min=1e-8))
@@ -559,39 +559,6 @@ class TrainerXCostume(SimpleTrainer):
         self.model._batch_count = 0
         self.model._epoch_count += 1
         
-        # ------------------------------------------------------------------
-        # Dynamic GP/VP switch controlled by GP_FREEZE_EPOCH
-        #   • epochs < GP_FREEZE_EPOCH → GP frozen, VP trainable
-        #   • epochs >= GP_FREEZE_EPOCH → GP trainable, VP frozen
-        # ------------------------------------------------------------------
-        switch_epoch = getattr(self.cfg.TRAINER.ADAPTER, "GP_FREEZE_EPOCH", 0)
-
-        # if self.model.gp_weighter is not None and switch_epoch > 0:
-        #     if self.epoch < switch_epoch:
-        #         # Freeze GP, unfreeze VP
-        #         for p in self.model.gp_weighter.parameters():
-        #             p.requires_grad_(False)
-        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
-        #             for p in self.model.visual_proj.parameters():
-        #                 p.requires_grad_(True)
-        #         if self.epoch == 0:
-        #             print(f"[INFO] GP frozen, VP trainable until epoch {switch_epoch-1}")
-        #     elif self.epoch == switch_epoch:
-        #         # Switch happens here
-        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
-        #             for p in self.model.visual_proj.parameters():
-        #                 p.requires_grad_(False)
-        #         for p in self.model.gp_weighter.parameters():
-        #             p.requires_grad_(True)
-        #         print(f"[INFO] Switched at epoch {self.epoch}: VP frozen, GP unfrozen")
-        #     else:
-        #         # After switch: ensure correct state
-        #         for p in self.model.gp_weighter.parameters():
-        #             p.requires_grad_(True)
-        #         if hasattr(self.model, "visual_proj") and hasattr(self.model.visual_proj, "parameters"):
-        #             for p in self.model.visual_proj.parameters():
-        #                 p.requires_grad_(False)
-
         # ------------------------------------------------------------------
         # Train mode for adapter + GP so gradients flow, but keep frozen CLIP
         # encoders in eval to avoid BatchNorm/Dropout updates.
@@ -756,15 +723,11 @@ class ADAPTER(TrainerXCostume):
                 },
             ]
 
-            # Choose optimiser according to requested GP_OPT (falls back to global OPTIM.NAME)
-            base_opt_name = cfg.OPTIM.NAME.lower()
-            gp_opt_name   = getattr(cfg.TRAINER.ADAPTER, "GP_OPT", base_opt_name).lower()
-
             optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
-            BaseOptim = optim_map.get(base_opt_name, torch.optim.SGD)
+            BaseOptim = optim_map.get(cfg.OPTIM.NAME.lower(), torch.optim.SGD)
 
             # Use the global optimiser type for all parameter groups
-                self.optim = BaseOptim(param_groups)
+            self.optim = BaseOptim(param_groups)
         else:
             # Optimise adapter (+ visual projection if trainable) and logit_scale
             baseline_params = list(self.model.adapter.parameters())
@@ -987,7 +950,7 @@ class ADAPTER(TrainerXCostume):
         S = self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES if (self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None) else 1
 
         with autocast(enabled=use_amp, device_type=self.device.type):
-            logits_mc, kl_divergence = self.model.forward_features_mc(features, S)
+            logits_mc, kl_divergence = self.model.forward_features_mc(features, S, use_mean=False)
 
             # logits_mc: [S,B,K]
             # 1) Compute per-sample log-probabilities
@@ -1009,8 +972,8 @@ class ADAPTER(TrainerXCostume):
             num_classes = self.model.adapter.base_text_features.shape[0]
 
             # New scaling rules (no warm-up):
-            #   β_eff  = β0 · M / (K · shots)
-            #   W_reg  = W0 · D² / (K · shots)
+            #   β_eff  = β0 · M / shots
+            #   W_reg  = W0 · D² / shots
 
             # Retrieve metadata
             num_templates = (
@@ -1020,11 +983,11 @@ class ADAPTER(TrainerXCostume):
             embedding_dim = getattr(self.model, "vision_dim", self.model.adapter.base_text_features.shape[-1])
 
             base_beta = self.cfg.TRAINER.ADAPTER.GP_BETA
-            beta_effective = base_beta * num_templates / (num_classes * shots)
+            beta_effective = base_beta * num_templates / shots
 
             base_w_reg = self.cfg.TRAINER.ADAPTER.GP_W_REG_COEF
             w_reg_dynamic = (
-                base_w_reg * (embedding_dim ** 2) / (num_classes * shots)
+                base_w_reg * embedding_dim / math.sqrt(shots)
                 if base_w_reg > 0 else 0.0
             )
 
@@ -1032,24 +995,9 @@ class ADAPTER(TrainerXCostume):
             # Debugging print (first batch of every 10th epoch)
             # ---------------------------------------------------------
             if self.batch_idx == 0 and (self.epoch % 10 == 0):
-                # Previous (legacy) scaling for comparison
-                old_beta_eff = base_beta * shots / math.sqrt(num_classes)
-                old_w_reg_eff = base_w_reg * math.sqrt(num_classes) / shots
-
-                # Compute equivalent base values (for reference task 32cls·16shot)
-                K_ref, shots_ref = 32, 16
-                old_beta_eff_ref = base_beta * shots_ref / math.sqrt(K_ref)
-                base_beta_equiv = old_beta_eff_ref * (K_ref * shots_ref) / num_templates
-
-                old_w_reg_ref = base_w_reg * math.sqrt(K_ref) / shots_ref
-                base_w_reg_equiv = old_w_reg_ref * (K_ref * shots_ref) / (embedding_dim ** 2)
-
                 print(
                     f"[DEBUG] Scaling params — shots={shots}, K={num_classes}, M={num_templates}, D={embedding_dim}\n"
-                    f"        beta_eff={beta_effective:.4g} (legacy {old_beta_eff:.4g}); "
-                    f"w_reg_dyn={w_reg_dynamic:.4g} (legacy {old_w_reg_eff:.4g})\n"
-                    f"        Equivalent base values for 32cls·16shot → β0≈{base_beta_equiv:.3e}, "
-                    f"W0≈{base_w_reg_equiv:.3e}"
+                    f"        beta_eff={beta_effective:.4g}; w_reg_dyn={w_reg_dynamic:.4g}"
                 )
 
             # -------------------------------------------------------------

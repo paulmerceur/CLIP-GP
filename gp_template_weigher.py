@@ -129,15 +129,15 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             if alpha.dim() == 2 and alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
                 # Transpose to [K, M]
                 alpha = alpha.t()
-
-            w = F.softmax(alpha, dim=-1)  # [K, M]
+            # Scale by inverse coefficient of variation
+            w = F.softmax(alpha / (1 + alpha.std(dim=-1, keepdim=True)), dim=-1)  # [K, M]
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
-
-            w = F.softmax(mu, dim=-1)  # [K, M]
+            # Scale by inverse coefficient of variation
+            w = F.softmax(mu / (1 + mu.std(dim=-1, keepdim=True)), dim=-1)  # [K, M]
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())

@@ -34,7 +34,6 @@ for ((seed=1; seed<=SEEDS; seed++)); do
         DATASET.NUM_SHOTS ${SHOTS} \
         TRAINER.ADAPTER.GP_LR ${GP_LR} \
         TRAINER.ADAPTER.GP_BETA ${GP_BETA} \
-        TRAINER.ADAPTER.GP_W_REG_COEF ${GP_W_REG_COEF} \
-        TRAINER.ADAPTER.GP_FREEZE_EPOCH 30
+        TRAINER.ADAPTER.GP_W_REG_COEF ${GP_W_REG_COEF}
     fi
 done

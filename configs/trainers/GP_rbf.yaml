@@ -32,7 +32,6 @@ TRAINER:
     PREC: fp16
     NUM_TEMPLATES: 7
     # GP-specific configuration
-    GP_OPT: adam
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
