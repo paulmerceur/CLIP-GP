@@ -116,8 +116,17 @@ def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder
 
     # Instantiate GP
     if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
-        # Initialise GP prior mean with uniform (zero-logit) soft prompts and freeze it
-        mean_init = torch.zeros(text_embeds.shape[0], text_embeds.shape[1], device=device, dtype=torch.float32)
+        # -------------------------------------------------------------
+        # Better prior: use per-template zero-shot logits.  For each
+        # class k and template m we compute the logit obtained by
+        # measuring the similarity of that template to the **average**
+        # prototype of the class.  This centres the GP posterior on a
+        # reasonably calibrated location instead of a flat 0.
+        # -------------------------------------------------------------
+        with torch.no_grad():
+            class_mean = text_embeds.mean(dim=1, keepdim=True)          # [K,1,D]
+            zs_logits = (text_embeds * class_mean).sum(-1)              # [K,M]
+        mean_init = zs_logits.to(dtype=torch.float32, device=device)
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
         return proto, text_embeds, gp, kl
@@ -457,8 +466,7 @@ class CustomCLIP(nn.Module):
 
         prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=use_mean)  # [S,K,D]
 
-        # Normalise KL by the number of classes
-        kl = self.gp_weighter.variational_strategy.kl_divergence().sum() / self.gp_weighter.num_classes
+        kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
 
         # Normalise once for stability
         feats_norm = feats / feats.norm(dim=-1, keepdim=True)          # [B,D]
@@ -966,54 +974,25 @@ class ADAPTER(TrainerXCostume):
             loss = loss_ce
 
             # -------------------------------------------------------------
-            # Dynamic β and visual-projection regularisation coefficient
-            # -------------------------------------------------------------
-            shots = max(1, int(self.cfg.DATASET.NUM_SHOTS))  # safety guard
-            num_classes = self.model.adapter.base_text_features.shape[0]
-
-            # New scaling rules (no warm-up):
-            #   β_eff  = β0 · M / shots
-            #   W_reg  = W0 · D² / shots
-
-            # Retrieve metadata
-            num_templates = (
-                self.model.text_embeddings_all.shape[1]
-                if hasattr(self.model, "text_embeddings_all") else 1
-            )
-            embedding_dim = getattr(self.model, "vision_dim", self.model.adapter.base_text_features.shape[-1])
-
-            base_beta = self.cfg.TRAINER.ADAPTER.GP_BETA
-            beta_effective = base_beta * num_templates / shots
-
-            base_w_reg = self.cfg.TRAINER.ADAPTER.GP_W_REG_COEF
-            w_reg_dynamic = (
-                base_w_reg * embedding_dim / math.sqrt(shots)
-                if base_w_reg > 0 else 0.0
-            )
-
-            # ---------------------------------------------------------
-            # Debugging print (first batch of every 10th epoch)
-            # ---------------------------------------------------------
-            if self.batch_idx == 0 and (self.epoch % 10 == 0):
-                print(
-                    f"[DEBUG] Scaling params — shots={shots}, K={num_classes}, M={num_templates}, D={embedding_dim}\n"
-                    f"        beta_eff={beta_effective:.4g}; w_reg_dyn={w_reg_dynamic:.4g}"
-                )
-
-            # -------------------------------------------------------------
             # β·KL (GP regulariser) from GP posterior
             # -------------------------------------------------------------
+            beta = getattr(self.cfg.TRAINER.ADAPTER, "GP_BETA", 0)
             if kl_divergence is not None:
-                loss = loss + beta_effective * kl_divergence
+                # Normalise KL by the number of images in the batch so it
+                # scales the same way as the cross-entropy.
+                kl_per_image = kl_divergence / labels.size(0)
+                loss = loss + beta * kl_per_image
 
             # -------------------------------------------------------------
             # L2 regularization on visual projection
             # -------------------------------------------------------------
+            w_reg_lambda = getattr(self.cfg.TRAINER.ADAPTER, "GP_W_REG_COEF", 0)
+            shots = max(1, int(self.cfg.DATASET.NUM_SHOTS))
             if self.model.visual_proj is not None and isinstance(self.model.visual_proj, nn.Linear):
-                if w_reg_dynamic > 0:
-                    device = self.model.visual_proj.weight.device
-                    eye = torch.eye(self.model.visual_proj.weight.shape[0], device=device)
-                    loss = loss + w_reg_dynamic * (self.model.visual_proj.weight - eye).pow(2).sum()
+                d = self.model.visual_proj.weight.size(0)
+                eye = torch.eye(d, device=self.model.visual_proj.weight.device)
+                diff = (self.model.visual_proj.weight - eye).pow(2).sum()
+                loss += w_reg_lambda * diff / (labels.size(0) * shots)
 
         # -------------------
         # Backward + optimiser step with optional gradient clipping on GP

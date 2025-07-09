@@ -44,6 +44,19 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         super().__init__(variational_strategy)
 
+        # -------------------------------------------------------------
+        # Temperature parameter τ controlling sharpness of per-template
+        # weights.  A value of 1.0 keeps the original scale; τ>1.0 makes
+        # weights flatter, τ<1.0 makes them more peaked.  We register it
+        # as an nn.Parameter so it can be searched or even learned, but
+        # keep requires_grad=False by default (can be toggled via cfg).
+        # -------------------------------------------------------------
+        temp_init = float(getattr(cfg.TRAINER.ADAPTER, "GP_TEMP", 1.0))
+        self.register_parameter(
+            "temp",
+            nn.Parameter(torch.tensor([temp_init], dtype=torch.float32), requires_grad=False),
+        )
+
         # Mean and covariance modules -------------------------------------------------
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
@@ -130,21 +143,23 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
                 # Transpose to [K, M]
                 alpha = alpha.t()
             # Scale by inverse coefficient of variation
-            w = F.softmax(alpha / (1 + alpha.std(dim=-1, keepdim=True)), dim=-1)  # [K, M]
+            w = F.softmax(alpha / self.temp, dim=-1)  # [K, M]
         else:
             mu = q.mean
             # Detect and fix swapped dims [M, K] -> [K, M]
             if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
                 mu = mu.t()
             # Scale by inverse coefficient of variation
-            w = F.softmax(mu / (1 + mu.std(dim=-1, keepdim=True)), dim=-1)  # [K, M]
+            w = F.softmax(mu / self.temp, dim=-1)  # [K, M]
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
 
         # Return in the original dtype/device so downstream CLIP code stays unchanged
         prototypes = prototypes.to(dtype=self.orig_dtype, device=self.orig_device)
-        kl = self.variational_strategy.kl_divergence().sum() / self.num_classes
+        # Return *sum* of KL across classes; scaling will be handled in the
+        # training loop so that it can be normalised per-image.
+        kl = self.variational_strategy.kl_divergence().sum()
 
         # Warn if posterior variance collapses too much
         if self.training:
@@ -171,10 +186,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         q = self.get_weight_distribution()
 
         if use_mean:
-            w = torch.softmax(q.mean, dim=-1).unsqueeze(0)  # [1,K,M]
+            w = torch.softmax(q.mean / self.temp, dim=-1).unsqueeze(0)  # [1,K,M]
         else:
             alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            w = torch.softmax(alpha, dim=-1)              # [S,K,M]
+            w = torch.softmax(alpha / self.temp, dim=-1)  # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())

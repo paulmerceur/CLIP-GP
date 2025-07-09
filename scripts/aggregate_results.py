@@ -36,6 +36,7 @@ _RE_LR_BETA_DIR = re.compile(r"LR([\d.eE+-]+)_B([\d.eE+-]+)")
 _RE_LOG_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)")
 _RE_LOG_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)")
 _RE_LOG_W_REG = re.compile(r"GP_W_REG_COEF:\s+([\d.eE+-]+)")
+_RE_LOG_TEMP = re.compile(r"GP_TEMP:\s+([\d.eE+-]+)")
 
 # ───────────────────────────
 # Single-file parser
@@ -54,14 +55,20 @@ def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str |
     lr_match = _RE_LOG_LR.search(text)
     beta_match = _RE_LOG_BETA.search(text)
     w_reg_match = _RE_LOG_W_REG.search(text)
+    temp_match = _RE_LOG_TEMP.search(text)
+
+    if acc_match is None:
+        print(f"! Could not read {log_path}")
+        return None, None, None, None, None, None
 
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
     lr = lr_match.group(1) if lr_match else None
     beta = beta_match.group(1) if beta_match else None
     w_reg = w_reg_match.group(1) if w_reg_match else None
+    temp = temp_match.group(1) if temp_match else None
 
-    return acc, ece, lr, beta, w_reg
+    return acc, ece, lr, beta, w_reg, temp
 
 
 # ───────────────────────────
@@ -115,9 +122,10 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                 lr_val: str | None = None
                 beta_val: str | None = None
                 w_reg_val: str | None = None
+                temp_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece, lr, beta, w_reg = parse_log(log_file)
+                    acc, ece, lr, beta, w_reg, temp = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
@@ -129,6 +137,8 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                         beta_val = beta
                     if w_reg_val is None and w_reg is not None:
                         w_reg_val = w_reg
+                    if temp_val is None and temp is not None:
+                        temp_val = temp
                 if not acc_values and not ece_values:
                     continue  # skip empty variant
 
@@ -143,6 +153,7 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
                     "acc_std": statistics.stdev(acc_values) if len(acc_values) > 1 else 0.0,
                     "ece_mean": statistics.mean(ece_values) if ece_values else float("nan"),
                     "ece_std": statistics.stdev(ece_values) if len(ece_values) > 1 else 0.0,
+                    "temp": temp_val,
                 }
                 dataset_records.append(record)
 
@@ -163,7 +174,7 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
             continue
         print("\n=== Dataset:", dataset, "===")
         header = (
-            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'W_REG':>8} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'W_REG':>8} {'Temp':>8} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
         )
         print(header)
@@ -172,6 +183,7 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
             print(
                 f"{r['config']:<25} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
                 f"{r['w_reg'] or '-':>8} "
+                f"{r['temp'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
                 f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f}"
