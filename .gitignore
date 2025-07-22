@@ -15,4 +15,4 @@ data/
 logs/
 metrics/
 results/
-ece_plots/
+*plots/

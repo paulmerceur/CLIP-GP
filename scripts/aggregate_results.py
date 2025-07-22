@@ -21,7 +21,8 @@ import argparse
 import pathlib
 import re
 import statistics
-from typing import Dict, List, Tuple
+import matplotlib.pyplot as plt
+from typing import Dict, List, Tuple, Any
 
 # ───────────────────────────
 # Regex helpers
@@ -42,7 +43,7 @@ _RE_LOG_TEMP = re.compile(r"GP_TEMP:\s+([\d.eE+-]+)")
 # Single-file parser
 # ───────────────────────────
 
-def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None]:
+def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None, str | None]:
     """Return (accuracy, ece, lr, beta) extracted from *log_path*."""
     try:
         text = log_path.read_text(encoding="utf-8", errors="ignore")
@@ -75,20 +76,20 @@ def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str |
 # Experiment walker
 # ───────────────────────────
 
-def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
+def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
     """Return nested dict keyed by dataset, each value is list of config records."""
     base = pathlib.Path("output") / exp_name
     if not base.is_dir():
         raise FileNotFoundError(base)
 
-    results: Dict[str, List[Dict[str, float]]] = {}
+    results: Dict[str, List[Dict[str, Any]]] = {}
 
     # directory layout: output/<exp>/<dataset>/<config>/seed*/log.txt
     for dataset_dir in sorted(base.iterdir()):
         if not dataset_dir.is_dir():
             continue
         dataset_name = dataset_dir.name
-        dataset_records: List[Dict[str, float]] = []
+        dataset_records: List[Dict[str, Any]] = []
 
         for config_dir in sorted(dataset_dir.iterdir()):
             if not config_dir.is_dir():
@@ -168,7 +169,7 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, float]]]:
 # Pretty printer
 # ───────────────────────────
 
-def print_results(results: Dict[str, List[Dict[str, float]]]):
+def print_results(results: Dict[str, List[Dict[str, Any]]]):
     for dataset, records in results.items():
         if not records:
             continue
@@ -191,6 +192,82 @@ def print_results(results: Dict[str, List[Dict[str, float]]]):
 
 
 # ───────────────────────────
+# Plotting helpers
+# ───────────────────────────
+
+
+def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
+    """Save accuracy and ECE plots to plots/<exp_name>/<dataset>_*.png.
+
+    For each *dataset*, two plots are created (accuracy & ECE). Each line
+    corresponds to a configuration ("run").  The baseline configuration is
+    labelled "baseline"; the others are labelled "GP_B{beta}_<config>".
+    """
+
+    plots_dir = pathlib.Path("plots") / exp_name
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    for dataset, records in results.items():
+        if not records:
+            continue
+
+        # Group records by configuration label
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for r in records:
+            if "baseline" in r["config"]:
+                label = "baseline"
+            else:
+                label = f"GP_WR{r['w_reg']}"
+            grouped.setdefault(label, []).append(r)
+
+        # Combined figure with Accuracy and ECE side-by-side
+        fig, (ax_acc, ax_ece) = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
+
+        # Collect unique shot counts for common x-axis ticks
+        unique_shots = sorted({rec["shots"] for rec in records if rec["shots"] > 0})
+
+        for label, recs in grouped.items():
+            recs_sorted = sorted(recs, key=lambda x: x["shots"])
+            xs = [rec["shots"] for rec in recs_sorted]
+
+            # Accuracy
+            ys_acc = [rec["acc_mean"] for rec in recs_sorted]
+            ax_acc.plot(xs, ys_acc, marker="o", label=label)
+
+            # ECE
+            ys_ece = [rec["ece_mean"] for rec in recs_sorted]
+            ax_ece.plot(xs, ys_ece, marker="o", label=label)
+
+        if unique_shots:
+            ax_acc.set_xticks(unique_shots)
+            ax_ece.set_xticks(unique_shots)
+
+        ax_acc.set_xlabel("# Shots")
+        ax_acc.set_ylabel("Accuracy (%)")
+        ax_acc.set_title("Accuracy")
+
+        ax_ece.set_xlabel("# Shots")
+        ax_ece.set_ylabel("ECE (%)")
+        ax_ece.set_title("ECE")
+
+        # Shared legend – place slightly below the title
+        handles, labels = ax_acc.get_legend_handles_labels()
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.95),  # y < 1 leaves room for title
+            ncol=len(labels),
+            frameon=False,
+        )
+
+        fig.suptitle(dataset, y=0.99)
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        fig.savefig(plots_dir / f"{dataset}_metrics.png")
+        plt.close(fig)
+
+
+# ───────────────────────────
 # CLI
 # ───────────────────────────
 
@@ -204,6 +281,7 @@ def main():
         print("No results found – check experiment name and path.")
         return
     print_results(results)
+    make_plots(results, args.experiment)
 
 
 if __name__ == "__main__":

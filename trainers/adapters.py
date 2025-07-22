@@ -367,8 +367,7 @@ class CustomCLIP(nn.Module):
 
         # Determine current prototypes
         if self.gp_weighter is not None:
-            use_mean = not self.training
-            current_prototypes, kl = self.gp_weighter.forward_and_kl(use_mean=use_mean)
+            current_prototypes, kl = self.gp_weighter.forward_and_kl()
             self._last_gp_kl = kl
         else:
             current_prototypes = self.adapter.prototypes
@@ -399,7 +398,7 @@ class CustomCLIP(nn.Module):
 
             # Draw several sets of prototypes and average the resulting probabilities rather than logits.
             num_mc = max(10, self.cfg.TRAINER.ADAPTER.x * 3)
-            logits_mc, _ = self.forward_features_mc(feats, num_samples=num_mc, use_mean=False)  # [S,B,K]
+            logits_mc, _ = self.forward_features_mc(feats, num_samples=num_mc)  # [S,B,K]
 
             # Convert to probabilities, average, and map back to log-space
             probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)  # [B,K]
@@ -427,7 +426,7 @@ class CustomCLIP(nn.Module):
 
         if (not self.training) and (self.gp_weighter is not None):
             num_mc = max(10, self.cfg.TRAINER.ADAPTER.x * 3)
-            logits_mc, _ = self.forward_features_mc(features, num_samples=num_mc, use_mean=False)
+            logits_mc, _ = self.forward_features_mc(features, num_samples=num_mc)
 
             probs_mean = torch.softmax(logits_mc, dim=-1).mean(0)
             logits = torch.log(probs_mean.clamp(min=1e-8))
@@ -435,7 +434,7 @@ class CustomCLIP(nn.Module):
 
         return self._forward_impl(features, is_feature=True)
 
-    def forward_features_mc(self, features, num_samples: int, *, use_mean: bool | None = None):
+    def forward_features_mc(self, features, num_samples: int):
         """Compute logits for *num_samples* GP draws.
 
         Returns
@@ -460,11 +459,8 @@ class CustomCLIP(nn.Module):
             logits = self.forward_lp(feats)  # [B,K]
             return logits.unsqueeze(0), None
 
-        # Decide whether to draw stochastic samples or use the deterministic posterior mean.
-        if use_mean is None:
-            use_mean = not self.training  # deterministic outside .train()
-
-        prototypes_s = self.gp_weighter.sample_prototypes(num_samples, use_mean=use_mean)  # [S,K,D]
+        # Always use stochastic sampling
+        prototypes_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
 
         kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
 
@@ -493,7 +489,7 @@ class CustomCLIP(nn.Module):
             
         # Compute logits in fp32 to prevent numerical underflow
         feats32 = (features / features.norm(dim=-1, keepdim=True)).float()
-        prot32  = (prototypes / prototypes.norm(dim=-1, keepdim=True)).float()
+        prot32 = (prototypes / prototypes.norm(dim=-1, keepdim=True)).float()
 
         logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
         return logits_fp32.to(self.dtype)
@@ -958,7 +954,7 @@ class ADAPTER(TrainerXCostume):
         S = self.cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES if (self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None) else 1
 
         with autocast(enabled=use_amp, device_type=self.device.type):
-            logits_mc, kl_divergence = self.model.forward_features_mc(features, S, use_mean=False)
+            logits_mc, kl_divergence = self.model.forward_features_mc(features, S)
 
             # logits_mc: [S,B,K]
             # 1) Compute per-sample log-probabilities

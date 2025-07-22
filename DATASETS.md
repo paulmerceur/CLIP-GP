@@ -129,6 +129,7 @@ Run :
 ```
 mkdir stanford_cars && \
 cd stanford_cars && \
+gdown 1ObCFbaAgVu0I-k_Au-gIUcefirdAuizT && \
 kaggle datasets download eduardo4jesus/stanford-cars-dataset && \
 unzip stanford-cars-dataset.zip && \
 rm stanford-cars-dataset.zip && \

@@ -3,15 +3,15 @@
 DATASET=${1:-caltech101}
 GPU_ID=${2:-0}
 
-EXPERIMENT_NAME=gp_test3
+EXPERIMENT_NAME=gp_test31
 
 # Grids
-SHOTS=(16 8 4 1)
+SHOTS=(1 4 8 16)
 GP_LRS=(0.1)
-WREGS=(10.0 50.0 100.0 500.0 1000.0)
+WREGS=(200.0 500.0 1000.0)
 BETAS=(0.001)
 # Temperature values for GP template weights
-TEMPS=(2.0 5.0)
+TEMPS=(5.0)
 
 for shot in ${SHOTS[@]}; do
   #bash scripts/adapt.sh 3 $DATASET baseline_10templates  $shot RN50 0.0 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
@@ -34,5 +34,14 @@ done
 # Oxford Pets
 # bash scripts/adapt.sh 3 oxford_pets GP_rbf $shot RN50 0.1 0.001 500.0 5.0 $EXPERIMENT_NAME $GPU_ID
 
+# Oxford Flowers
+# bash scripts/adapt.sh 3 oxford_flowers GP_rbf $shot RN50 0.1 0.001 200.0 5.0 $EXPERIMENT_NAME $GPU_ID
+
 # Caltech101
 # bash scripts/adapt.sh 3 caltech101 GP_rbf $shot RN50 0.1 0.001 500.0 5.0 $EXPERIMENT_NAME $GPU_ID
+
+# DTD
+# bash scripts/adapt.sh 3 dtd GP_rbf $shot RN50 0.1 0.001 1000.0 5.0 $EXPERIMENT_NAME $GPU_ID
+
+# FGVC Aircraft
+# bash scripts/adapt.sh 3 fgvc_aircraft GP_rbf $shot RN50 0.1 0.001 500.0 5.0 $EXPERIMENT_NAME $GPU_ID

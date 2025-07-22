@@ -1,8 +1,8 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gpytorch
+from typing import Any
 
 
 class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
@@ -100,57 +100,26 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
-    def forward_and_kl(self, *, use_mean: bool = False):
+    def forward_and_kl(self):
         """
         Return class prototypes and KL term.
-
-        Args
-        ----
-        use_mean:  Use posterior mean instead of MC sampling (deterministic).
+        
+        Always uses stochastic sampling for maximum stochasticity.
         """
         q = self.variational_strategy(self._templates.to(torch.float32))  # MultivariateNormal (batch)
 
-        # Enforce minimal variance to avoid full collapse
-        var_floor = 1e-4
-        try:
-            # when cfg available via __dict__ (constructor not storing), just ignore
-            var_floor = self.cfg.TRAINER.ADAPTER.GP_VAR_FLOOR  # type: ignore
-        except Exception:
-            pass
-        with torch.no_grad():
-            # Clamp the variance in-place to avoid collapse
-            # q.variance is a property, so we can't assign to q._variance
-            # Instead, we clamp the underlying lazy tensor if possible
-            # This is a workaround for the AttributeError
-            if hasattr(q, "lazy_covariance_matrix"):
-                cov = q.lazy_covariance_matrix
-                # Clamp the diagonal to at least var_floor
-                diag = cov.diagonal(dim1=-2, dim2=-1)
-                clamped_diag = diag.clamp(min=var_floor)
-                # Only possible to set if it's a tensor, not a lazy tensor
-                # So we skip in-place modification and just warn if variance is too low
-                # (see below for warning)
-                # If you want to enforce the floor, you must do so in the kernel or variational distribution
-                # Here, we just warn if variance is too low
-                pass
+        # Note: Variance floor enforcement would require kernel-level modifications in GPyTorch
+        # For now, we rely on the initialization and regularization to prevent collapse
 
-        if self.training and not use_mean:
-            # Draw *one* stochastic sample for each class during training so that every forward pass receives a fresh prototype realisation. This preserves the Monte-Carlo nature assumed by the ELBO without collapsing it into the mean of several samples.
-            alpha = q.rsample()  # Shape: [K, M]
+        # Always draw stochastic samples for maximum stochasticity  
+        alpha = q.rsample()  # Shape should be [K, M]
 
-            # Handle potential (M, K) swap originating from iut shape
-            if alpha.dim() == 2 and alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
-                # Transpose to [K, M]
-                alpha = alpha.t()
-            # Scale by inverse coefficient of variation
-            w = F.softmax(alpha / self.temp, dim=-1)  # [K, M]
-        else:
-            mu = q.mean
-            # Detect and fix swapped dims [M, K] -> [K, M]
-            if mu.size(0) == self.num_templates and mu.size(1) == self.num_classes:
-                mu = mu.t()
-            # Scale by inverse coefficient of variation
-            w = F.softmax(mu / self.temp, dim=-1)  # [K, M]
+        # Ensure correct shape [K, M] (classes × templates)
+        if alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
+            alpha = alpha.t()  # Transpose to [K, M]
+            
+        # Compute template weights using temperature scaling
+        w = F.softmax(alpha / self.temp, dim=-1)  # [K, M]
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
@@ -173,9 +142,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     def get_weight_distribution(self):
         return self.variational_strategy(self._templates.to(torch.float32))
 
-    def sample_prototypes(self, num_samples: int, *, use_mean: bool = False) -> torch.Tensor:
+    def sample_prototypes(self, num_samples: int) -> torch.Tensor:
         """
         Draw *num_samples* sets of template-weighted class prototypes.
+        
+        Always uses stochastic sampling for maximum stochasticity.
 
         Returns
         -------
@@ -185,11 +156,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         """
         q = self.get_weight_distribution()
 
-        if use_mean:
-            w = torch.softmax(q.mean / self.temp, dim=-1).unsqueeze(0)  # [1,K,M]
-        else:
-            alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-            w = torch.softmax(alpha / self.temp, dim=-1)  # [S,K,M]
+        # Always use stochastic sampling
+        alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
+        w = torch.softmax(alpha / self.temp, dim=-1)  # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
