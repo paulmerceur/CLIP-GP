@@ -3,13 +3,13 @@
 DATASET=${1:-caltech101}
 GPU_ID=${2:-0}
 
-EXPERIMENT_NAME=gp_test31
+EXPERIMENT_NAME=gp_test3
 
 # Grids
 SHOTS=(1 4 8 16)
 GP_LRS=(0.1)
-WREGS=(200.0 500.0 1000.0)
-BETAS=(0.001)
+WREGS=(500.0)
+BETAS=(0.0)
 # Temperature values for GP template weights
 TEMPS=(5.0)
 
@@ -20,7 +20,7 @@ for shot in ${SHOTS[@]}; do
     for beta in ${BETAS[@]}; do
       for temp in ${TEMPS[@]}; do
         for wreg in ${WREGS[@]}; do
-          bash scripts/adapt.sh 3 $DATASET GP_rbf $shot RN50 ${lr} ${beta} ${wreg} ${temp} $EXPERIMENT_NAME $GPU_ID
+          bash scripts/adapt.sh 1 $DATASET GP_rbf $shot RN50 ${lr} ${beta} ${wreg} 0.0 $EXPERIMENT_NAME $GPU_ID
         done
       done
     done

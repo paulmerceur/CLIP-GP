@@ -267,10 +267,11 @@ eurosat/
 
 Run :
 ```
+mkdir eurosat && \
+cd eurosat && \
 wget http://madm.dfki.de/files/sentinel/EuroSAT.zip && \
 unzip EuroSAT.zip && \
 rm EuroSAT.zip && \
-cd eurosat && \
 gdown 1Ip7yaCWFi0eaOFUGga0lUdVi_DDQth1o && \
 cd ..
 ```
