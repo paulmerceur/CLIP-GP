@@ -1,5 +1,5 @@
 import os.path as osp
-from typing import List
+from typing import List, TYPE_CHECKING
 import time
 import datetime
 import copy
@@ -18,7 +18,10 @@ from dassl.optim import build_optimizer, build_lr_scheduler
 
 from clip import clip
 from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
-from gp_template_weigher import GaussianProcessTemplateWeighter
+from .gp_template_weigher import GaussianProcessTemplateWeighter
+
+if TYPE_CHECKING:
+    from typing import Any
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
@@ -57,8 +60,14 @@ def load_clip_to_cpu(cfg):
 
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
+        model = None
 
-    model = clip.build_model(state_dict or model.state_dict())
+    if model is not None:
+        model = clip.build_model(state_dict or model.state_dict())
+    elif state_dict is not None:
+        model = clip.build_model(state_dict)
+    else:
+        raise RuntimeError("Unable to load CLIP model")
 
     return model
 
@@ -86,7 +95,7 @@ class TextEncoder(nn.Module):
         return x
 
 
-def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder: TextEncoder, pretrained_projection: str = None):
+def _get_base_text_features(cfg, classnames: List[str], clip_model, text_encoder: TextEncoder, pretrained_projection: str | None = None):
     """Computes and caches embeddings inside closure."""
 
     device = next(text_encoder.parameters()).device
@@ -546,7 +555,7 @@ class CustomCLIP(nn.Module):
         logits_fp32 = (feats32 @ prot32.t()) * self.logit_scale.exp().float()
         logits = logits_fp32
 
-        if self.adapter.cache_keys is not None:
+        if self.adapter.cache_keys is not None and self.adapter.cache_values is not None:
             ck = self.adapter.cache_keys / self.adapter.cache_keys.norm(dim=-1, keepdim=True)
             affinity = feats32 @ ck.t().float()  # Use projected features for consistency
             cache_logits = torch.exp((-1) * (self.adapter.beta - self.adapter.beta * affinity)) @ self.adapter.cache_values.float()
@@ -556,6 +565,13 @@ class CustomCLIP(nn.Module):
 
 class TrainerXCostume(SimpleTrainer):
     """A base trainer using labeled data only."""
+    
+    model: "CustomCLIP"  # Type annotation to help linter
+    features_train: torch.Tensor
+    labels_train: torch.Tensor
+    features_test: torch.Tensor
+    labels_test: torch.Tensor
+    batch_size: int
 
     def run_epoch(self):
         # Start-of-epoch bookkeeping -------------------------------------------------
@@ -593,7 +609,7 @@ class TrainerXCostume(SimpleTrainer):
 
         # Set number of batches to sample
         self.num_batches = len(self.train_loader_x)
-        self.batch_size = self.train_loader_x.batch_size
+        self.batch_size = self.train_loader_x.batch_size or 1  # Default to 1 if None
 
         # Set features
         features = self.features_train.clone().cpu().numpy()
@@ -610,14 +626,17 @@ class TrainerXCostume(SimpleTrainer):
         features = features[idx, :]
         labels = labels[idx]
 
+        # Initialize loss_summary in case loop doesn't execute
+        loss_summary = {"loss": 0.0, "acc_train": 0.0, "acc_test": 0.0}
+
         end = time.time()
         for self.batch_idx in range(self.num_batches):
             batch_init = self.batch_idx * self.batch_size
             batch_end = (self.batch_idx + 1) * self.batch_size
 
             data_time.update(time.time() - end)
-            loss_summary = self.forward_backward(features[batch_init:batch_end],
-                                                 labels[batch_init:batch_end])
+            batch_data = (features[batch_init:batch_end], labels[batch_init:batch_end])
+            loss_summary = self.forward_backward(batch_data)
             batch_time.update(time.time() - end)
             losses.update(loss_summary)
 
@@ -652,7 +671,7 @@ class TrainerXCostume(SimpleTrainer):
         return loss_summary
 
 
-@TRAINER_REGISTRY.register()
+@TRAINER_REGISTRY.register()  # type: ignore[misc]
 class ADAPTER(TrainerXCostume):
     """General Adapter
     """
@@ -779,7 +798,7 @@ class ADAPTER(TrainerXCostume):
         # Init alphas in constraint formulation
         if self.model.adapter.apply_constraint != "none":
             print("Getting initial lagrangian multipliers for constraint formulation")
-            self.model.adapter.device = self.device
+            self.model.adapter.device = self.device  # type: ignore[assignment]
             self.model.adapter.init_lagrangian_multipliers(self.labels_train, self.logits_zs)
             print("Lagrangian multipliers: ")
             print(list(torch.round(self.model.adapter.alpha_constraint.detach(), decimals=3).cpu().numpy()))
@@ -810,6 +829,9 @@ class ADAPTER(TrainerXCostume):
                 print("Iteration grid hyperparameters search: ")
                 print(params)
                 self.reset_hyperparams(params)
+
+                # Initialize loss_summary in case loops don't execute
+                loss_summary = {"loss": 0.0, "acc_train": 0.0, "acc_test": 0.0}
 
                 # Training of adapter
                 self.before_train()
@@ -913,7 +935,9 @@ class ADAPTER(TrainerXCostume):
             self.optim = build_optimizer(baseline_params, self.cfg.OPTIM)
             
         self.sched = build_lr_scheduler(self.optim, self.cfg.OPTIM)
-        self._models.popitem(), self._optims.popitem(),self._scheds.popitem()
+        self._models.popitem()
+        self._optims.popitem()
+        self._scheds.popitem()
         self.register_model("adapter" + str(random.random()), self.model.adapter, self.optim, self.sched)
 
         return 1
@@ -929,20 +953,22 @@ class ADAPTER(TrainerXCostume):
         # Close writer
         self.close_writer()
 
-    def forward_backward(self, features, labels):
+    def forward_backward(self, batch):
         """
         Perform a forward pass, compute the unified ELBO loss (CE + β·KL), and
         run the backward/update step.
 
         Args:
-            features (Tensor): Pre-computed visual features (CPU or GPU).
-            labels   (Tensor): Corresponding ground-truth labels (already on
-                              `self.device`).
+            batch (tuple): Tuple of (features, labels) where:
+                features (Tensor): Pre-computed visual features (CPU or GPU).
+                labels   (Tensor): Corresponding ground-truth labels (already on
+                                  `self.device`).
 
         Returns:
             dict: Dictionary with training/test accuracy, loss, and (optionally)
                   KL-divergence statistics.
         """
+        features, labels = batch
 
         use_amp = self.cfg.TRAINER.ADAPTER.PREC == "amp"
 
@@ -995,7 +1021,7 @@ class ADAPTER(TrainerXCostume):
         # -------------------
         clip_val = 1.0  # hard-coded max-norm for GP parameters
 
-        if use_amp:
+        if use_amp and self.scaler is not None:
             self.optim.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
 
@@ -1043,7 +1069,8 @@ class ADAPTER(TrainerXCostume):
         torch.cuda.empty_cache()
         return loss_summary
 
-    def load_model(self, directory, cfg, epoch=None):
+    def load_model(self, directory, epoch=None):
+        cfg = self.cfg  # Get cfg from instance instead of parameter
         if not directory:
             print("Note that load_model() is skipped as no pretrained model is given")
             return
@@ -1129,8 +1156,12 @@ class ADAPTER(TrainerXCostume):
             data_loader = copy.deepcopy(self.train_loader_x)
 
             # Set data augmentation transforms
-            if not transforms:
-                data_loader.dataset.transform = self.val_loader.dataset.transform
+            if not transforms and self.val_loader is not None:
+                try:
+                    data_loader.dataset.transform = self.val_loader.dataset.transform  # type: ignore[attr-defined]
+                except AttributeError:
+                    # Skip if dataset or transform attributes don't exist
+                    pass
 
             # Set data loader with drop last to false for not losing samples
             data_loader = torch.utils.data.DataLoader(
@@ -1149,11 +1180,14 @@ class ADAPTER(TrainerXCostume):
 
             labels_ds, logits_ds, features_ds = [], [], []
             for rep in range(reps):
-                for batch_idx, batch in enumerate(data_loader):
-                    with torch.no_grad():
-                        input, label = self.parse_batch_test(batch)
-                        logits, features = self.model(input,  return_features=True)
-                        labels_ds.append(label), logits_ds.append(logits.cpu()),  features_ds.append(features.cpu())
+                if data_loader is not None:
+                    for batch_idx, batch in enumerate(data_loader):
+                        with torch.no_grad():
+                            input, label = self.parse_batch_test(batch)
+                            logits, features = self.model(input,  return_features=True)
+                            labels_ds.append(label)
+                            logits_ds.append(logits.cpu())
+                            features_ds.append(features.cpu())
 
             # Concatenate outputs
             labels_ds = torch.cat(labels_ds, dim=0)
@@ -1165,11 +1199,14 @@ class ADAPTER(TrainerXCostume):
             labels_ds, logits_ds, features_ds = [], [], []
             for rep in range(reps):
                 labels_ds_irep, logits_dsirep, features_ds_irep = [], [], []
-                for batch_idx, batch in enumerate(data_loader):
-                    with torch.no_grad():
-                        input, label = self.parse_batch_test(batch)
-                        logits, features = self.model(input, return_features=True)
-                        labels_ds_irep.append(label), logits_dsirep.append(logits.cpu()), features_ds_irep.append(features.cpu())
+                if data_loader is not None:
+                    for batch_idx, batch in enumerate(data_loader):
+                        with torch.no_grad():
+                            input, label = self.parse_batch_test(batch)
+                            logits, features = self.model(input, return_features=True)
+                            labels_ds_irep.append(label)
+                            logits_dsirep.append(logits.cpu())
+                            features_ds_irep.append(features.cpu())
                 # Concatenate outputs for dataset
                 labels_ds_irep = torch.cat(labels_ds_irep, dim=0)
                 logits_dsirep = torch.cat(logits_dsirep, dim=0)
@@ -1216,14 +1253,14 @@ class _JointOptimizer(torch.optim.Optimizer):
             else:
                 opt.zero_grad(set_to_none=set_to_none)
 
-    def step(self):  # noqa: D401
+    def step(self, closure=None):  # noqa: D401  # type: ignore[override]
         for opt in self._optimisers:
-            opt.step()
+            opt.step(closure)
 
     # ----------------------
     # Checkpoint utilities
     # ----------------------
-    def state_dict(self):  # noqa: D401
+    def state_dict(self):  # noqa: D401  # type: ignore[override]
         return [opt.state_dict() for opt in self._optimisers]
 
     def load_state_dict(self, state_dict):  # noqa: D401
@@ -1236,7 +1273,7 @@ class _JointOptimizer(torch.optim.Optimizer):
     # Param groups
     # --------------
     @property
-    def param_groups(self):  # noqa: D401
+    def param_groups(self):  # noqa: D401  # type: ignore[override]
         groups = []
         for opt in self._optimisers:
             groups.extend(opt.param_groups)
