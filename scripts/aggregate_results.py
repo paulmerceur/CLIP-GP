@@ -215,7 +215,11 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for r in records:
             if "baseline" in r["config"]:
-                label = "baseline"
+                # Differentiate between baseline variants
+                if "with_vproj" in r["config"]:
+                    label = "baseline_VP"
+                else:
+                    label = "baseline"
             else:
                 label = f"GP_WR{r['w_reg']}"
             grouped.setdefault(label, []).append(r)

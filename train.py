@@ -104,6 +104,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.GP_W_REG_COEF = 0.0  # visual projection regularization
     # Temperature (τ) used to scale GP template weights (soft-max). Lower τ → sharper weights.
     cfg.TRAINER.ADAPTER.GP_TEMP = 1.0  # can be tuned or grid-searched
+    
+    # Visual projection configuration - allows baselines to use visual projection too
+    cfg.TRAINER.ADAPTER.USE_VISUAL_PROJ = False  # whether to use trainable visual projection (for fair comparison)
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1

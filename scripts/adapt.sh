@@ -15,16 +15,14 @@ BACKBONE=$5     # CLIP backbone to sue - i.e. {RN50, RN101, ViT-B/32, ViT-B/16}
 GP_LR=$6        # GP learning rate for GP parameters
 GP_BETA=$7      # GP beta (KL weight)
 # visual projection regularization
-GP_W_REG_COEF=$8 
-# temperature for GP template weights
-GP_TEMP=${9:-1.0}
+GP_W_REG_COEF=$8
 # experiment name for organizing outputs
-EXPERIMENT_NAME=${10:-"single_test"}
+EXPERIMENT_NAME=${9:-"single_test"}
 # GPU id
-GPU_ID=${11:-0}
+GPU_ID=${10:-0}
 
 for ((seed=1; seed<=SEEDS; seed++)); do
-    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots_LR${GP_LR}_B${GP_BETA}_WR${GP_W_REG_COEF}_T${GP_TEMP}/seed${seed}
+    DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CFG}_${SHOTS}shots_LR${GP_LR}_B${GP_BETA}_WR${GP_W_REG_COEF}/seed${seed}
     if [ -d "$DIR" ]; then
         echo "Oops! The results exist at ${DIR} (so skip this job)"
     else
@@ -39,7 +37,6 @@ for ((seed=1; seed<=SEEDS; seed++)); do
         DATASET.NUM_SHOTS ${SHOTS} \
         TRAINER.ADAPTER.GP_LR ${GP_LR} \
         TRAINER.ADAPTER.GP_BETA ${GP_BETA} \
-        TRAINER.ADAPTER.GP_W_REG_COEF ${GP_W_REG_COEF} \
-        TRAINER.ADAPTER.GP_TEMP ${GP_TEMP}
+        TRAINER.ADAPTER.GP_W_REG_COEF ${GP_W_REG_COEF}
     fi
 done

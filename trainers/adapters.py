@@ -331,7 +331,8 @@ class CustomCLIP(nn.Module):
 
         self.vision_dim = clip_model.text_projection.shape[1]
 
-        if cfg.TRAINER.ADAPTER.USE_GP:
+        # Visual projection logic: use it for GP method OR when explicitly enabled for baselines
+        if cfg.TRAINER.ADAPTER.USE_GP or cfg.TRAINER.ADAPTER.USE_VISUAL_PROJ:
             # Use a full learnable d×d projection initialised as identity
             print("[VP] Using FULL Linear projection (d×d matrix)")
             self.visual_proj = nn.Linear(self.vision_dim, self.vision_dim, bias=False)
@@ -696,7 +697,7 @@ class ADAPTER(TrainerXCostume):
         for name, param in self.model.named_parameters():
             if name == "logit_scale":
                 param.requires_grad = True  # allow adaptation with regularisation
-            elif "visual_proj" in name and cfg.TRAINER.ADAPTER.USE_GP:
+            elif "visual_proj" in name and (cfg.TRAINER.ADAPTER.USE_GP or cfg.TRAINER.ADAPTER.USE_VISUAL_PROJ):
                 param.requires_grad = True
             else:
                 if ("adapter" not in name) and ("gp_weighter" not in name) and ("visual_proj" not in name):

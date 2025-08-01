@@ -14,17 +14,11 @@ BETAS=(0.0)
 TEMPS=(5.0)
 
 for shot in ${SHOTS[@]}; do
+  # Original baseline (no visual projection)
   #bash scripts/adapt.sh 3 $DATASET baseline_10templates  $shot RN50 0.0 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
-
-  for lr in ${GP_LRS[@]}; do
-    for beta in ${BETAS[@]}; do
-      for temp in ${TEMPS[@]}; do
-        for wreg in ${WREGS[@]}; do
-          bash scripts/adapt.sh 1 $DATASET GP_rbf $shot RN50 ${lr} ${beta} ${wreg} 0.0 $EXPERIMENT_NAME $GPU_ID
-        done
-      done
-    done
-  done
+  
+  # New baseline with visual projection for fair comparison
+  bash scripts/adapt.sh 3 $DATASET baseline_VP  $shot RN50 0.0 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
 done
 
 
