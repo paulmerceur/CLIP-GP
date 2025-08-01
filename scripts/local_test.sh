@@ -10,15 +10,17 @@ SHOTS=(1 4 8 16)
 GP_LRS=(0.1)
 WREGS=(500.0)
 BETAS=(0.0)
-# Temperature values for GP template weights
-TEMPS=(5.0)
 
 for shot in ${SHOTS[@]}; do
   # Original baseline (no visual projection)
-  #bash scripts/adapt.sh 3 $DATASET baseline_10templates  $shot RN50 0.0 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
+  #bash scripts/adapt.sh 3 $DATASET baseline_10templates  $shot RN50 0.0 0.0 0.0$EXPERIMENT_NAME $GPU_ID
   
   # New baseline with visual projection for fair comparison
-  bash scripts/adapt.sh 3 $DATASET baseline_VP  $shot RN50 0.0 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
+  #bash scripts/adapt.sh 3 $DATASET baseline_VP  $shot RN50 0.0 0.0 0.0 $EXPERIMENT_NAME $GPU_ID
+
+  # GP
+  bash scripts/adapt.sh 3 $DATASET GP_rbf $shot RN50 0.1 0.001 500.0 $EXPERIMENT_NAME $GPU_ID
+
 done
 
 

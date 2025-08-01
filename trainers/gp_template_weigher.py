@@ -44,20 +44,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         super().__init__(variational_strategy)
 
-        # Temperature parameter removed - no longer using softmax with temperature scaling
-        # -------------------------------------------------------------
-        # # Temperature parameter τ controlling sharpness of per-template
-        # # weights.  A value of 1.0 keeps the original scale; τ>1.0 makes
-        # # weights flatter, τ<1.0 makes them more peaked.  We register it
-        # # as an nn.Parameter so it can be searched or even learned, but
-        # # keep requires_grad=False by default (can be toggled via cfg).
-        # -------------------------------------------------------------
-        # temp_init = float(getattr(cfg.TRAINER.ADAPTER, "GP_TEMP", 1.0))
-        # self.register_parameter(
-        #     "temp",
-        #     nn.Parameter(torch.tensor([temp_init], dtype=torch.float32), requires_grad=False),
-        # )
-
         # Mean and covariance modules -------------------------------------------------
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
@@ -123,7 +109,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         if alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
             alpha = alpha.t()  # Transpose to [K, M]
             
-        # Use raw alpha values as template weights (no softmax or temperature scaling)
+        # Use raw alpha values as template weights
         w = alpha  # [K, M]
 
         # Compute prototypes using fp32 representations of templates

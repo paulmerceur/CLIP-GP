@@ -216,7 +216,7 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
         for r in records:
             if "baseline" in r["config"]:
                 # Differentiate between baseline variants
-                if "with_vproj" in r["config"]:
+                if "baseline_VP" in r["config"]:
                     label = "baseline_VP"
                 else:
                     label = "baseline"
