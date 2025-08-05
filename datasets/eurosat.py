@@ -6,7 +6,7 @@ from utils.dataset_base import DATASET_REGISTRY, Datum, DatasetBase, mkdir_if_mi
 from .oxford_pets import OxfordPets
 from .dtd import DescribableTextures as DTD
 
-NEW_CNAMES = {
+NEW_CLASSNAMES = {
     "AnnualCrop": "Annual Crop Land",
     "Forest": "Forest",
     "HerbaceousVegetation": "Herbaceous Vegetation Land",
@@ -36,7 +36,7 @@ class EuroSAT(DatasetBase):
         if os.path.exists(self.split_path):
             train, val, test = OxfordPets.read_split(self.split_path, self.image_dir)
         else:
-            train, val, test = DTD.read_and_split_data(self.image_dir, new_cnames=NEW_CNAMES)
+            train, val, test = DTD.read_and_split_data(self.image_dir, new_cnames=NEW_CLASSNAMES)
             OxfordPets.save_split(train, val, test, self.split_path, self.image_dir)
 
         num_shots = config.dataset.num_shots

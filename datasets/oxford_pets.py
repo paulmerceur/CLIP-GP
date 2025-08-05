@@ -26,7 +26,7 @@ class OxfordPets(DatasetBase):
         else:
             trainval = self.read_data(split_file="trainval.txt")
             test = self.read_data(split_file="test.txt")
-            train, val = self.split_trainval(trainval)
+            train, val = OxfordPets.split_trainval(trainval)
             self.save_split(train, val, test, self.split_path, self.image_dir)
 
         num_shots = config.dataset.num_shots
@@ -72,7 +72,8 @@ class OxfordPets(DatasetBase):
 
         return items
 
-    def split_trainval(self, trainval):
+    @staticmethod
+    def split_trainval(trainval):
         # Randomly split a dataset, each class may have
         # different number of instances
         per_class = defaultdict(list)

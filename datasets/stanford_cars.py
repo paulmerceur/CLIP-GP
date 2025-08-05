@@ -10,7 +10,7 @@ from .oxford_pets import OxfordPets
 @DATASET_REGISTRY.register()
 class StanfordCars(DatasetBase):
 
-    dataset_dir = "stanford_cars"
+    dataset_dir = "stanford_cars2" # TODO: change to "stanford_cars", once the weird dataset ownership rules are fixed
 
     def __init__(self, config):
         root = os.path.abspath(os.path.expanduser(config.dataset.root))
