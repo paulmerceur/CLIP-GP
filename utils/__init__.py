@@ -9,6 +9,9 @@ from .reproducibility import set_random_seed
 from .checkpoint import load_pretrained_weights
 from .optimization import build_optimizer, build_lr_scheduler
 from .config import parse_args_to_config, print_config, Config
+from .trainer import BaseTrainer
+from .data_manager import build_data_manager
+from .trainer_registry import build_trainer
 
 __all__ = [
     'setup_logger',
@@ -21,5 +24,8 @@ __all__ = [
     'build_lr_scheduler',
     'parse_args_to_config',
     'print_config',
-    'Config'
+    'Config',
+    'BaseTrainer',
+    'build_data_manager',
+    'build_trainer',
 ]

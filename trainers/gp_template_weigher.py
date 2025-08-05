@@ -21,7 +21,22 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         text_embeddings_fp32 = text_embeddings.to(dtype=torch.float32)
 
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
-        self.num_mc_samples = getattr(cfg.TRAINER.ADAPTER, 'GP_NUM_MC_SAMPLES', 5)
+        
+        # Handle both old cfg format and new config format
+        def get_config_value(key, default):
+            if hasattr(cfg, 'TRAINER'):
+                # Old Dassl config format
+                return getattr(cfg.TRAINER.ADAPTER, key, default)
+            else:
+                # New config format - convert key to lowercase format
+                if key == 'GP_NUM_MC_SAMPLES':
+                    return getattr(cfg.adapter, 'gp_num_mc_samples', default)
+                elif key == 'GP_KERNEL_TYPE':
+                    return getattr(cfg.adapter, 'gp_kernel_type', default)
+                else:
+                    return default
+        
+        self.num_mc_samples = get_config_value('GP_NUM_MC_SAMPLES', 5)
 
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
@@ -54,7 +69,8 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             # Store in fp32 for numerical stability – same dtype used by GP modules
             self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
 
-        if getattr(cfg.TRAINER.ADAPTER, 'GP_KERNEL_TYPE', 'rbf').lower() == "rbf":
+        kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
+        if kernel_type == "rbf":
             with torch.no_grad():
                 flat_emb = F.normalize(text_embeddings_fp32.reshape(-1, self.dim), p=2, dim=-1)  # [(K*M), D]
                 pdist = torch.cdist(flat_emb, flat_emb)
@@ -66,10 +82,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             base_kernel.initialize(lengthscale=ls_cfg)
             # Fix linter issue: set requires_grad through parameter
             base_kernel.raw_lengthscale.requires_grad_(True)
-        elif getattr(cfg.TRAINER.ADAPTER, 'GP_KERNEL_TYPE', 'rbf').lower() == "linear":
+        elif kernel_type == "linear":
             base_kernel = gpytorch.kernels.LinearKernel(batch_shape=batch_shape)
         else:
-            raise ValueError(f"Unsupported kernel: {getattr(cfg.TRAINER.ADAPTER, 'GP_KERNEL_TYPE', 'rbf')}")
+            raise ValueError(f"Unsupported kernel: {kernel_type}")
 
         self.covar_module = gpytorch.kernels.ScaleKernel(
             base_kernel, batch_shape=batch_shape

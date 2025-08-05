@@ -1,5 +1,5 @@
 import os.path as osp
-from typing import List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Union, Any
 import time
 import datetime
 import copy
@@ -11,10 +11,11 @@ from torch.amp.autocast_mode import autocast
 import numpy as np
 import math
 
-from dassl.engine import TRAINER_REGISTRY, SimpleTrainer
-from dassl.metrics import compute_accuracy
-from dassl.utils import load_pretrained_weights, MetricMeter, AverageMeter
-from dassl.optim import build_optimizer, build_lr_scheduler
+from utils.trainer import BaseTrainer
+from utils.metrics import compute_accuracy, AverageMeter, MetricMeter
+from utils.checkpoint import load_pretrained_weights
+from utils.optimization import build_optimizer, build_lr_scheduler
+from utils.trainer_registry import TRAINER_REGISTRY
 
 from clip import clip
 from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
@@ -71,8 +72,8 @@ class TextEncoder(nn.Module):
         return x
 
 
-def load_clip_to_cpu(cfg):
-    backbone_name = cfg.MODEL.BACKBONE.NAME
+def load_clip_to_cpu(config):
+    backbone_name = config.model.backbone_name
     url = clip._MODELS[backbone_name]
     model_path = clip._download(url)
 
@@ -87,22 +88,22 @@ def load_clip_to_cpu(cfg):
     return model
 
 
-def _get_base_text_features(cfg, classnames, clip_model, text_encoder=None):
+def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     """Extract text features for all templates and classes."""
     device = next(clip_model.parameters()).device
     
     # Get template strings (using the sophisticated logic from the old version)
     templates = ["a photo of a {}."]
     
-    if cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1:
+    if config.adapter.num_templates > 1:
         num_needed = min(
-            cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1,  # -1 because we already have "a photo of a {}"
+            config.adapter.num_templates - 1,  # -1 because we already have "a photo of a {}"
             len(IMAGENET_TEMPLATES_SELECT),
         )
         templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
-    if cfg.TRAINER.ADAPTER.NUM_TEMPLATES > 1 + len(IMAGENET_TEMPLATES_SELECT):
+    if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
         # Add templates from IMAGENET_TEMPLATES
-        templates += IMAGENET_TEMPLATES[:cfg.TRAINER.ADAPTER.NUM_TEMPLATES - 1 - len(IMAGENET_TEMPLATES_SELECT)]
+        templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
     
     print(f"[DEBUG] templates: {templates}")
 
@@ -122,7 +123,7 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder=None):
     text_embeds = torch.stack(emb_list)  # [K,M,D]
 
     # Instantiate GP
-    if cfg.TRAINER.ADAPTER.USE_GP and len(templates) > 1:
+    if config.adapter.use_gp and len(templates) > 1:
         # Better prior: use per-template zero-shot logits. For each
         # class k and template m we compute the logit obtained by
         # measuring the similarity of that template to the **average**
@@ -132,7 +133,7 @@ def _get_base_text_features(cfg, classnames, clip_model, text_encoder=None):
             class_mean = text_embeds.mean(dim=1, keepdim=True)          # [K,1,D]
             zs_logits = (text_embeds * class_mean).sum(-1)              # [K,M]
         mean_init = zs_logits.to(dtype=torch.float32, device=device)
-        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=cfg, mean_init=mean_init).to(device)
+        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=config, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
         return proto, text_embeds, gp, kl
 
@@ -160,9 +161,9 @@ class LinearAdapter(nn.Module):
 class CustomCLIP(nn.Module):
     """Custom CLIP model with adapter and optional GP weighting."""
     
-    def __init__(self, cfg, classnames, clip_model):
+    def __init__(self, config, classnames, clip_model):
         super().__init__()
-        self.cfg = cfg
+        self.config = config
         self.num_classes = len(classnames)
         self.dtype = clip_model.dtype
         
@@ -182,14 +183,14 @@ class CustomCLIP(nn.Module):
         
         # Get text features and setup GP if needed
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(
-            cfg, classnames, clip_model, self.text_encoder
+            config, classnames, clip_model, self.text_encoder
         )
         
         # Create adapter
         self.adapter = LinearAdapter(
             num_classes=self.num_classes,
             feature_dim=self.vision_dim,
-            init_type=cfg.TRAINER.ADAPTER.INIT
+            init_type=config.adapter.init
         )
         
         # Initialize adapter with base prototypes
@@ -252,6 +253,8 @@ class CustomCLIP(nn.Module):
         features_norm = features / features.norm(dim=-1, keepdim=True)
         prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
         
+        # Ensure same dtype for matrix multiplication
+        features_norm = features_norm.to(prototypes_norm.dtype)
         logits = self.logit_scale.exp() * features_norm @ prototypes_norm.t()
         
         return logits
@@ -274,6 +277,8 @@ class CustomCLIP(nn.Module):
         for s in range(num_samples):
             proto_s = prototypes_s[s]  # [K, D]
             proto_s_norm = proto_s / proto_s.norm(dim=-1, keepdim=True)
+            # Ensure same dtype for matrix multiplication
+            features_norm = features_norm.to(proto_s_norm.dtype)
             logits_s = self.logit_scale.exp() * features_norm @ proto_s_norm.t()
             logits_samples.append(logits_s)
         
@@ -282,14 +287,236 @@ class CustomCLIP(nn.Module):
         return logits
 
 
-class TrainerXCostume(SimpleTrainer):
-    """A base trainer using labeled data only."""
+
+@TRAINER_REGISTRY.register("ADAPTER")
+class ADAPTER(BaseTrainer):
+    """Unified adapter trainer supporting both baseline and GP methods."""
     
-    features_train: torch.Tensor
-    labels_train: torch.Tensor
-    features_test: torch.Tensor
-    labels_test: torch.Tensor
-    
+    def __init__(self, config, dataset_manager):
+        super().__init__(config, dataset_manager)
+
+    def check_cfg(self, config) -> None:
+        assert config.adapter.prec in ["fp16", "fp32", "amp"]
+
+    def build_model(self):
+        config = self.config
+        classnames = self.dm.dataset.classnames
+
+        print(f"Loading CLIP (backbone: {config.model.backbone_name})")
+        clip_model = load_clip_to_cpu(config)
+
+        if config.adapter.prec == "fp32" or config.adapter.prec == "amp":
+            clip_model.float()
+
+        print("Building custom CLIP")
+        self.model = CustomCLIP(config, classnames, clip_model)
+
+        # Setup parameter groups
+        for name, param in self.model.named_parameters():
+            if name == "logit_scale":
+                param.requires_grad = True
+            elif "visual_proj" in name:
+                param.requires_grad = True
+            elif "adapter" in name:
+                param.requires_grad = True
+            elif "gp_weighter" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        if config.model.init_weights:
+            load_pretrained_weights(self.model.adapter, config.model.init_weights)
+
+        self.model.to(self.device)
+        self.model.float()
+        
+            
+        # Setup optimizer with different learning rates for GP
+        if config.adapter.use_gp and self.model.gp_weighter is not None:
+            # Two parameter groups: base params and GP params
+            base_params = []
+            base_params.extend([p for p in self.model.adapter.parameters() if p.requires_grad])
+            base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
+            if self.model.logit_scale.requires_grad:
+                base_params.append(self.model.logit_scale)
+            
+            gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
+
+            param_groups = [
+                {
+                    'params': base_params,
+                    'lr': float(config.optim.lr),
+                    'weight_decay': float(config.optim.weight_decay)
+                },
+                {
+                    'params': gp_params,
+                    'lr': float(config.adapter.gp_lr),
+                    'weight_decay': 0.0
+                },
+            ]
+
+            optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
+            BaseOptim = optim_map.get(config.optim.name.lower(), torch.optim.SGD)
+            
+            # Add SGD-specific parameters for explicit control
+            if config.optim.name.lower() == "sgd":
+                self.optim = BaseOptim(param_groups, momentum=float(config.optim.momentum))
+            else:
+                self.optim = BaseOptim(param_groups)
+            
+            # Create scheduler manually for GP case to avoid Dassl's scheduler issues
+            if config.optim.lr_scheduler.lower() == "cosine":
+                from torch.optim.lr_scheduler import CosineAnnealingLR
+                self.sched = CosineAnnealingLR(self.optim, T_max=config.optim.max_epoch)
+            else:
+                # Default: no scheduler
+                self.sched = None
+        else:
+            # Single parameter group for baseline
+            baseline_params = []
+            baseline_params.extend(list(self.model.adapter.parameters()))
+            baseline_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
+            if self.model.logit_scale.requires_grad:
+                baseline_params.append(self.model.logit_scale)
+            
+            # Use utils optimization functions instead of Dassl
+            self.optim = build_optimizer(baseline_params, config.optim)
+            self.sched = build_lr_scheduler(self.optim, config.optim)
+            
+        # Note: We don't use register_model anymore since we're not using Dassl's base trainer
+        self.scaler = GradScaler() if config.adapter.prec == "amp" else None
+
+    def forward_backward(self, batch):
+        """Forward pass and backward pass with loss computation."""
+        from typing import cast
+        model = cast(CustomCLIP, self.model)
+        features, labels = batch
+        # Convert to tensors and move to device
+        features = torch.tensor(features, dtype=torch.float32).to(self.device)
+        if not torch.is_tensor(labels):
+            labels = torch.tensor(labels).to(self.device)
+        else:
+            labels = labels.detach().clone().to(self.device)
+        # Apply visual projection (features are already extracted)
+        if features.dtype != model.visual_proj.weight.dtype:
+            features = features.to(dtype=model.visual_proj.weight.dtype)
+        projected_features = model.visual_proj(features)
+        # Get prototypes
+        prototypes = model.forward_prototypes()
+        # Ensure same dtype and device
+        if projected_features.dtype != prototypes.dtype:
+            prototypes = prototypes.to(dtype=projected_features.dtype)
+        if projected_features.device != prototypes.device:
+            prototypes = prototypes.to(device=projected_features.device)
+        # Compute similarity logits
+        features_norm = projected_features / projected_features.norm(dim=-1, keepdim=True)
+        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
+        logits = model.logit_scale.exp() * features_norm @ prototypes_norm.t()
+        # Compute loss
+        loss = self.compute_loss(logits, labels)
+        # Backward pass
+        self._backward_and_update(loss)
+        # Compute accuracies for logging
+        with torch.no_grad():
+            # Training accuracy
+            acc_train = compute_accuracy(logits, labels)[0]
+            # Test accuracy (using stored test features)
+            test_features = self.features_test.to(self.device)
+            if test_features.dtype != model.visual_proj.weight.dtype:
+                test_features = test_features.to(dtype=model.visual_proj.weight.dtype)
+            test_projected = model.visual_proj(test_features)
+            test_prototypes = model.forward_prototypes()
+            if test_projected.dtype != test_prototypes.dtype:
+                test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
+            test_features_norm = test_projected / test_projected.norm(dim=-1, keepdim=True)
+            test_prototypes_norm = test_prototypes / test_prototypes.norm(dim=-1, keepdim=True)
+            test_logits = model.logit_scale.exp() * test_features_norm @ test_prototypes_norm.t()
+            acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0]
+        return {
+            "loss": loss.item(),
+            "acc_train": acc_train,
+            "acc_test": acc_test
+        }
+
+    def compute_loss(self, logits, labels):
+        from typing import cast
+        model = cast(CustomCLIP, self.model)
+        """Compute loss including GP KL term and visual projection regularization."""
+        # Cross-entropy loss
+        ce_loss = F.cross_entropy(logits, labels)
+        total_loss = ce_loss
+
+        # Add GP KL divergence if using GP
+        if self.config.adapter.use_gp and model.gp_weighter is not None:
+            kl_loss = model.get_gp_kl_divergence()
+            if kl_loss is not None:
+                beta = self.config.adapter.gp_beta
+                total_loss += beta * kl_loss
+        # Add visual projection regularization
+        l2_lambda = self.config.adapter.l2_lambda
+        if l2_lambda > 0:
+            shots = self.config.dataset.num_shots
+            identity = torch.eye(
+                model.visual_proj.weight.size(0),
+                device=model.visual_proj.weight.device,
+                dtype=model.visual_proj.weight.dtype
+            )
+            diff = torch.norm(model.visual_proj.weight - identity, p='fro') ** 2
+            total_loss += l2_lambda * diff / (labels.size(0) * shots)
+        return total_loss
+
+    def model_inference(self, input_data):
+        """Model inference with GP sampling during evaluation."""
+        from typing import cast
+        model = cast(CustomCLIP, self.model)
+        if not model.training and model.gp_weighter is not None:
+            # Use GP sampling for evaluation
+            num_samples = self.config.adapter.gp_num_mc_samples
+            return model.sample_forward(input_data, num_samples)
+        else:
+            return model(input_data)
+
+    def _backward_and_update(self, loss):
+        """Backward pass and optimizer step."""
+        self.optim.zero_grad()
+        if self.scaler:
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optim)
+            self.scaler.update()
+        else:
+            loss.backward()
+            self.optim.step()
+
+    def parse_batch_train(self, batch):
+        input_data = batch["img"]
+        labels = batch["label"]
+        input_data = input_data.to(self.device)
+        labels = labels.to(self.device)
+        return input_data, labels
+
+    def train(self):
+        """Training loop with feature extraction and evaluation."""
+        # Build model first (this is normally done in BaseTrainer.train())
+        self.build_model()
+        
+        self.set_model_mode("eval")
+
+        # Feature extraction on test set
+        self.labels_test, output_test, self.features_test = self.extract_features(partition="test")
+        print("Zero-Shot accuracy on test: " + 
+              str(round(compute_accuracy(output_test.cuda(), self.labels_test.cuda())[0], 2)))
+
+        # Feature extraction on training set
+        self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
+
+        # Run the actual training using the base class training loop
+        self.before_train()
+        for self.epoch in range(self.start_epoch, self.max_epoch):
+            self.before_epoch()
+            self.run_epoch()
+            self.after_epoch()
+        self.after_train()
+
     def run_epoch(self):
         """Run one training epoch."""
         losses = AverageMeter()
@@ -338,8 +565,8 @@ class TrainerXCostume(SimpleTrainer):
             batch_time.update(time.time() - end)
             losses.update(loss_summary['loss'])
 
-            meet_freq = (self.batch_idx + 1) % self.cfg.TRAIN.PRINT_FREQ == 0
-            only_few_batches = self.num_batches < self.cfg.TRAIN.PRINT_FREQ
+            meet_freq = (self.batch_idx + 1) % self.config.train.print_freq == 0
+            only_few_batches = self.num_batches < self.config.train.print_freq
             if meet_freq or only_few_batches:
                 nb_remain = 0
                 nb_remain += self.num_batches - self.batch_idx - 1
@@ -362,9 +589,10 @@ class TrainerXCostume(SimpleTrainer):
             end = time.time()
 
         return loss_summary
-    
+
     def extract_features(self, partition="train", reps=1, transforms=None):
         """Extract features from specified data partition."""
+        import copy
         print("Extracting features from: " + partition)
         self.set_model_mode("eval")
 
@@ -394,8 +622,13 @@ class TrainerXCostume(SimpleTrainer):
                     input_data, labels = self.parse_batch_train(batch)
                     
                     with torch.no_grad():
-                        features = self.model.forward_features(input_data)  # type: ignore
-                        logits = self.model(input_data)
+                        if hasattr(self.model, 'forward_features'):
+                            features = self.model.forward_features(input_data)  # type: ignore
+                            logits = self.model(input_data)  # type: ignore
+                        else:
+                            # Fallback if model doesn't have forward_features
+                            logits = self.model(input_data)  # type: ignore
+                            features = logits  # Use logits as features
                     
                     labels_ds.append(labels.cpu())
                     logits_ds.append(logits.cpu())
@@ -407,232 +640,3 @@ class TrainerXCostume(SimpleTrainer):
         features_ds = torch.cat(features_ds, dim=0)
 
         return labels_ds, logits_ds, features_ds
-
-
-@TRAINER_REGISTRY.register()  # type: ignore
-class ADAPTER(TrainerXCostume):
-    """Unified adapter trainer supporting both baseline and GP methods."""
-
-    def check_cfg(self, cfg):
-        assert cfg.TRAINER.ADAPTER.PREC in ["fp16", "fp32", "amp"]
-
-    def build_model(self):
-        cfg = self.cfg
-        classnames = self.dm.dataset.classnames
-
-        print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
-        clip_model = load_clip_to_cpu(cfg)
-
-        if cfg.TRAINER.ADAPTER.PREC == "fp32" or cfg.TRAINER.ADAPTER.PREC == "amp":
-            clip_model.float()
-
-        print("Building custom CLIP")
-        self.model = CustomCLIP(cfg, classnames, clip_model)
-
-        # Setup parameter groups
-        for name, param in self.model.named_parameters():
-            if name == "logit_scale":
-                param.requires_grad = True
-            elif "visual_proj" in name:
-                param.requires_grad = True
-            elif "adapter" in name:
-                param.requires_grad = True
-            elif "gp_weighter" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        if cfg.MODEL.INIT_WEIGHTS:
-            load_pretrained_weights(self.model.adapter, cfg.MODEL.INIT_WEIGHTS)
-
-        self.model.to(self.device)
-        self.model = self.model.float()
-        
-            
-        # Setup optimizer with different learning rates for GP
-        if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            # Two parameter groups: base params and GP params
-            base_params = []
-            base_params.extend([p for p in self.model.adapter.parameters() if p.requires_grad])
-            base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
-            if self.model.logit_scale.requires_grad:
-                base_params.append(self.model.logit_scale)
-            
-            gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
-
-            param_groups = [
-                {
-                    'params': base_params,
-                    'lr': float(cfg.OPTIM.LR),
-                    'weight_decay': float(getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0))
-                },
-                {
-                    'params': gp_params,
-                    'lr': float(getattr(cfg.TRAINER.ADAPTER, 'GP_LR', cfg.OPTIM.LR)),
-                    'weight_decay': 0.0
-                },
-            ]
-
-            optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
-            BaseOptim = optim_map.get(cfg.OPTIM.NAME.lower(), torch.optim.SGD)
-            
-            # Add SGD-specific parameters for explicit control
-            if cfg.OPTIM.NAME.lower() == "sgd":
-                self.optim = BaseOptim(param_groups, momentum=float(cfg.OPTIM.MOMENTUM))
-            else:
-                self.optim = BaseOptim(param_groups)
-            
-            # Create scheduler manually for GP case to avoid Dassl's scheduler issues
-            if cfg.OPTIM.LR_SCHEDULER.lower() == "cosine":
-                from torch.optim.lr_scheduler import CosineAnnealingLR
-                self.sched = CosineAnnealingLR(self.optim, T_max=cfg.OPTIM.MAX_EPOCH)
-            else:
-                # Default: no scheduler
-                self.sched = None
-        else:
-            # Single parameter group for baseline
-            baseline_params = []
-            baseline_params.extend(list(self.model.adapter.parameters()))
-            baseline_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
-            if self.model.logit_scale.requires_grad:
-                baseline_params.append(self.model.logit_scale)
-            
-            self.optim = build_optimizer(baseline_params, cfg.OPTIM)
-            self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
-            
-        self.register_model("adapter", self.model.adapter, self.optim, self.sched)
-        self.scaler = GradScaler() if cfg.TRAINER.ADAPTER.PREC == "amp" else None
-
-    def forward_backward(self, batch):
-        """Forward pass and backward pass with loss computation."""
-        features, labels = batch
-        
-        # Convert to tensors and move to device
-        features = torch.tensor(features, dtype=torch.float32).to(self.device)
-        if not torch.is_tensor(labels):
-            labels = torch.tensor(labels).to(self.device)
-        else:
-            labels = labels.detach().clone().to(self.device)
-        
-        # Apply visual projection (features are already extracted)
-        if features.dtype != self.model.visual_proj.weight.dtype:
-            features = features.to(dtype=self.model.visual_proj.weight.dtype)
-        projected_features = self.model.visual_proj(features)
-        
-        # Get prototypes
-        prototypes = self.model.forward_prototypes()
-        
-        # Ensure same dtype and device
-        if projected_features.dtype != prototypes.dtype:
-            prototypes = prototypes.to(dtype=projected_features.dtype)
-        if projected_features.device != prototypes.device:
-            prototypes = prototypes.to(device=projected_features.device)
-        
-        # Compute similarity logits
-        features_norm = projected_features / projected_features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-        logits = self.model.logit_scale.exp() * features_norm @ prototypes_norm.t()
-        
-        # Compute loss
-        loss = self.compute_loss(logits, labels)
-        
-        # Backward pass
-        self._backward_and_update(loss)
-        
-        # Compute accuracies for logging
-        with torch.no_grad():
-            # Training accuracy
-            acc_train = compute_accuracy(logits, labels)[0].item()
-            
-            # Test accuracy (using stored test features)
-            test_features = self.features_test.to(self.device)
-            if test_features.dtype != self.model.visual_proj.weight.dtype:
-                test_features = test_features.to(dtype=self.model.visual_proj.weight.dtype)
-            test_projected = self.model.visual_proj(test_features)
-            test_prototypes = self.model.forward_prototypes()
-            if test_projected.dtype != test_prototypes.dtype:
-                test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
-            test_features_norm = test_projected / test_projected.norm(dim=-1, keepdim=True)
-            test_prototypes_norm = test_prototypes / test_prototypes.norm(dim=-1, keepdim=True)
-            test_logits = self.model.logit_scale.exp() * test_features_norm @ test_prototypes_norm.t()
-            acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0].item()
-
-        return {
-            "loss": loss.item(), 
-            "acc_train": acc_train,
-            "acc_test": acc_test
-        }
-
-    def compute_loss(self, logits, labels):
-        """Compute loss including GP KL term and visual projection regularization."""
-        # Cross-entropy loss
-        ce_loss = F.cross_entropy(logits, labels)
-        total_loss = ce_loss
-
-        # Add GP KL divergence if using GP
-        if self.cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
-            kl_loss = self.model.get_gp_kl_divergence()
-            if kl_loss is not None:
-                beta = getattr(self.cfg.TRAINER.ADAPTER, "GP_BETA", 0.001)
-                total_loss += beta * kl_loss
-
-        # Add visual projection regularization
-        l2_lambda = getattr(self.cfg.TRAINER.ADAPTER, "L2_LAMBDA", 0.0)
-        if l2_lambda > 0:
-            shots = getattr(self.cfg.DATASET, "NUM_SHOTS", 1)
-            identity = torch.eye(
-                self.model.visual_proj.weight.size(0),
-                device=self.model.visual_proj.weight.device,
-                dtype=self.model.visual_proj.weight.dtype
-            )
-            diff = torch.norm(self.model.visual_proj.weight - identity, p='fro') ** 2
-            total_loss += l2_lambda * diff / (labels.size(0) * shots)
-
-        return total_loss
-
-    def model_inference(self, input):
-        """Model inference with GP sampling during evaluation."""
-        if not self.model.training and self.model.gp_weighter is not None:
-            # Use GP sampling for evaluation
-            num_samples = getattr(self.cfg.TRAINER.ADAPTER, 'GP_NUM_MC_SAMPLES', 50)
-            return self.model.sample_forward(input, num_samples)
-        else:
-            return self.model(input)
-
-    def _backward_and_update(self, loss):
-        """Backward pass and optimizer step."""
-        self.optim.zero_grad()
-        if self.scaler:
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optim)
-            self.scaler.update()
-        else:
-            loss.backward()
-            self.optim.step()
-
-    def parse_batch_train(self, batch):
-        input_data = batch["img"]
-        labels = batch["label"]
-        input_data = input_data.to(self.device)
-        labels = labels.to(self.device)
-        return input_data, labels
-
-    def train(self):
-        """Training loop with feature extraction and evaluation."""
-        self.set_model_mode("eval")
-
-        # Feature extraction on test set
-        self.labels_test, output_test, self.features_test = self.extract_features(partition="test")
-        print("Zero-Shot accuracy on test: " + 
-              str(round(compute_accuracy(output_test.cuda(), self.labels_test.cuda())[0].item(), 2)))
-
-        # Feature extraction on training set
-        self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
-
-        # Run the actual training using the base class training loop
-        self.before_train()
-        for self.epoch in range(self.start_epoch, self.max_epoch):
-            self.before_epoch()
-            self.run_epoch()
-            self.after_epoch()
-        self.after_train()

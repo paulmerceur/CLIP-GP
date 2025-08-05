@@ -1,19 +1,19 @@
 """
-Main training script for CLIP-GP project.
-Phase 1 implementation with new configuration system.
+Main training script for CLIP-GP project - Phase 2.
+Complete removal of Dassl dependencies.
 """
 
 import torch
 from pathlib import Path
 
-# Import our new configuration and utilities
-from utils.config import parse_args_to_config, print_config
-from utils import setup_logger, set_random_seed
+# Import our custom utilities (no Dassl)
+from utils import (
+    parse_args_to_config, print_config, 
+    setup_logger, set_random_seed,
+    build_data_manager, build_trainer
+)
 
-# Import existing components (will be gradually replaced)
-from dassl.engine import build_trainer
-
-# Custom datasets (keep existing imports for now)
+# Import custom datasets and trainers
 import datasets.oxford_pets
 import datasets.oxford_flowers
 import datasets.fgvc_aircraft
@@ -33,85 +33,8 @@ import datasets.imagenet_r
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+# Import our trainer to register it
 import trainers.adapters
-
-
-def convert_config_to_dassl_format(config):
-    """
-    Temporary function to convert our new config format to Dassl format.
-    This will be removed in later phases.
-    """
-    from dassl.config import get_cfg_default
-    from yacs.config import CfgNode as CN
-    
-    cfg = get_cfg_default()
-    
-    # Add adapter configuration
-    cfg.TRAINER.NAME = config.trainer_name
-    cfg.TRAINER.ADAPTER = CN()
-    cfg.TRAINER.ADAPTER.INIT = config.adapter.init
-    cfg.TRAINER.ADAPTER.CONSTRAINT = config.adapter.constraint
-    cfg.TRAINER.ADAPTER.ENHANCED_BASE = config.adapter.enhanced_base
-    cfg.TRAINER.ADAPTER.PREC = config.adapter.prec
-    cfg.TRAINER.ADAPTER.NUM_TEMPLATES = config.adapter.num_templates
-    cfg.TRAINER.ADAPTER.USE_GP = config.adapter.use_gp
-    cfg.TRAINER.ADAPTER.GP_LR = config.adapter.gp_lr
-    cfg.TRAINER.ADAPTER.GP_BETA = config.adapter.gp_beta
-    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = config.adapter.gp_num_mc_samples
-    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = config.adapter.gp_kernel_type
-    cfg.TRAINER.ADAPTER.L2_LAMBDA = config.adapter.l2_lambda
-    cfg.TRAINER.ADAPTER.RES_L2_COEF = config.adapter.res_l2_coef
-    
-    # Model configuration
-    cfg.MODEL.BACKBONE.NAME = config.model.backbone_name
-    cfg.MODEL.HEAD.NAME = config.model.head_name
-    cfg.MODEL.INIT_WEIGHTS = config.model.init_weights
-    
-    # Dataset configuration
-    cfg.DATASET.NAME = config.dataset.name
-    cfg.DATASET.ROOT = config.dataset.root
-    cfg.DATASET.NUM_SHOTS = config.dataset.num_shots
-    cfg.DATASET.SUBSAMPLE_CLASSES = config.dataset.subsample_classes
-    if config.dataset.source_domains:
-        cfg.DATASET.SOURCE_DOMAINS = config.dataset.source_domains
-    if config.dataset.target_domains:
-        cfg.DATASET.TARGET_DOMAINS = config.dataset.target_domains
-    
-    # DataLoader configuration
-    cfg.DATALOADER.TRAIN_X.BATCH_SIZE = config.dataloader.batch_size_train
-    cfg.DATALOADER.TEST.BATCH_SIZE = config.dataloader.batch_size_test
-    cfg.DATALOADER.NUM_WORKERS = config.dataloader.num_workers
-    
-    # Input configuration
-    cfg.INPUT.SIZE = config.input.size
-    cfg.INPUT.INTERPOLATION = config.input.interpolation
-    cfg.INPUT.PIXEL_MEAN = list(config.input.pixel_mean)
-    cfg.INPUT.PIXEL_STD = list(config.input.pixel_std)
-    cfg.INPUT.TRANSFORMS = config.input.transforms
-    
-    # Optimization configuration
-    cfg.OPTIM.NAME = config.optim.name
-    cfg.OPTIM.LR = config.optim.lr
-    cfg.OPTIM.MAX_EPOCH = config.optim.max_epoch
-    cfg.OPTIM.LR_SCHEDULER = config.optim.lr_scheduler
-    cfg.OPTIM.WARMUP_EPOCH = config.optim.warmup_epoch
-    cfg.OPTIM.WARMUP_TYPE = config.optim.warmup_type
-    cfg.OPTIM.WARMUP_CONS_LR = config.optim.warmup_cons_lr
-    cfg.OPTIM.WEIGHT_DECAY = config.optim.weight_decay
-    cfg.OPTIM.MOMENTUM = config.optim.momentum
-    
-    # Training configuration
-    cfg.TRAIN.PRINT_FREQ = config.train.print_freq
-    
-    # Environment configuration
-    cfg.OUTPUT_DIR = config.output_dir
-    cfg.RESUME = config.resume
-    cfg.SEED = config.seed
-    cfg.USE_CUDA = config.use_cuda
-    cfg.VERBOSE = config.verbose
-    
-    cfg.freeze()
-    return cfg
 
 
 def print_args(config):
@@ -133,13 +56,13 @@ def print_args(config):
 
 
 def main():
-    """Main training function"""
+    """Main training function - Phase 2 implementation"""
     # Parse arguments using new configuration system
     config = parse_args_to_config()
     
     # Set up logging
     logger = setup_logger(config.output_dir)
-    logger.info("Starting CLIP-GP training with new configuration system")
+    logger.info("Starting CLIP-GP training - Phase 2 (No Dassl)")
     
     # Set random seed
     if config.seed >= 0:
@@ -158,19 +81,22 @@ def main():
     config_save_path = Path(config.output_dir) / "config.json"
     config_save_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # TEMPORARY: Convert to Dassl format for compatibility
-    # This will be removed in Phase 2 when we replace the trainer
-    logger.info("Converting configuration to Dassl format (temporary)")
-    dassl_cfg = convert_config_to_dassl_format(config)
+    # Build data manager
+    logger.info("Building dataset")
+    data_manager = build_data_manager(config)
     
-    # Build trainer using existing Dassl infrastructure
-    logger.info("Building trainer")
-    trainer = build_trainer(dassl_cfg)
+    # Build trainer using our custom infrastructure
+    logger.info(f"Loading trainer: {config.trainer_name}")
+    trainer = build_trainer(config, data_manager)
+    
+    # Check configuration
+    if hasattr(trainer, 'check_cfg'):
+        trainer.check_cfg(config)
     
     # Handle different execution modes
     if config.eval_only:
         logger.info("Running evaluation only")
-        trainer.load_model(config.model_dir, dassl_cfg, epoch=config.load_epoch)
+        trainer.load_model(config.model_dir, epoch=config.load_epoch)
         trainer.test()
         return
     
