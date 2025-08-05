@@ -1,121 +1,127 @@
 # CLIP‑GP
 
-> **Gaussian‑Process Weighted Template Adaptation for CLIP**  
+> **Gaussian‑Process Weighted Template Adaptation for CLIP**  
 
-> Paul Merceur ⋅ ÉTS Montréal
+> Paul Merceur ⋅ ÉTS Montréal
 
-CLIP‑GP extends the original **CLAP** repository with a *Gaussian‑Process (GP)*
-head that learns to **weight template embeddings** during few‑shot adaptation.
-Everything else—dataset loaders, training script, CLI—remains fully compatible
-with the upstream codebase.
+CLIP‑GP implements a Gaussian Process approach for few-shot adaptation of CLIP models.
+This cleaned-up version provides two methods for comparison:
+
+- **Baseline**: Multi-template adaptation with visual projection and L2 regularization
+- **GP Method**: Gaussian Process weighted template adaptation
+
+Both methods use visual projection for fair comparison.
 
 ---
 
-## Highlights
+## Quick Start
 
-* **Drop‑in replacement** for ZS‑LP / CLAP: enable GP weighting with a single
-  flag (`--use_gp`).
-* **Fast** cached text embeddings + batched variational inference keep the
-  overhead < 5 % w\.r.t. vanilla linear probing.
-* **Library first** core GP logic is implemented with
-  [GPyTorch](https://gpytorch.ai/) for robustness and readability.
+### Run Baseline Method
+```bash
+./scripts/run_baseline.sh baseline_exp 0.1
+```
+
+### Run GP Method  
+```bash
+./scripts/run_gp.sh gp_exp 0.1
+```
+
+### Run Both for Comparison
+```bash
+./scripts/run_comparison.sh comparison_exp 0.1
+```
+
+The third parameter (0.1) is the L2 regularization coefficient for visual projection.
 
 ---
 
 ## Installation
 
-1. **Dassl + PyTorch** – follow the
-   [Dassl.pytorch installation guide](https://github.com/KaiyangZhou/Dassl.pytorch#installation).
+1. **Dassl + PyTorch** – follow the [Dassl.pytorch installation guide](https://github.com/KaiyangZhou/Dassl.pytorch#installation).
 2. Activate the `dassl` conda env and run:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-   This installs the extra packages needed by CLIP and GPyTorch.
-3. Download the datasets listed in `DATASETS.md` (identical to CLAP).
-
-<details>
-<summary>GPU &amp; mixed‑precision notes</summary>
-
-* FP16/AMP are fully supported. 
-* Multi‑GPU training is unchanged—GP parameters live on the same device as the
-  adapter.
-
-</details>
+3. Download the datasets listed in `DATASETS.md`.
 
 ---
 
-## Usage
+## Configuration
 
-We reuse the original driver scripts—just pass an extra argument to enable the
-GP head.
+### Baseline (`configs/trainers/baseline.yaml`)
+- Uses 7 templates per class
+- Visual projection with L2 regularization  
+- Standard CLIP adaptation
 
-### (a) Zero‑shot‑initialised Linear Probe *(ZS‑LP)*
-
-```bash
-bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS none RN50
-```
-
-### (b) CLass‑adaptive Linear Probing *(CLAP)*
-
-```bash
-bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS l2 RN50
-```
-
-### (c) **CLIP‑GP** (this project)
-
-```bash
-bash scripts/adapt.sh 0 imagenet SGD_lr1e-1_B256_ep300 1 ZS l2 RN50 \
-    --use_gp true \
-    --gp_beta 0.3 --gp_lengthscale 1.0 --gp_num_mc_samples 5
-```
-
-Key new flags (all have sensible defaults):
-
-| Flag                                                 | Description                            |
-| ---------------------------------------------------- | -------------------------------------- |
-| `--use_gp`                                           | Enable the GP weighting module.        |
-| `--gp_beta`                                          | KL term weight in the ELBO.            |
-| `--gp_lengthscale`, `--gp_outputscale`, `--gp_noise` | Kernel hyper‑parameters.               |
-| `--gp_num_mc_samples`                                | # MC samples for prototype estimation. |
-
-### (d) Domain generalisation test
-
-```bash
-bash scripts/eval.sh 0 imagenet imagenetv2 SGD_lr1e-1_B256_ep300 1 ZS l2 RN50 --use_gp true
-```
+### GP Method (`configs/trainers/gp.yaml`)
+- Uses 7 templates per class
+- Gaussian Process weighting of templates
+- RBF kernel with auto-initialized length scale
+- Visual projection with L2 regularization
+- Separate learning rate for GP parameters (0.1)
+- KL weight (β = 0.001)
 
 ---
 
-## Repository layout
+## Manual Usage
+
+For custom experiments, you can run individual configurations:
+
+```bash
+python train.py \
+    --root /path/to/datasets \
+    --seed 1 \
+    --trainer ADAPTER \
+    --dataset-config-file configs/datasets/caltech101.yaml \
+    --config-file configs/trainers/baseline.yaml \
+    --output-dir output/test/caltech101/baseline/seed1 \
+    MODEL.BACKBONE.NAME RN50 \
+    DATASET.NUM_SHOTS 4 \
+    TRAINER.ADAPTER.L2_LAMBDA 0.1
+```
+
+Replace `baseline.yaml` with `gp.yaml` to run the GP method.
+
+---
+
+## Key Parameters
+
+- `L2_LAMBDA`: Visual projection regularization (tunable via scripts)
+- `GP_LR`: Learning rate for GP parameters (default: 0.1)
+- `GP_BETA`: KL divergence weight (default: 0.001)
+- `GP_NUM_MC_SAMPLES`: Monte Carlo samples for evaluation (default: 10)
+- `NUM_TEMPLATES`: Number of templates per class (default: 7)
+
+---
+
+## Analysis
+
+After running experiments, analyze results with:
+
+```bash
+python analyze_experiment.py <experiment_name>
+```
+
+This generates:
+- `<experiment_name>_summary.csv` - aggregated metrics
+- `plots/<dataset>_accuracy.png` - per-dataset visualizations
+
+---
+
+## Project Structure
 
 ```
-CLIP-GP/
-├── configs/                    # config files for easier setups
-├── datasets/                   # dataset helpers & templates
-├── gp_template_weighter.py     # new – GP module (GPyTorch)
 ├── trainers/
-│   └── adapters.py             # updated adapter with caching & GP support
-├── scripts/                    # same driver scripts + new GP flags
-└── README.md                   # you are here
+│   ├── adapters.py              # Unified baseline + GP implementation
+│   └── gp_template_weigher.py   # GP core logic
+├── configs/trainers/
+│   ├── baseline.yaml            # Baseline configuration
+│   └── gp.yaml                  # GP configuration  
+├── scripts/
+│   ├── run_baseline.sh          # Run baseline experiments
+│   ├── run_gp.sh                # Run GP experiments
+│   └── run_comparison.sh        # Run both methods
+└── analyze_experiment.py        # Results analysis
 ```
-
----
-
-## Acknowledgements
-
-CLIP‑GP builds on the excellent **CoOp**, **CLAP**, and **TaskRes** codebases.
-Huge thanks to their authors for open‑sourcing the groundwork.
-
----
-
-## License
-
-This repository inherits the MIT license of the original CLAP project.
-
----
-
-## Contact
-
-Questions or issues? Open a discussion or contact me at `paul.merceur.1@ens.etsmtl.ca`.

@@ -1,11 +1,11 @@
 import argparse
 import torch
 
-from dassl.utils import setup_logger, set_random_seed, collect_env_info
+from dassl.utils import setup_logger, set_random_seed
 from dassl.config import get_cfg_default
 from dassl.engine import build_trainer
 
-# custom
+# custom datasets
 import datasets.oxford_pets
 import datasets.oxford_flowers
 import datasets.fgvc_aircraft
@@ -17,7 +17,6 @@ import datasets.sun397
 import datasets.caltech101
 import datasets.ucf101
 import datasets.imagenet
-
 import datasets.imagenet_sketch
 import datasets.imagenetv2
 import datasets.imagenet_a
@@ -95,19 +94,14 @@ def extend_cfg(cfg):
     cfg.TRAINER.ADAPTER.PREC = "fp16"
     cfg.TRAINER.ADAPTER.NUM_TEMPLATES = 1
     
-    # GP-specific configuration variables (simplified)
+    # GP-specific configuration variables
     cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
-    cfg.TRAINER.ADAPTER.GP_LR = 1e-3  # learning rate for GP parameters
-    cfg.TRAINER.ADAPTER.GP_BETA = 0.05  # KL weight for ELBO loss
-    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 5  # number of Monte Carlo samples
-    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf", "cosine", or "linear"
-    cfg.TRAINER.ADAPTER.GP_W_REG_COEF = 0.0  # visual projection regularization
-    # Temperature (τ) used to scale GP template weights (soft-max). Lower τ → sharper weights.
-    cfg.TRAINER.ADAPTER.GP_TEMP = 1.0  # can be tuned or grid-searched
+    cfg.TRAINER.ADAPTER.GP_LR = 0.1  # learning rate for GP parameters
+    cfg.TRAINER.ADAPTER.GP_BETA = 0.001  # KL weight for ELBO loss
+    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 10  # number of Monte Carlo samples
+    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
+    cfg.TRAINER.ADAPTER.L2_LAMBDA = 100.0  # visual projection L2 regularization
     
-    # Visual projection configuration - allows baselines to use visual projection too
-    cfg.TRAINER.ADAPTER.USE_VISUAL_PROJ = False  # whether to use trainable visual projection (for fair comparison)
-
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATASET.NUM_SHOTS = 1
 
@@ -131,12 +125,6 @@ def setup_cfg(args):
 
     # 4. From optional input arguments
     cfg.merge_from_list(args.opts)
-
-    # Fix to avoid miss-alignment in cache samples during image augmentations
-    if "TipA" in cfg.TRAINER.ADAPTER.INIT:
-        cfg.DATALOADER.TRAIN_X.SAMPLER = "SequentialSampler"
-    else:
-        cfg.DATALOADER.TRAIN_X.SAMPLER = "RandomSampler"
 
     cfg.freeze()
 
@@ -166,7 +154,6 @@ def main(args):
 
     if not args.no_train:
         trainer.train()
-        trainer.test()
 
 
 if __name__ == "__main__":

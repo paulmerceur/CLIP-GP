@@ -31,10 +31,10 @@ TRAINER:
     CONSTRAINT: none  
     PREC: fp16
     NUM_TEMPLATES: 7
-    # GP-specific configuration
+    # GP configuration
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
-    GP_LR: 0.05
-    GP_BETA: 0.05
-    GP_W_REG_COEF: 0.1
+    GP_LR: 0.1
+    GP_BETA: 0.001
+    L2_LAMBDA: 100.0

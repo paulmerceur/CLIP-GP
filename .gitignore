@@ -1,5 +1,6 @@
 # IDE and editor files
 .idea/
+.vscode/
 .cursor/
 .cursorignore
 pyrightconfig.json
