@@ -1,11 +1,19 @@
-import argparse
-import torch
+"""
+Main training script for CLIP-GP project.
+Phase 1 implementation with new configuration system.
+"""
 
-from dassl.utils import setup_logger, set_random_seed
-from dassl.config import get_cfg_default
+import torch
+from pathlib import Path
+
+# Import our new configuration and utilities
+from utils.config import parse_args_to_config, print_config
+from utils import setup_logger, set_random_seed
+
+# Import existing components (will be gradually replaced)
 from dassl.engine import build_trainer
 
-# custom datasets
+# Custom datasets (keep existing imports for now)
 import datasets.oxford_pets
 import datasets.oxford_flowers
 import datasets.fgvc_aircraft
@@ -28,154 +36,151 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 import trainers.adapters
 
 
-def print_args(args, cfg):
-    print("***************")
-    print("** Arguments **")
-    print("***************")
-    optkeys = list(args.__dict__.keys())
-    optkeys.sort()
-    for key in optkeys:
-        print("{}: {}".format(key, args.__dict__[key]))
-    print("************")
-    print("** Config **")
-    print("************")
-    print(cfg)
-
-
-def reset_cfg(cfg, args):
-    if args.root:
-        cfg.DATASET.ROOT = args.root
-
-    if args.output_dir:
-        cfg.OUTPUT_DIR = args.output_dir
-
-    if args.resume:
-        cfg.RESUME = args.resume
-
-    if args.seed:
-        cfg.SEED = args.seed
-
-    if args.source_domains:
-        cfg.DATASET.SOURCE_DOMAINS = args.source_domains
-
-    if args.target_domains:
-        cfg.DATASET.TARGET_DOMAINS = args.target_domains
-
-    if args.transforms:
-        cfg.INPUT.TRANSFORMS = args.transforms
-
-    if args.trainer:
-        cfg.TRAINER.NAME = args.trainer
-
-    if args.backbone:
-        cfg.MODEL.BACKBONE.NAME = args.backbone
-
-    if args.head:
-        cfg.MODEL.HEAD.NAME = args.head
-
-
-def extend_cfg(cfg):
+def convert_config_to_dassl_format(config):
     """
-    Add new config variables.
-
-    E.g.
-        from yacs.config import CfgNode as CN
-        cfg.TRAINER.MY_MODEL = CN()
-        cfg.TRAINER.MY_MODEL.PARAM_A = 1.
-        cfg.TRAINER.MY_MODEL.PARAM_B = 0.5
-        cfg.TRAINER.MY_MODEL.PARAM_C = False
+    Temporary function to convert our new config format to Dassl format.
+    This will be removed in later phases.
     """
+    from dassl.config import get_cfg_default
     from yacs.config import CfgNode as CN
-
-    cfg.TRAINER.ADAPTER = CN()
-    cfg.TRAINER.ADAPTER.INIT = "ZS"
-    cfg.TRAINER.ADAPTER.CONSTRAINT = "l2"  # none, l2
-    cfg.TRAINER.ADAPTER.ENHANCED_BASE = "none"  # none, enhanced (to use them you must download enhanced base from TaskRes).
-    cfg.TRAINER.ADAPTER.PREC = "fp16"
-    cfg.TRAINER.ADAPTER.NUM_TEMPLATES = 1
     
-    # GP-specific configuration variables
-    cfg.TRAINER.ADAPTER.USE_GP = False  # whether to use GP weighting for templates
-    cfg.TRAINER.ADAPTER.GP_LR = 0.1  # learning rate for GP parameters
-    cfg.TRAINER.ADAPTER.GP_BETA = 0.001  # KL weight for ELBO loss
-    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = 10  # number of Monte Carlo samples
-    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = "rbf"  # "rbf" or "linear"
-    cfg.TRAINER.ADAPTER.L2_LAMBDA = 100.0  # visual projection L2 regularization
-    
-    cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
-    cfg.DATASET.NUM_SHOTS = 1
-
-    cfg.TRAINER.ADAPTER.RES_L2_COEF = 1e-4
-
-
-def setup_cfg(args):
     cfg = get_cfg_default()
-    extend_cfg(cfg)
-
-    # 1. From the dataset config file
-    if args.dataset_config_file:
-        cfg.merge_from_file(args.dataset_config_file)
-
-    # 2. From the method config file
-    if args.config_file:
-        cfg.merge_from_file(args.config_file)
-
-    # 3. From input arguments
-    reset_cfg(cfg, args)
-
-    # 4. From optional input arguments
-    cfg.merge_from_list(args.opts)
-
+    
+    # Add adapter configuration
+    cfg.TRAINER.NAME = config.trainer_name
+    cfg.TRAINER.ADAPTER = CN()
+    cfg.TRAINER.ADAPTER.INIT = config.adapter.init
+    cfg.TRAINER.ADAPTER.CONSTRAINT = config.adapter.constraint
+    cfg.TRAINER.ADAPTER.ENHANCED_BASE = config.adapter.enhanced_base
+    cfg.TRAINER.ADAPTER.PREC = config.adapter.prec
+    cfg.TRAINER.ADAPTER.NUM_TEMPLATES = config.adapter.num_templates
+    cfg.TRAINER.ADAPTER.USE_GP = config.adapter.use_gp
+    cfg.TRAINER.ADAPTER.GP_LR = config.adapter.gp_lr
+    cfg.TRAINER.ADAPTER.GP_BETA = config.adapter.gp_beta
+    cfg.TRAINER.ADAPTER.GP_NUM_MC_SAMPLES = config.adapter.gp_num_mc_samples
+    cfg.TRAINER.ADAPTER.GP_KERNEL_TYPE = config.adapter.gp_kernel_type
+    cfg.TRAINER.ADAPTER.L2_LAMBDA = config.adapter.l2_lambda
+    cfg.TRAINER.ADAPTER.RES_L2_COEF = config.adapter.res_l2_coef
+    
+    # Model configuration
+    cfg.MODEL.BACKBONE.NAME = config.model.backbone_name
+    cfg.MODEL.HEAD.NAME = config.model.head_name
+    cfg.MODEL.INIT_WEIGHTS = config.model.init_weights
+    
+    # Dataset configuration
+    cfg.DATASET.NAME = config.dataset.name
+    cfg.DATASET.ROOT = config.dataset.root
+    cfg.DATASET.NUM_SHOTS = config.dataset.num_shots
+    cfg.DATASET.SUBSAMPLE_CLASSES = config.dataset.subsample_classes
+    if config.dataset.source_domains:
+        cfg.DATASET.SOURCE_DOMAINS = config.dataset.source_domains
+    if config.dataset.target_domains:
+        cfg.DATASET.TARGET_DOMAINS = config.dataset.target_domains
+    
+    # DataLoader configuration
+    cfg.DATALOADER.TRAIN_X.BATCH_SIZE = config.dataloader.batch_size_train
+    cfg.DATALOADER.TEST.BATCH_SIZE = config.dataloader.batch_size_test
+    cfg.DATALOADER.NUM_WORKERS = config.dataloader.num_workers
+    
+    # Input configuration
+    cfg.INPUT.SIZE = config.input.size
+    cfg.INPUT.INTERPOLATION = config.input.interpolation
+    cfg.INPUT.PIXEL_MEAN = list(config.input.pixel_mean)
+    cfg.INPUT.PIXEL_STD = list(config.input.pixel_std)
+    cfg.INPUT.TRANSFORMS = config.input.transforms
+    
+    # Optimization configuration
+    cfg.OPTIM.NAME = config.optim.name
+    cfg.OPTIM.LR = config.optim.lr
+    cfg.OPTIM.MAX_EPOCH = config.optim.max_epoch
+    cfg.OPTIM.LR_SCHEDULER = config.optim.lr_scheduler
+    cfg.OPTIM.WARMUP_EPOCH = config.optim.warmup_epoch
+    cfg.OPTIM.WARMUP_TYPE = config.optim.warmup_type
+    cfg.OPTIM.WARMUP_CONS_LR = config.optim.warmup_cons_lr
+    cfg.OPTIM.WEIGHT_DECAY = config.optim.weight_decay
+    cfg.OPTIM.MOMENTUM = config.optim.momentum
+    
+    # Training configuration
+    cfg.TRAIN.PRINT_FREQ = config.train.print_freq
+    
+    # Environment configuration
+    cfg.OUTPUT_DIR = config.output_dir
+    cfg.RESUME = config.resume
+    cfg.SEED = config.seed
+    cfg.USE_CUDA = config.use_cuda
+    cfg.VERBOSE = config.verbose
+    
     cfg.freeze()
-
     return cfg
 
 
-def main(args):
-    cfg = setup_cfg(args)
-    if cfg.SEED >= 0:
-        print("Setting fixed seed: {}".format(cfg.SEED))
-        set_random_seed(cfg.SEED)
-    setup_logger(cfg.OUTPUT_DIR)
+def print_args(config):
+    """Print configuration in a readable format"""
+    print("***************")
+    print("** Arguments **")
+    print("***************")
+    
+    # Print key arguments
+    print(f"dataset: {config.dataset.name}")
+    print(f"shots: {config.dataset.num_shots}")
+    print(f"backbone: {config.model.backbone_name}")
+    print(f"use_gp: {config.adapter.use_gp}")
+    print(f"num_templates: {config.adapter.num_templates}")
+    print(f"lr: {config.optim.lr}")
+    print(f"epochs: {config.optim.max_epoch}")
+    print(f"output_dir: {config.output_dir}")
+    print(f"seed: {config.seed}")
 
-    if torch.cuda.is_available() and cfg.USE_CUDA:
+
+def main():
+    """Main training function"""
+    # Parse arguments using new configuration system
+    config = parse_args_to_config()
+    
+    # Set up logging
+    logger = setup_logger(config.output_dir)
+    logger.info("Starting CLIP-GP training with new configuration system")
+    
+    # Set random seed
+    if config.seed >= 0:
+        set_random_seed(config.seed)
+    
+    # Set up CUDA
+    if torch.cuda.is_available() and config.use_cuda:
         torch.backends.cudnn.benchmark = True
-
-    print_args(args, cfg)
-    #print("Collecting env info ...")
-    #print("** System info **\n{}\n".format(collect_env_info()))
-
-    trainer = build_trainer(cfg)
-
-    if args.eval_only:
-        trainer.load_model(args.model_dir, cfg, epoch=args.load_epoch)
+        logger.info(f"Using CUDA with {torch.cuda.device_count()} GPUs")
+    
+    # Print configuration
+    print_args(config)
+    print_config(config)
+    
+    # Save configuration to output directory
+    config_save_path = Path(config.output_dir) / "config.json"
+    config_save_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # TEMPORARY: Convert to Dassl format for compatibility
+    # This will be removed in Phase 2 when we replace the trainer
+    logger.info("Converting configuration to Dassl format (temporary)")
+    dassl_cfg = convert_config_to_dassl_format(config)
+    
+    # Build trainer using existing Dassl infrastructure
+    logger.info("Building trainer")
+    trainer = build_trainer(dassl_cfg)
+    
+    # Handle different execution modes
+    if config.eval_only:
+        logger.info("Running evaluation only")
+        trainer.load_model(config.model_dir, dassl_cfg, epoch=config.load_epoch)
         trainer.test()
         return
-
-    if not args.no_train:
+    
+    if not config.no_train:
+        logger.info("Starting training")
         trainer.train()
+        logger.info("Training completed")
+    
+    logger.info("CLIP-GP training finished successfully")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=str, default="/scratch/pmerceur/data", help="path to dataset")
-    parser.add_argument("--output-dir", type=str, default="output/default_experiment", help="output directory")
-    parser.add_argument("--resume", type=str, default="", help="checkpoint directory (from which the training resumes)")
-    parser.add_argument("--seed", type=int, default=1, help="only positive value enables a fixed seed")
-    parser.add_argument("--source-domains", type=str, nargs="+", help="source domains for DA/DG")
-    parser.add_argument("--target-domains", type=str, nargs="+", help="target domains for DA/DG")
-    parser.add_argument("--transforms", type=str, nargs="+", help="data augmentation methods")
-    parser.add_argument("--config-file", type=str, default="configs/trainers/SGD_lr1e-1_B256_ep300.yaml", help="path to config file")
-    parser.add_argument("--dataset-config-file", type=str, default="configs/datasets/caltech101.yaml", help="path to config file for dataset setup")
-    parser.add_argument("--trainer", type=str, default="ADAPTER", help="name of trainer")
-    parser.add_argument("--backbone", type=str, default="RN50", help="name of CNN backbone")
-    parser.add_argument("--head", type=str, default="", help="name of head")
-    parser.add_argument("--eval-only", action="store_true", help="evaluation only")
-    parser.add_argument("--model-dir", type=str, default="", help="load model from this directory for eval-only mode")
-    parser.add_argument("--load-epoch", type=int, help="load model weights at this epoch for evaluation")
-    parser.add_argument("--no-train", action="store_true", help="do not call trainer.train()")
-    parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="modify config options using the command-line")
-    parser.add_argument("--enhanced-base", type=str, default="none", help="path to enhanced base classifier weight")   # "none" means without using enhanced base
-    
-    args = parser.parse_args()
-    main(args)
+    main()

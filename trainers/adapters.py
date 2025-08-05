@@ -448,6 +448,7 @@ class ADAPTER(TrainerXCostume):
         self.model.to(self.device)
         self.model = self.model.float()
         
+            
         # Setup optimizer with different learning rates for GP
         if cfg.TRAINER.ADAPTER.USE_GP and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
@@ -462,8 +463,8 @@ class ADAPTER(TrainerXCostume):
             param_groups = [
                 {
                     'params': base_params,
-                    'lr': cfg.OPTIM.LR,
-                    'weight_decay': getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0)
+                    'lr': float(cfg.OPTIM.LR),
+                    'weight_decay': float(getattr(cfg.OPTIM, 'WEIGHT_DECAY', 0.0))
                 },
                 {
                     'params': gp_params,
@@ -474,7 +475,20 @@ class ADAPTER(TrainerXCostume):
 
             optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
             BaseOptim = optim_map.get(cfg.OPTIM.NAME.lower(), torch.optim.SGD)
-            self.optim = BaseOptim(param_groups)
+            
+            # Add SGD-specific parameters for explicit control
+            if cfg.OPTIM.NAME.lower() == "sgd":
+                self.optim = BaseOptim(param_groups, momentum=float(cfg.OPTIM.MOMENTUM))
+            else:
+                self.optim = BaseOptim(param_groups)
+            
+            # Create scheduler manually for GP case to avoid Dassl's scheduler issues
+            if cfg.OPTIM.LR_SCHEDULER.lower() == "cosine":
+                from torch.optim.lr_scheduler import CosineAnnealingLR
+                self.sched = CosineAnnealingLR(self.optim, T_max=cfg.OPTIM.MAX_EPOCH)
+            else:
+                # Default: no scheduler
+                self.sched = None
         else:
             # Single parameter group for baseline
             baseline_params = []
@@ -484,8 +498,8 @@ class ADAPTER(TrainerXCostume):
                 baseline_params.append(self.model.logit_scale)
             
             self.optim = build_optimizer(baseline_params, cfg.OPTIM)
+            self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
             
-        self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("adapter", self.model.adapter, self.optim, self.sched)
         self.scaler = GradScaler() if cfg.TRAINER.ADAPTER.PREC == "amp" else None
 

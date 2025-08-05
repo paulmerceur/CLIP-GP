@@ -31,7 +31,7 @@ echo ""
 for SEED in "${SEEDS[@]}"; do
     for DATASET in "${DATASETS[@]}"; do
         for SHOT in "${SHOTS[@]}"; do
-            DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}/seed${SEED}
+            DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}_${SHOT}shots/seed${SEED}
             if [ -d "$DIR" ]; then
                 echo "Oops! The results exist at ${DIR} (so skip this job)"
                 continue
