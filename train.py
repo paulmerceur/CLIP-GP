@@ -1,19 +1,18 @@
 """
-Main training script for CLIP-GP project - Phase 2.
-Complete removal of Dassl dependencies.
+Main training script for CLIP-GP.
 """
 
 import torch
 from pathlib import Path
 
-# Import our custom utilities (no Dassl)
+# Import custom utilities
 from utils import (
     parse_args_to_config, print_config, 
     setup_logger, set_random_seed,
     build_data_manager, build_trainer
 )
 
-# Import custom datasets and trainers
+# Import datasets and trainers
 import datasets.oxford_pets
 import datasets.oxford_flowers
 import datasets.fgvc_aircraft
@@ -33,7 +32,7 @@ import datasets.imagenet_r
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# Import our trainer to register it
+# Import trainer to register it
 import trainers.adapters
 
 
@@ -56,13 +55,13 @@ def print_args(config):
 
 
 def main():
-    """Main training function - Phase 2 implementation"""
+    """Main training function"""
     # Parse arguments using new configuration system
     config = parse_args_to_config()
     
     # Set up logging
     logger = setup_logger(config.output_dir)
-    logger.info("Starting CLIP-GP training - Phase 2 (No Dassl)")
+    logger.info("Starting CLIP-GP training")
     
     # Set random seed
     if config.seed >= 0:
@@ -85,13 +84,9 @@ def main():
     logger.info("Building dataset")
     data_manager = build_data_manager(config)
     
-    # Build trainer using our custom infrastructure
+    # Build trainer
     logger.info(f"Loading trainer: {config.trainer_name}")
     trainer = build_trainer(config, data_manager)
-    
-    # Check configuration
-    if hasattr(trainer, 'check_cfg'):
-        trainer.check_cfg(config)
     
     # Handle different execution modes
     if config.eval_only:

@@ -1,6 +1,5 @@
 """
-Logging utilities for CLIP-GP project.
-Replaces Dassl's logging functionality.
+Logging utilities for CLIP-GP.
 """
 
 import logging

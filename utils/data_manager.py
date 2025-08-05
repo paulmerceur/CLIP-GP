@@ -1,7 +1,5 @@
 """
-Simple data manager for CLIP-GP project.
-Replaces Dassl's DataManager with a lightweight implementation.
-Phase 3: Complete Dassl removal.
+Simple data manager for CLIP-GP.
 """
 
 import torch
@@ -15,7 +13,7 @@ from .dataset_base import build_dataset, TorchDatasetWrapper
 
 
 class SimpleDataManager:
-    """Lightweight data manager replacing Dassl's DataManager"""
+    """Lightweight data manager"""
     
     def __init__(self, config):
         """Initialize data manager with config"""

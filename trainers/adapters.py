@@ -364,7 +364,7 @@ class ADAPTER(BaseTrainer):
             else:
                 self.optim = BaseOptim(param_groups)
             
-            # Create scheduler manually for GP case to avoid Dassl's scheduler issues
+            # Create scheduler manually for GP case
             if config.optim.lr_scheduler.lower() == "cosine":
                 from torch.optim.lr_scheduler import CosineAnnealingLR
                 self.sched = CosineAnnealingLR(self.optim, T_max=config.optim.max_epoch)
@@ -379,11 +379,10 @@ class ADAPTER(BaseTrainer):
             if self.model.logit_scale.requires_grad:
                 baseline_params.append(self.model.logit_scale)
             
-            # Use utils optimization functions instead of Dassl
+            # Use utils optimization functions
             self.optim = build_optimizer(baseline_params, config.optim)
             self.sched = build_lr_scheduler(self.optim, config.optim)
             
-        # Note: We don't use register_model anymore since we're not using Dassl's base trainer
         self.scaler = GradScaler() if config.adapter.prec == "amp" else None
 
     def forward_backward(self, batch):

@@ -1,6 +1,5 @@
 """
-Reproducibility utilities for CLIP-GP project.
-Replaces Dassl's random seed functionality.
+Reproducibility utilities for CLIP-GP.
 """
 
 import random

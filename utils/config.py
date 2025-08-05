@@ -1,6 +1,5 @@
 """
-Configuration system for CLIP-GP project.
-Replaces Dassl's YACS-based configuration with type-safe dataclasses.
+Configuration system for CLIP-GP.
 """
 
 from dataclasses import dataclass, field
@@ -264,7 +263,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--enhanced-base", type=str, default="none",
                        help="Enhanced base classifier weight")
     
-    # Additional config options (like Dassl's opts)
+    # Additional config options
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER,
                        help="Modify config options using command-line")
     
@@ -332,7 +331,7 @@ def parse_args_to_config() -> Config:
     if args.config_file:
         merge_config_from_file(config, args.config_file)
     
-    # Process additional opts (similar to Dassl's merge_from_list)
+    # Process additional opts
     if args.opts:
         _merge_from_list(config, args.opts)
     
@@ -437,7 +436,7 @@ def _print_config_recursive(config, prefix: str) -> None:
 
 # Convenience function for backward compatibility
 def get_cfg_default() -> Config:
-    """Get default configuration (replaces Dassl's get_cfg_default)"""
+    """Get default configuration"""
     return Config()
 
 

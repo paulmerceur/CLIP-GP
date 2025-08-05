@@ -1,8 +1,3 @@
-"""
-Custom dataset implementations for CLIP-GP project.
-Phase 3: Transitioning away from Dassl dependencies.
-"""
-
 # Import all dataset classes to register them
 from . import caltech101
 from . import oxford_pets

@@ -25,7 +25,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Handle both old cfg format and new config format
         def get_config_value(key, default):
             if hasattr(cfg, 'TRAINER'):
-                # Old Dassl config format
+                # Old config format
                 return getattr(cfg.TRAINER.ADAPTER, key, default)
             else:
                 # New config format - convert key to lowercase format

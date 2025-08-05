@@ -1,6 +1,5 @@
 """
-Checkpoint utilities for CLIP-GP project.
-Replaces Dassl's checkpoint functionality.
+Checkpoint utilities for CLIP-GP.
 """
 
 import torch

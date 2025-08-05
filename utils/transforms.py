@@ -1,6 +1,5 @@
 """
-Image transforms module - replaces dassl.data.transforms
-Phase 3: Complete Dassl removal.
+Image transforms module for CLIP-GP.
 """
 
 import torchvision.transforms as T
@@ -8,7 +7,7 @@ from typing import List, Tuple
 
 
 def build_transform(config, is_train: bool = False):
-    """Build image transforms from config - replaces dassl.data.transforms.build_transform"""
+    """Build image transforms from config"""
     
     if is_train:
         transforms = _build_train_transform(config)

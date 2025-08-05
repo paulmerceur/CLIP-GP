@@ -1,6 +1,5 @@
 """
-Trainer registry for CLIP-GP project.
-Replaces Dassl's trainer registry with a simple implementation.
+Trainer registry for CLIP-GP.
 """
 
 from typing import Dict, Type, Any

@@ -1,6 +1,5 @@
 """
-Base dataset classes to replace Dassl dataset infrastructure.
-Phase 3: Complete Dassl removal.
+Base dataset classes for CLIP-GP.
 """
 
 import os
@@ -18,7 +17,7 @@ from PIL import Image
 
 @dataclass
 class Datum:
-    """Data sample class - replaces dassl.data.datasets.Datum"""
+    """Data sample class"""
     impath: str
     label: int
     domain: str = ""
@@ -32,7 +31,7 @@ class Datum:
 
 class DatasetBase:
     """
-    Base dataset class - replaces dassl.data.datasets.DatasetBase
+    Base dataset class
     """
     
     dataset_dir = ""
@@ -185,7 +184,7 @@ class DatasetBase:
 
 class TorchDatasetWrapper(Dataset):
     """
-    PyTorch Dataset wrapper - replaces dassl.data.data_manager.DatasetWrapper
+    PyTorch Dataset wrapper
     """
     
     def __init__(self, data_source: List[Datum], transform=None, is_train: bool = False):
@@ -216,7 +215,7 @@ class TorchDatasetWrapper(Dataset):
 
 
 def listdir_nohidden(path: str, sort: bool = True) -> List[str]:
-    """List directory contents excluding hidden files - replaces dassl.utils.listdir_nohidden"""
+    """List directory contents excluding hidden files"""
     items = [f for f in os.listdir(path) if not f.startswith('.')]
     if sort:
         items.sort()
@@ -224,7 +223,7 @@ def listdir_nohidden(path: str, sort: bool = True) -> List[str]:
 
 
 def mkdir_if_missing(dirname: str) -> None:
-    """Create directory if it doesn't exist - replaces dassl.utils.mkdir_if_missing"""
+    """Create directory if it doesn't exist"""
     if not os.path.exists(dirname):
         os.makedirs(dirname)
 
@@ -241,7 +240,7 @@ def register_dataset(name: str):
 
 
 def build_dataset(config) -> DatasetBase:
-    """Build dataset from config - replaces dassl.data.datasets.build_dataset"""
+    """Build dataset from config"""
     dataset_name = config.dataset.name
     
     if dataset_name not in _DATASET_REGISTRY:

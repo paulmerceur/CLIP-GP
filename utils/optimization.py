@@ -1,6 +1,5 @@
 """
-Optimization utilities for CLIP-GP project.
-Replaces Dassl's optimization functionality.
+Optimization utilities for CLIP-GP.
 """
 
 import torch
@@ -134,7 +133,6 @@ def build_lr_scheduler(optimizer: torch.optim.Optimizer, config) -> Any:
 class WarmupWrapper:
     """
     Wrapper to add warmup to any scheduler.
-    Replaces Dassl's warmup functionality.
     """
     
     def __init__(

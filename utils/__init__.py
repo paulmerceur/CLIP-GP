@@ -1,7 +1,5 @@
 """
-Utility functions for CLIP-GP project.
-Replaces commonly used functions from Dassl.
-Phase 3: Complete Dassl removal.
+Utility functions for CLIP-GP.
 """
 
 from .logging import setup_logger

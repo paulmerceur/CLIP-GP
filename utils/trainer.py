@@ -1,5 +1,5 @@
 """
-Base trainer implementation for CLIP-GP project.
+Base trainer implementation for CLIP-GP.
 """
 
 import os
@@ -17,7 +17,7 @@ from utils.metrics import compute_accuracy
 
 
 class BaseTrainer:
-    """Custom base trainer replacing Dassl's SimpleTrainer"""
+    """Custom base trainer"""
     
     def __init__(self, config, dataset_manager):
         """Initialize trainer with config and dataset manager"""
@@ -128,7 +128,7 @@ class BaseTrainer:
         if self.model is None or self.optim is None:
             return
             
-        save_dir = Path(output_dir) / "adapter"  # Match Dassl structure
+        save_dir = Path(output_dir) / "adapter"
         save_dir.mkdir(parents=True, exist_ok=True)
         
         # Add epoch to filename if it's the default name

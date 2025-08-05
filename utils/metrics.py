@@ -1,6 +1,5 @@
 """
-Evaluation metrics for CLIP-GP project.
-Replaces Dassl's metrics functionality.
+Evaluation metrics for CLIP-GP.
 """
 
 import torch
@@ -62,7 +61,6 @@ def compute_macro_f1(logits: torch.Tensor, labels: torch.Tensor) -> float:
 class AverageMeter:
     """
     Computes and stores the average and current value.
-    Replaces Dassl's AverageMeter.
     """
     
     def __init__(self):
@@ -92,7 +90,6 @@ class AverageMeter:
 class MetricMeter:
     """
     Tracks multiple metrics with running averages.
-    Replaces Dassl's MetricMeter.
     """
     
     def __init__(self, delimiter: str = " "):
