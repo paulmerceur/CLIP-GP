@@ -2,8 +2,7 @@ import os
 import pickle
 import re
 
-from dassl.data.datasets import DATASET_REGISTRY, Datum, DatasetBase
-from dassl.utils import mkdir_if_missing
+from utils.dataset_base import DATASET_REGISTRY, Datum, DatasetBase, mkdir_if_missing, listdir_nohidden
 
 from .oxford_pets import OxfordPets
 
@@ -13,8 +12,8 @@ class UCF101(DatasetBase):
 
     dataset_dir = "ucf101"
 
-    def __init__(self, cfg):
-        root = os.path.abspath(os.path.expanduser(cfg.DATASET.ROOT))
+    def __init__(self, config):
+        root = os.path.abspath(os.path.expanduser(config.dataset.root))
         self.dataset_dir = os.path.join(root, self.dataset_dir)
         self.image_dir = os.path.join(self.dataset_dir, "UCF-101-midframes")
         self.split_path = os.path.join(self.dataset_dir, "split_zhou_UCF101.json")
@@ -38,9 +37,9 @@ class UCF101(DatasetBase):
             train, val = OxfordPets.split_trainval(trainval)
             OxfordPets.save_split(train, val, test, self.split_path, self.image_dir)
 
-        num_shots = cfg.DATASET.NUM_SHOTS
+        num_shots = config.dataset.num_shots
         if num_shots >= 1:
-            seed = cfg.SEED
+            seed = config.seed
             preprocessed = os.path.join(self.split_fewshot_dir, f"shot_{num_shots}-seed_{seed}.pkl")
             
             if os.path.exists(preprocessed):
@@ -56,7 +55,7 @@ class UCF101(DatasetBase):
                 with open(preprocessed, "wb") as file:
                     pickle.dump(data, file, protocol=pickle.HIGHEST_PROTOCOL)
 
-        subsample = cfg.DATASET.SUBSAMPLE_CLASSES
+        subsample = getattr(config.dataset, 'subsample_classes', 'all')
         train, val, test = OxfordPets.subsample_classes(train, val, test, subsample=subsample)
 
         super().__init__(train_x=train, val=val, test=test)

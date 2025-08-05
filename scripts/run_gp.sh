@@ -20,7 +20,7 @@ GPU_ID=${3:-0}  # Default to 0 if not provided
 #DATASETS=(caltech101 dtd eurosat fgvc_aircraft food101 oxford_flowers oxford_pets sun397 ucf101 stanford_cars)
 SEEDS=(1)
 DATASETS=(caltech101)
-SHOTS=(1 4 8 16)
+SHOTS=(1)
 CONFIG="gp"
 
 echo "Running GP experiments..."

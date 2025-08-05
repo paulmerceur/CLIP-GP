@@ -1,6 +1,7 @@
 """
 Utility functions for CLIP-GP project.
 Replaces commonly used functions from Dassl.
+Phase 3: Complete Dassl removal.
 """
 
 from .logging import setup_logger
@@ -12,6 +13,8 @@ from .config import parse_args_to_config, print_config, Config
 from .trainer import BaseTrainer
 from .data_manager import build_data_manager
 from .trainer_registry import build_trainer
+from .dataset_base import Datum, DatasetBase, DATASET_REGISTRY, build_dataset
+from .transforms import build_transform
 
 __all__ = [
     'setup_logger',
@@ -28,4 +31,9 @@ __all__ = [
     'BaseTrainer',
     'build_data_manager',
     'build_trainer',
+    'Datum',
+    'DatasetBase', 
+    'DATASET_REGISTRY',
+    'build_dataset',
+    'build_transform',
 ]

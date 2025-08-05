@@ -1,7 +1,6 @@
 import os
 
-from dassl.data.datasets import DATASET_REGISTRY, Datum, DatasetBase
-from dassl.utils import listdir_nohidden
+from utils.dataset_base import DATASET_REGISTRY, Datum, DatasetBase, mkdir_if_missing, listdir_nohidden
 
 from .imagenet import ImageNet
 
@@ -15,8 +14,8 @@ class ImageNetV2(DatasetBase):
 
     dataset_dir = "imagenetv2"
 
-    def __init__(self, cfg):
-        root = os.path.abspath(os.path.expanduser(cfg.DATASET.ROOT))
+    def __init__(self, config):
+        root = os.path.abspath(os.path.expanduser(config.dataset.root))
         self.dataset_dir = os.path.join(root, self.dataset_dir)
         image_dir = "imagenetv2-matched-frequency-format-val"
         self.image_dir = os.path.join(self.dataset_dir, image_dir)

@@ -1,6 +1,7 @@
 """
 Simple data manager for CLIP-GP project.
 Replaces Dassl's DataManager with a lightweight implementation.
+Phase 3: Complete Dassl removal.
 """
 
 import torch
@@ -8,11 +9,9 @@ from torch.utils.data import DataLoader
 from typing import Optional
 from pathlib import Path
 
-# Import transforms 
-from dassl.data.transforms import build_transform
-
-# Import existing dataset building functionality 
-from dassl.data.datasets import build_dataset
+# Import our custom transforms and dataset utilities
+from .transforms import build_transform
+from .dataset_base import build_dataset, TorchDatasetWrapper
 
 
 class SimpleDataManager:
@@ -22,15 +21,12 @@ class SimpleDataManager:
         """Initialize data manager with config"""
         self.config = config
         
-        # Convert config to Dassl format for dataset building
-        dassl_cfg = self._config_to_dassl_format(config)
-        
-        # Build dataset using existing Dassl infrastructure
-        self.dataset = build_dataset(dassl_cfg)
+        # Build dataset using our custom infrastructure  
+        self.dataset = build_dataset(config)
         
         # Build transforms
-        self.tfm_train = build_transform(dassl_cfg, is_train=True)
-        self.tfm_test = build_transform(dassl_cfg, is_train=False)
+        self.tfm_train = build_transform(config, is_train=True)
+        self.tfm_test = build_transform(config, is_train=False)
         
         # Build data loaders
         self.train_loader_x = self._build_data_loader(
@@ -65,56 +61,13 @@ class SimpleDataManager:
         # Print dataset information
         self._print_dataset_info()
     
-    def _config_to_dassl_format(self, config):
-        """Convert our config to Dassl format for compatibility"""
-        from dassl.config import get_cfg_default
-        from yacs.config import CfgNode as CN
-        
-        cfg = get_cfg_default()
-        
-        # Dataset configuration
-        cfg.DATASET.NAME = config.dataset.name
-        cfg.DATASET.ROOT = config.dataset.root
-        cfg.DATASET.NUM_SHOTS = config.dataset.num_shots
-        cfg.DATASET.SUBSAMPLE_CLASSES = config.dataset.subsample_classes
-        
-        if config.dataset.source_domains:
-            cfg.DATASET.SOURCE_DOMAINS = config.dataset.source_domains
-        if config.dataset.target_domains:
-            cfg.DATASET.TARGET_DOMAINS = config.dataset.target_domains
-        
-        # DataLoader configuration
-        cfg.DATALOADER.TRAIN_X.BATCH_SIZE = config.dataloader.batch_size_train
-        cfg.DATALOADER.TEST.BATCH_SIZE = config.dataloader.batch_size_test
-        cfg.DATALOADER.NUM_WORKERS = config.dataloader.num_workers
-        
-        # Input configuration
-        cfg.INPUT.SIZE = config.input.size
-        cfg.INPUT.INTERPOLATION = config.input.interpolation
-        cfg.INPUT.PIXEL_MEAN = list(config.input.pixel_mean)
-        cfg.INPUT.PIXEL_STD = list(config.input.pixel_std)
-        cfg.INPUT.TRANSFORMS = config.input.transforms
-        
-        # Other required settings
-        cfg.USE_CUDA = config.use_cuda
-        cfg.SEED = config.seed
-        
-        cfg.freeze()
-        return cfg
-    
     def _build_data_loader(self, data_source, batch_size, is_train, transform):
         """Build a data loader"""
         if not data_source:
             return None
         
-        # Use Dassl's DatasetWrapper for compatibility
-        from dassl.data.data_manager import DatasetWrapper
-        
-        # Convert config to Dassl format for DatasetWrapper
-        dassl_cfg = self._config_to_dassl_format(self.config)
-        
-        dataset = DatasetWrapper(
-            cfg=dassl_cfg,
+        # Use our custom TorchDatasetWrapper
+        dataset = TorchDatasetWrapper(
             data_source=data_source,
             transform=transform,
             is_train=is_train
