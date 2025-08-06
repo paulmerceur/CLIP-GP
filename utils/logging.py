@@ -41,12 +41,29 @@ def setup_logger(output_dir: Optional[str] = None, name: str = "CLIP-GP") -> log
     if output_dir:
         log_dir = Path(output_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_dir / "log.txt")
+        log_path = log_dir / "log.txt"
+        file_handler = logging.FileHandler(log_path)
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-    
+
+        # Redirect stdout and stderr to the log file as well as the console
+        class Tee(object):
+            def __init__(self, *files):
+                self.files = files
+            def write(self, obj):
+                for f in self.files:
+                    f.write(obj)
+                    f.flush()
+            def flush(self):
+                for f in self.files:
+                    f.flush()
+
+        log_file = open(log_path, "a", buffering=1)
+        sys.stdout = Tee(sys.__stdout__, log_file)
+        sys.stderr = Tee(sys.__stderr__, log_file)
+        # Note: This will capture all print statements and progress bars in the log file
+
     # Prevent duplicate logs
     logger.propagate = False
     
