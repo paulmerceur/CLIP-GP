@@ -1,8 +1,8 @@
 """
 Evaluation metrics for CLIP-GP.
 """
-
 import torch
+import numpy as np
 from typing import Tuple, List
 
 
@@ -35,7 +35,6 @@ def compute_accuracy(logits: torch.Tensor, labels: torch.Tensor, topk: Tuple[int
     
     return res
 
-
 def compute_macro_f1(logits: torch.Tensor, labels: torch.Tensor) -> float:
     """
     Compute macro F1 score.
@@ -56,6 +55,32 @@ def compute_macro_f1(logits: torch.Tensor, labels: torch.Tensor) -> float:
     labels_np = labels.cpu().numpy()
     f1 = f1_score(labels_np, pred, average='macro')
     return float(f1 * 100)
+
+def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 15) -> float:
+    """
+    Expected Calibration Error (ECE).
+    Args:
+        logits: [N, C] model outputs (unnormalized)
+        labels: [N] true labels
+        n_bins: number of bins
+    Returns:
+        ECE value (float, 0-1)
+    """
+    import torch.nn.functional as F
+    device = logits.device
+    probs = F.softmax(logits, dim=-1)
+    conf, preds = probs.max(dim=-1)       # [N]
+    acc = preds.eq(labels).float()        # [N]
+    ece = torch.zeros(1, device=device)
+    bin_boundaries = torch.linspace(0, 1, n_bins + 1, device=device)
+    for i in range(n_bins):
+        in_bin = (conf > bin_boundaries[i]) * (conf <= bin_boundaries[i + 1])
+        prop_in_bin = in_bin.float().mean()
+        if prop_in_bin.item() > 0:
+            accuracy_in_bin = acc[in_bin].mean()
+            avg_conf_in_bin = conf[in_bin].mean()
+            ece += torch.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
+    return ece.item()
 
 
 class AverageMeter:

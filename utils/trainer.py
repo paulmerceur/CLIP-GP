@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Union
 import numpy as np
 from tqdm import tqdm
 
-from utils.metrics import compute_accuracy
+from utils.metrics import compute_accuracy, compute_ece
 
 
 class BaseTrainer:
@@ -291,8 +291,8 @@ class BaseTrainer:
         except ImportError:
             macro_f1 = 0.0
         
-        # ECE computation (placeholder for now)
-        ece = 0.0
+        # Compute ECE
+        ece = compute_ece(all_outputs, all_labels)
         
         results = {
             "accuracy": accuracy,
