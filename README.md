@@ -1,127 +1,95 @@
 # CLIP‑GP
 
-> **Gaussian‑Process Weighted Template Adaptation for CLIP**  
-
+> Gaussian‑Process Weighted Template Adaptation for CLIP  
 > Paul Merceur ⋅ ÉTS Montréal
 
-CLIP‑GP implements a Gaussian Process approach for few-shot adaptation of CLIP models.
-This cleaned-up version provides two methods for comparison:
+CLIP‑GP explores few‑shot adaptation of CLIP using multiple text templates per class. It provides two comparable adaptation methods:
 
-- **Baseline**: Multi-template adaptation with visual projection and L2 regularization
-- **GP Method**: Gaussian Process weighted template adaptation
+- Baseline: average of template prototypes with a visual projection (L2‑regularized)
+- GP Method: Gaussian‑Process weighting over templates with an RBF or linear kernel and KL regularization, also with a visual projection
 
-Both methods use visual projection for fair comparison.
-
----
-
-## Quick Start
-
-### Run Baseline Method
-```bash
-./scripts/run_baseline.sh baseline_exp 0.1
-```
-
-### Run GP Method  
-```bash
-./scripts/run_gp.sh gp_exp 0.1
-```
-
-### Run Both for Comparison
-```bash
-./scripts/run_comparison.sh comparison_exp 0.1
-```
-
-The third parameter (0.1) is the L2 regularization coefficient for visual projection.
+Both methods keep the CLIP encoders frozen and train only small heads for fair, stable adaptation.
 
 ---
 
 ## Installation
 
-1. **Dassl + PyTorch** – follow the [Dassl.pytorch installation guide](https://github.com/KaiyangZhou/Dassl.pytorch#installation).
-2. Activate the `dassl` conda env and run:
+1) Create and activate a Python environment (Python ≥3.8), then install dependencies:
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-3. Download the datasets listed in `DATASETS.md`.
+2) Prepare datasets as described in `configs/datasets/*.yaml` (and `DATASETS.md` if present). Set your dataset root via `--root` or edit the scripts’ `DATA`/`DATA_ROOT` variables.
 
 ---
 
-## Configuration
+## Quick Start
 
-### Baseline (`configs/trainers/baseline.yaml`)
-- Uses 7 templates per class
-- Visual projection with L2 regularization  
-- Standard CLIP adaptation
 
-### GP Method (`configs/trainers/gp.yaml`)
-- Uses 7 templates per class
-- Gaussian Process weighting of templates
-- RBF kernel with auto-initialized length scale
-- Visual projection with L2 regularization
-- Separate learning rate for GP parameters (0.1)
-- KL weight (β = 0.001)
+### Baseline
+```bash
+./scripts/run_baseline.sh <experiment_name> <dataset_key> [L2_LAMBDA] [GPU_ID]
+# example
+./scripts/run_baseline.sh test_v1 caltech101 100.0 0
+```
+
+### GP Method
+```bash
+./scripts/run_gp.sh <experiment_name> <dataset_key> [L2_LAMBDA] [GPU_ID]
+# example
+./scripts/run_gp.sh test_v1 caltech101 100.0 0
+```
+
+### Battery of tests (multiple datasets)
+```bash
+./scripts/run_big_tests.sh <experiment_name> [GPU_ID]
+```
 
 ---
 
 ## Manual Usage
 
-For custom experiments, you can run individual configurations:
+Use the native CLI (no external framework). You can mix YAML configs and flags.
 
 ```bash
+# Baseline
 python train.py \
-    --root /path/to/datasets \
-    --seed 1 \
-    --trainer ADAPTER \
-    --dataset-config-file configs/datasets/caltech101.yaml \
-    --config-file configs/trainers/baseline.yaml \
-    --output-dir output/test/caltech101/baseline/seed1 \
-    MODEL.BACKBONE.NAME RN50 \
-    DATASET.NUM_SHOTS 4 \
-    TRAINER.ADAPTER.L2_LAMBDA 0.1
+  --root /path/to/datasets \
+  --dataset Caltech101 \
+  --shots 4 \
+  --backbone RN50 \
+  --trainer ADAPTER \
+  --config-file configs/trainers/baseline.yaml \
+  --output-dir output/demo/baseline
+
+# GP method
+python train.py \
+  --root /path/to/datasets \
+  --dataset Caltech101 \
+  --shots 4 \
+  --backbone RN50 \
+  --trainer ADAPTER \
+  --config-file configs/trainers/gp.yaml \
+  --use-gp --num-templates 7 --gp-lr 0.1 --gp-beta 0.001 \
+  --output-dir output/demo/gp
 ```
 
-Replace `baseline.yaml` with `gp.yaml` to run the GP method.
+Key CLI flags (subset): `--dataset`, `--shots`, `--backbone`, `--use-gp`, `--num-templates`, `--gp-lr`, `--gp-beta`, `--output-dir`. You can also override YAML fields via `OPTS` style, e.g., `TRAINER.ADAPTER.L2_LAMBDA 0.1`.
 
 ---
 
-## Key Parameters
+## What you get
 
-- `L2_LAMBDA`: Visual projection regularization (tunable via scripts)
-- `GP_LR`: Learning rate for GP parameters (default: 0.1)
-- `GP_BETA`: KL divergence weight (default: 0.001)
-- `GP_NUM_MC_SAMPLES`: Monte Carlo samples for evaluation (default: 10)
-- `NUM_TEMPLATES`: Number of templates per class (default: 7)
-
----
-
-## Analysis
-
-After running experiments, analyze results with:
-
-```bash
-python analyze_experiment.py <experiment_name>
-```
-
-This generates:
-- `<experiment_name>_summary.csv` - aggregated metrics
-- `plots/<dataset>_accuracy.png` - per-dataset visualizations
+- Frozen CLIP encoders with template‑based text prototypes
+- Optional GP weighting over templates with KL regularization
+- Visual projection with L2 regularization
+- Robust evaluation: top‑1 accuracy, macro‑F1, and ECE
 
 ---
 
-## Project Structure
+## Credits
 
-```
-├── trainers/
-│   ├── adapters.py              # Unified baseline + GP implementation
-│   └── gp_template_weigher.py   # GP core logic
-├── configs/trainers/
-│   ├── baseline.yaml            # Baseline configuration
-│   └── gp.yaml                  # GP configuration  
-├── scripts/
-│   ├── run_baseline.sh          # Run baseline experiments
-│   ├── run_gp.sh                # Run GP experiments
-│   └── run_comparison.sh        # Run both methods
-└── analyze_experiment.py        # Results analysis
-```
+This repository is based on the CLAP project (CVPR’24) “A Closer Look at the Few‑Shot Adaptation of Large Vision‑Language Models.” See the original code and paper materials here: [CLAP on GitHub](https://github.com/jusiro/CLAP).
+
+This cleaned‑up version removes the heavyweight Dassl dependency and provides a minimal, PyTorch‑native training and data pipeline.
