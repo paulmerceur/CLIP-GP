@@ -21,15 +21,15 @@ GPU_ID=${2:-0}  # Default to GPU 0 if not provided
 
 # Dataset configurations: dataset_name:regularization_value
 DATASETS=(
-    "oxford_pets:0.1"
-    "oxford_flowers:0.1"
-    "caltech101:0.1"
-    "dtd:0.1"
-    "fgvc_aircraft:0.1"
-    "eurosat:0.1"
-    "food101:0.1"
-    "stanford_cars:0.1"
-    "ucf101:0.1"
+    "oxford_pets:50.0"
+    "oxford_flowers:10.0"
+    "caltech101:20.0"
+    "dtd:20.0"
+    "fgvc_aircraft:20.0"
+    "eurosat:20.0"
+    "food101:20.0"
+    "stanford_cars:50.0"
+    "ucf101:20.0"
 )
 
 for dataset_config in "${DATASETS[@]}"; do

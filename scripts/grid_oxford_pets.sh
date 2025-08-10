@@ -53,9 +53,9 @@ make_cfg() {
 echo "Preparing config variants in ${TRAINER_CFG_DIR}"
 
 # Sweep only key knobs; keep logit_scale trainable and no adapter freeze
-BETAS=(0.0001 0.001)
+BETAS=(0.0001)
 GP_LRS=(0.1)
-L2S=(50.0)
+L2S=(20.0)
 
 CONFIGS=()
 

@@ -13,42 +13,40 @@ fi
 
 EXPERIMENT_NAME=$1
 DATASET=$2
-GPU_ID=${3:-0}  # Default to 0 if not provided
+L2_LAMBDA=$3
+GPU_ID=${4:-0}  # Default to 0 if not provided
 
 # Experiment parameters
 SEEDS=(1 2 3)
 SHOTS=(1 4 8 16)
-L2_LAMBDAS=(50.0)
 CONFIG="baseline"
 
 echo "Running baseline experiments..."
 echo "Experiment: $EXPERIMENT_NAME"
-echo "L2_LAMBDAS: ${L2_LAMBDAS[*]}"
+echo "L2_LAMBDA: ${L2_LAMBDA}"
 echo "Dataset: $DATASET"
 echo "Shots: ${SHOTS[*]}"
 echo ""
 
 for SEED in "${SEEDS[@]}"; do
     for SHOT in "${SHOTS[@]}"; do
-        for L2_LAMBDA in "${L2_LAMBDAS[@]}"; do
-            DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}_${SHOT}shots_l2${L2_LAMBDA}/seed${SEED}
-            if [ -d "$DIR" ]; then
-                echo "Oops! The results exist at ${DIR} (so skip this job)"
-                continue
-            fi
+        DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}_${SHOT}shots_l2${L2_LAMBDA}/seed${SEED}
+        if [ -d "$DIR" ]; then
+            echo "Oops! The results exist at ${DIR} (so skip this job)"
+            continue
+        fi
 
-            echo "Running: seed=$SEED dataset=$DATASET shots=$SHOT l2_lambda=$L2_LAMBDA"
+        echo "Running: seed=$SEED dataset=$DATASET shots=$SHOT l2_lambda=$L2_LAMBDA"
 
-            CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
-                --root $DATA \
-                --seed $SEED \
-                --trainer ADAPTER \
-                --dataset-config-file configs/datasets/${DATASET}.yaml \
-                --config-file configs/trainers/${CONFIG}.yaml \
-                --output-dir $DIR \
-                DATASET.NUM_SHOTS $SHOT \
-                TRAINER.ADAPTER.L2_LAMBDA $L2_LAMBDA
-        done
+        CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
+            --root $DATA \
+            --seed $SEED \
+            --trainer ADAPTER \
+            --dataset-config-file configs/datasets/${DATASET}.yaml \
+            --config-file configs/trainers/${CONFIG}.yaml \
+            --output-dir $DIR \
+            DATASET.NUM_SHOTS $SHOT \
+            TRAINER.ADAPTER.L2_LAMBDA $L2_LAMBDA
     done
 done
 
