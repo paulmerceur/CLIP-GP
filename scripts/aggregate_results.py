@@ -36,40 +36,37 @@ _RE_LR_BETA_DIR = re.compile(r"LR([\d.eE+-]+)_B([\d.eE+-]+)")
 # Parse hyper-parameters from log files (TRAINER.ADAPTER.* entries)
 _RE_LOG_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)")
 _RE_LOG_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)")
-_RE_LOG_W_REG = re.compile(r"GP_W_REG_COEF:\s+([\d.eE+-]+)")
-_RE_LOG_TEMP = re.compile(r"GP_TEMP:\s+([\d.eE+-]+)")
+_RE_LOG_L2_LAMBDA = re.compile(r"L2_LAMBDA:\s+([\d.eE+-]+)")
 
 # ───────────────────────────
 # Single-file parser
 # ───────────────────────────
 
-def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None, str | None]:
+def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None]:
     """Return (accuracy, ece, lr, beta) extracted from *log_path*."""
     try:
         text = log_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
         print(f"! Could not read {log_path}: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
     acc_match = _RE_ACC.search(text)
     ece_match = _RE_ECE.search(text)
     lr_match = _RE_LOG_LR.search(text)
     beta_match = _RE_LOG_BETA.search(text)
-    w_reg_match = _RE_LOG_W_REG.search(text)
-    temp_match = _RE_LOG_TEMP.search(text)
+    l2_lambda_match = _RE_LOG_L2_LAMBDA.search(text)
 
     if acc_match is None:
         print(f"! Could not read {log_path}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
     lr = lr_match.group(1) if lr_match else None
     beta = beta_match.group(1) if beta_match else None
-    w_reg = w_reg_match.group(1) if w_reg_match else None
-    temp = temp_match.group(1) if temp_match else None
+    l2_lambda = l2_lambda_match.group(1) if l2_lambda_match else None
 
-    return acc, ece, lr, beta, w_reg, temp
+    return acc, ece, lr, beta, l2_lambda
 
 
 # ───────────────────────────
@@ -122,11 +119,10 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                 ece_values: List[float] = []
                 lr_val: str | None = None
                 beta_val: str | None = None
-                w_reg_val: str | None = None
-                temp_val: str | None = None
+                l2_lambda_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece, lr, beta, w_reg, temp = parse_log(log_file)
+                    acc, ece, lr, beta, l2_lambda = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
@@ -136,10 +132,8 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                         lr_val = lr
                     if beta_val is None and beta is not None:
                         beta_val = beta
-                    if w_reg_val is None and w_reg is not None:
-                        w_reg_val = w_reg
-                    if temp_val is None and temp is not None:
-                        temp_val = temp
+                    if l2_lambda_val is None and l2_lambda is not None:
+                        l2_lambda_val = l2_lambda
                 if not acc_values and not ece_values:
                     continue  # skip empty variant
 
@@ -147,14 +141,13 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                     "config": variant_label,
                     "lr": lr_val,
                     "beta": beta_val,
-                    "w_reg": w_reg_val,
+                    "l2_lambda": l2_lambda_val,
                     "shots": num_shots,
                     "n_seeds": max(len(acc_values), len(ece_values)),
                     "acc_mean": statistics.mean(acc_values) if acc_values else float("nan"),
                     "acc_std": statistics.stdev(acc_values) if len(acc_values) > 1 else 0.0,
                     "ece_mean": statistics.mean(ece_values) if ece_values else float("nan"),
                     "ece_std": statistics.stdev(ece_values) if len(ece_values) > 1 else 0.0,
-                    "temp": temp_val,
                 }
                 dataset_records.append(record)
 
@@ -175,16 +168,15 @@ def print_results(results: Dict[str, List[Dict[str, Any]]]):
             continue
         print("\n=== Dataset:", dataset, "===")
         header = (
-            f"{'Config':<25} {'LR':>8} {'Beta':>8} {'W_REG':>8} {'Temp':>8} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<50} {'LR':>8} {'Beta':>8} {'L2_LAMBDA':>8} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
         )
         print(header)
         print("-" * len(header))
         for r in records:
             print(
-                f"{r['config']:<25} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
-                f"{r['w_reg'] or '-':>8} "
-                f"{r['temp'] or '-':>8} "
+                f"{r['config']:<50} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
+                f"{r['l2_lambda'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
                 f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f}"
@@ -221,7 +213,7 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
                 else:
                     label = "baseline"
             else:
-                label = f"GP_WR{r['w_reg']}"
+                    label = f"GP_L2{r['l2_lambda']}"
             grouped.setdefault(label, []).append(r)
 
         # Combined figure with Accuracy and ECE side-by-side

@@ -98,6 +98,12 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Register the (fixed) template embeddings for downstream use.
         self.register_buffer("_templates", text_embeddings.detach())
+        # Optional weight transform; if 'softmax', constrain weights to convex combination over templates
+        adapter_cfg = getattr(cfg, 'adapter', None) if not hasattr(cfg, 'TRAINER') else getattr(cfg.TRAINER, 'ADAPTER', None)
+        self.weight_transform = None
+        if adapter_cfg is not None:
+            wt = getattr(adapter_cfg, 'gp_weight_transform', 'linear')
+            self.weight_transform = wt
 
     def forward(self, x):
         mean_x = self.mean_module(x)
@@ -126,7 +132,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             alpha = alpha.t()  # Transpose to [K, M]
             
         # Use raw alpha values as template weights
-        w = alpha  # [K, M]
+        if isinstance(self.weight_transform, str) and self.weight_transform.lower() == 'softmax':
+            w = torch.softmax(alpha, dim=-1)
+        else:
+            w = alpha  # [K, M]
 
         # Compute prototypes using fp32 representations of templates
         prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())
@@ -165,7 +174,10 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Always use stochastic sampling
         alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-        w = alpha  # [S,K,M] - use raw alpha values as weights
+        if isinstance(self.weight_transform, str) and self.weight_transform.lower() == 'softmax':
+            w = torch.softmax(alpha, dim=-1)
+        else:
+            w = alpha  # [S,K,M] - use raw alpha values as weights
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())

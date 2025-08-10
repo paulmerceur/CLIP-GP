@@ -291,13 +291,14 @@ class BaseTrainer:
         except ImportError:
             macro_f1 = 0.0
         
-        # Compute ECE
+        # Compute ECE (returned in [0,1]); report as percentage for consistency
         ece = compute_ece(all_outputs, all_labels)
+        ece_pct = ece * 100.0
         
         results = {
             "accuracy": accuracy,
             "macro_f1": macro_f1,
-            "ece": ece
+            "ece": ece_pct
         }
         
         # Print results
@@ -307,7 +308,7 @@ class BaseTrainer:
         print(f"* accuracy: {accuracy:.1f}%")
         print(f"* error: {100 - accuracy:.1f}%")
         print(f"* macro_f1: {macro_f1:.1f}%")
-        print(f"* ECE: {ece:.2f}%")
+        print(f"* ECE: {ece_pct:.2f}%")
         
         # Write to TensorBoard
         for k, v in results.items():

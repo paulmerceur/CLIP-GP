@@ -7,12 +7,12 @@ if [ $# -lt 1 ]; then
     echo "Usage: $0 <experiment_name> [GPU_ID]"
     echo "Example: $0 big_test_v1 0"
     echo ""
-    echo "This script will run both baseline and GP experiments for:"
-    echo "  - oxford_pets (reg: 500.0)"
-    echo "  - oxford_flowers (reg: 200.0)" 
-    echo "  - caltech101 (reg: 500.0)"
-    echo "  - dtd (reg: 1000.0)"
-    echo "  - fgvc_aircraft (reg: 500.0)"
+echo "This script will run both baseline and GP experiments for:"
+echo "  - oxford_pets (reg: 0.1)"
+echo "  - oxford_flowers (reg: 0.1)" 
+echo "  - caltech101 (reg: 0.1)"
+echo "  - dtd (reg: 0.1)"
+echo "  - fgvc_aircraft (reg: 0.1)"
     exit 1
 fi
 
@@ -21,15 +21,15 @@ GPU_ID=${2:-0}  # Default to GPU 0 if not provided
 
 # Dataset configurations: dataset_name:regularization_value
 DATASETS=(
-    "oxford_pets:500.0"
-    "oxford_flowers:200.0"
-    "caltech101:500.0"
-    "dtd:1000.0"
-    "fgvc_aircraft:500.0"
-    "eurosat:1000.0"
-    "food101:500.0"
-    "stanford_cars:200.0"
-    "ucf101:1000.0"
+    "oxford_pets:0.1"
+    "oxford_flowers:0.1"
+    "caltech101:0.1"
+    "dtd:0.1"
+    "fgvc_aircraft:0.1"
+    "eurosat:0.1"
+    "food101:0.1"
+    "stanford_cars:0.1"
+    "ucf101:0.1"
 )
 
 for dataset_config in "${DATASETS[@]}"; do

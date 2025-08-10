@@ -6,14 +6,14 @@ DATA="/export/datasets/public"
 # Usage: ./run_gp.sh <experiment_name> <dataset> [L2_LAMBDA] [GPU_ID]
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <experiment_name> <dataset> [L2_LAMBDA] [GPU_ID]"
-    echo "Example: $0 gp_test caltech101 100.0 0"
+echo "Usage: $0 <experiment_name> <dataset> [L2_LAMBDA] [GPU_ID]"
+echo "Example: $0 gp_test caltech101 0.1 0"
     exit 1
 fi
 
 EXPERIMENT_NAME=$1
 DATASET=$2
-L2_LAMBDA=${3:-100.0}  # Default to 100.0 if not provided
+L2_LAMBDA=${3:-0.1}  # Default to 0.1 if not provided
 GPU_ID=${4:-0}  # Default to 0 if not provided
 
 # Experiment parameters

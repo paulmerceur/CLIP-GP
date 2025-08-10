@@ -26,9 +26,10 @@ class AdapterConfig:
     gp_beta: float = 0.001  # KL weight for ELBO loss
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
+    gp_weight_transform: str = "linear"  # "linear" or "softmax" over templates
     
-    # Regularization
-    l2_lambda: float = 100.0  # Visual projection L2 regularization
+    # Regularization (adapter weight toward identity)
+    l2_lambda: float = 0.1
     res_l2_coef: float = 1e-4  # Residual L2 coefficient
 
 

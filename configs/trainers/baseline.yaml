@@ -33,5 +33,5 @@ TRAINER:
     NUM_TEMPLATES: 7
     # Baseline configuration (no GP)
     USE_GP: False
-    # Visual projection always enabled for fair comparison
-    L2_LAMBDA: 0.1  # Will be tuned via scripts
+    # Adapter L2 toward identity (smaller default)
+    L2_LAMBDA: 0.1
