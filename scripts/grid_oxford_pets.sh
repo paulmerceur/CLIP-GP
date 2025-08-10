@@ -68,9 +68,7 @@ for beta in "${BETAS[@]}"; do
         "GP_WEIGHT_TRANSFORM=softmax" \
         "GP_BETA=${beta}" \
         "GP_LR=${gp_lr}" \
-        "L2_LAMBDA=${l2}" \
-        "FREEZE_LOGIT_SCALE=False" \
-        "GP_DETERMINISTIC_TRAIN=False"
+        "L2_LAMBDA=${l2}"
       CONFIGS+=("${cfg_name}")
     done
   done

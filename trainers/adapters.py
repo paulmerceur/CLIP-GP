@@ -60,9 +60,9 @@ class TextEncoder(nn.Module):
 
     def forward(self, prompts, tokenized_prompts):
         x = prompts + self.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2) # NLD -> LND
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2) # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
@@ -97,7 +97,7 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     
     if config.adapter.num_templates > 1:
         num_needed = min(
-            config.adapter.num_templates - 1,  # -1 because we already have "a photo of a {}"
+            config.adapter.num_templates - 1, # -1 because we already have "a photo of a {}"
             len(IMAGENET_TEMPLATES_SELECT),
         )
         templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
@@ -120,18 +120,13 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
                 # Fallback to CLIP's encode_text
                 emb = clip_model.encode_text(tok)
             emb_list.append(emb)
-    text_embeds = torch.stack(emb_list)  # [K,M,D]
+    text_embeds = torch.stack(emb_list) # [K,M,D]
 
     # Instantiate GP
     if config.adapter.use_gp and len(templates) > 1:
-        # Better prior: use per-template zero-shot logits. For each
-        # class k and template m we compute the logit obtained by
-        # measuring the similarity of that template to the **average**
-        # prototype of the class. This centres the GP posterior on a
-        # reasonably calibrated location instead of a flat 0.
         with torch.no_grad():
-            class_mean = text_embeds.mean(dim=1, keepdim=True)          # [K,1,D]
-            zs_logits = (text_embeds * class_mean).sum(-1)              # [K,M]
+            class_mean = text_embeds.mean(dim=1, keepdim=True) # [K,1,D]
+            zs_logits = (text_embeds * class_mean).sum(-1) # [K,M]
         mean_init = zs_logits.to(dtype=torch.float32, device=device)
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=config, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
@@ -153,7 +148,7 @@ class LinearAdapter(nn.Module):
         # Learnable adapter weights
         self.adapter = nn.Linear(self.input_dim, self.output_dim, bias=False)
 
-        # identity if square, else Kaiming
+        # Identity if square, else Kaiming
         with torch.no_grad():
             if self.input_dim == self.output_dim and self.init_type.lower() in {"identity", "id", "zs"}:
                 self.adapter.weight.copy_(torch.eye(self.output_dim, dtype=self.adapter.weight.dtype))
@@ -187,7 +182,7 @@ class CustomCLIP(nn.Module):
             config, classnames, clip_model, self.text_encoder
         )
         
-        # Create adapter (square mapping by default)
+        # Create adapter
         self.adapter = LinearAdapter(
             input_dim=self.vision_dim,
             output_dim=self.vision_dim,
@@ -314,10 +309,8 @@ class ADAPTER(BaseTrainer):
 
         # Setup parameter groups
         for name, param in self.model.named_parameters():
-            if name == "logit_scale":
-                # Freeze based on config
-                freeze_logit = bool(getattr(config.adapter, "freeze_logit_scale", False))
-                param.requires_grad = not freeze_logit
+            if "logit_scale" in name:
+                param.requires_grad = True
             elif "adapter" in name:
                 param.requires_grad = True
             elif "gp_weighter" in name:
@@ -611,12 +604,12 @@ class ADAPTER(BaseTrainer):
         self.set_model_mode("train")
         try:
             if hasattr(self.model, "image_encoder"):
-                self.model.image_encoder.eval()  # type: ignore
+                self.model.image_encoder.eval() # type: ignore
         except AttributeError:
             pass
         try:
             if hasattr(self.model, "text_encoder"):
-                self.model.text_encoder.eval()  # type: ignore
+                self.model.text_encoder.eval() # type: ignore
         except AttributeError:
             pass
 
