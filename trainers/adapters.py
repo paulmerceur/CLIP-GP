@@ -1,18 +1,15 @@
-import os.path as osp
-from typing import List, TYPE_CHECKING, Union, Any, cast
+from typing import cast
 import time
 import datetime
-import copy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.amp.grad_scaler import GradScaler    
-from torch.amp.autocast_mode import autocast
 import numpy as np
 import math
 
 from utils.trainer import BaseTrainer
-from utils.metrics import compute_accuracy, AverageMeter, MetricMeter
+from utils.metrics import compute_accuracy, AverageMeter
 from utils.checkpoint import load_pretrained_weights
 from utils.optimization import build_optimizer, build_lr_scheduler
 from utils.trainer_registry import TRAINER_REGISTRY
@@ -21,32 +18,10 @@ from clip import clip
 from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
 from .gp_template_weigher import GaussianProcessTemplateWeighter
 
-if TYPE_CHECKING:
-    from typing import Any
-
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
-
-
-CUSTOM_TEMPLATES = {
-    "OxfordPets": "a photo of a {}, a type of pet.",
-    "OxfordFlowers": "a photo of a {}, a type of flower.",
-    "FGVCAircraft": "a photo of a {}, a type of aircraft.",
-    "DescribableTextures": "{} texture.",
-    "EuroSAT": "a centered satellite photo of {}.",
-    "StanfordCars": "a photo of a {}.",
-    "Food101": "a photo of {}, a type of food.",
-    "SUN397": "a photo of a {}.",
-    "Caltech101": "a photo of a {}.",
-    "UCF101": "a photo of a person doing {}.",
-    "ImageNet": "a photo of a {}.",
-    "ImageNetSketch": "a photo of a {}.",
-    "ImageNetV2": "a photo of a {}.",
-    "ImageNetA": "a photo of a {}.",
-    "ImageNetR": "a photo of a {}.",
-}
 
 
 class TextEncoder(nn.Module):
@@ -105,9 +80,8 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
         # Add templates from IMAGENET_TEMPLATES
         templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
     
-    print(f"[DEBUG] templates: {templates}")
-
     # Encode all prompts once - returned tensor is reused by caller.
+    print("     Encoding text features")
     emb_list = []
     with torch.no_grad():
         for name in classnames:
@@ -123,6 +97,7 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     text_embeds = torch.stack(emb_list) # [K,M,D]
 
     # Instantiate GP
+    print("     Instantiating GP")
     if config.adapter.use_gp and len(templates) > 1:
         with torch.no_grad():
             class_mean = text_embeds.mean(dim=1, keepdim=True) # [K,1,D]
@@ -175,14 +150,17 @@ class CustomCLIP(nn.Module):
         self.vision_dim = clip_model.text_projection.shape[1]
         
         # Create TextEncoder for proper text encoding
+        print("[DEBUG] Creating TextEncoder")
         self.text_encoder = TextEncoder(clip_model)
         
         # Get text features and setup GP if needed
+        print("[DEBUG] Getting text features")
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(
             config, classnames, clip_model, self.text_encoder
         )
         
         # Create adapter
+        print("[DEBUG] Creating adapter")
         self.adapter = LinearAdapter(
             input_dim=self.vision_dim,
             output_dim=self.vision_dim,
@@ -273,8 +251,8 @@ class CustomCLIP(nn.Module):
         for s in range(num_samples):
             proto_s = prototypes_s[s]  # [K, D]
             proto_s_norm = proto_s / proto_s.norm(dim=-1, keepdim=True)
-            # Ensure same dtype for matrix multiplication
-            adapted_features_norm = adapted_features_norm.to(proto_s_norm.dtype)
+            # Ensure same dtype for matrix multiplication by casting prototype to features dtype
+            proto_s_norm = proto_s_norm.to(adapted_features_norm.dtype)
             logits_s = self.logit_scale.exp() * adapted_features_norm @ proto_s_norm.t()
             logits_samples.append(logits_s)
         
@@ -284,8 +262,8 @@ class CustomCLIP(nn.Module):
 
 
 
-@TRAINER_REGISTRY.register("ADAPTER")
-class ADAPTER(BaseTrainer):
+@TRAINER_REGISTRY.register("Trainer")
+class Trainer(BaseTrainer):
     """Unified adapter trainer supporting both baseline and GP methods."""
     
     def __init__(self, config, dataset_manager):
@@ -387,8 +365,6 @@ class ADAPTER(BaseTrainer):
             labels = torch.tensor(labels).to(self.device)
         else:
             labels = labels.detach().clone().to(self.device)
-        # Features are CLIP visual features (no extra projection)
-        # Ensure dtype matches adapter for stable training
         if features.dtype != model.adapter.adapter.weight.dtype:
             features = features.to(dtype=model.adapter.adapter.weight.dtype)
         projected_features = features

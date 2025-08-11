@@ -92,7 +92,6 @@ for cfg in "${CONFIGS[@]}"; do
       CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
         --root "${DATA_ROOT}" \
         --seed "${seed}" \
-        --trainer ADAPTER \
         --dataset-config-file "configs/datasets/${DATASET}.yaml" \
         --config-file "${TRAINER_CFG_DIR}/${cfg}.yaml" \
         --output-dir "${OUT_DIR}" \

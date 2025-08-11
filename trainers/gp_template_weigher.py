@@ -1,17 +1,12 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import gpytorch
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 
 class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     """
-    Simplified GP-based template weighter that leans entirely on GPyTorch's built-ins.
-
-    * No hand-rolled KL, priors, or extra regularisation.
-    * One batched variational GP (one task == one class).
-    * Templates are the *inducing* points - nothing to learn there.
+    GP-based template weighter that leans entirely on GPyTorch's built-ins.
     """
 
     def __init__(self, text_embeddings: torch.Tensor, cfg: Any, mean_init: Optional[torch.Tensor] = None, **kwargs) -> None:
@@ -19,29 +14,25 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self.orig_dtype = text_embeddings.dtype
         self.orig_device = text_embeddings.device
         text_embeddings_fp32 = text_embeddings.to(dtype=torch.float32)
-
+        
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
         
         # Handle both old cfg format and new config format
         def get_config_value(key, default):
-            if hasattr(cfg, 'TRAINER'):
-                # Old config format
-                return getattr(cfg.TRAINER.ADAPTER, key, default)
+            # New config format - convert key to lowercase format
+            if key == 'GP_NUM_MC_SAMPLES':
+                return getattr(cfg.adapter, 'gp_num_mc_samples', default)
+            elif key == 'GP_KERNEL_TYPE':
+                return getattr(cfg.adapter, 'gp_kernel_type', default)
             else:
-                # New config format - convert key to lowercase format
-                if key == 'GP_NUM_MC_SAMPLES':
-                    return getattr(cfg.adapter, 'gp_num_mc_samples', default)
-                elif key == 'GP_KERNEL_TYPE':
-                    return getattr(cfg.adapter, 'gp_kernel_type', default)
-                else:
-                    return default
+                return default
         
         self.num_mc_samples = get_config_value('GP_NUM_MC_SAMPLES', 5)
 
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
-        # Use the (frozen) template encodings as inducing points.
-        inducing_iuts = text_embeddings_fp32.detach().clone().view(
+        # Use the template encodings as inducing points.
+        inducing_inputs = text_embeddings_fp32.detach().clone().view(
             self.num_classes, self.num_templates, self.dim
         )
 
@@ -52,21 +43,20 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         variational_strategy = gpytorch.variational.VariationalStrategy(
             self,
-            inducing_iuts,
+            inducing_inputs,
             variational_dist,
             learn_inducing_locations=False,
         )
 
         super().__init__(variational_strategy)
 
-        # Mean and covariance modules -------------------------------------------------
+        # Mean and covariance modules
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
 
-        # Optionally initialise the per-template mean with external logits (e.g. zero-shot soft prompts)
+        # Initialise the per-template mean with external logits (e.g. zero-shot soft prompts)
         if mean_init is not None:
             assert mean_init.shape == (self.num_classes, self.num_templates), \
                 "mean_init must have shape [num_classes, num_templates]"
-            # Store in fp32 for numerical stability – same dtype used by GP modules
             self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
 
         kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
@@ -97,6 +87,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             vm.normal_(mean=0.0, std=0.1)
 
         # Register the (fixed) template embeddings for downstream use.
+        self._templates: torch.Tensor
         self.register_buffer("_templates", text_embeddings.detach())
         # Optional weight transform; if 'softmax', constrain weights to convex combination over templates
         adapter_cfg = getattr(cfg, 'adapter', None) if not hasattr(cfg, 'TRAINER') else getattr(cfg.TRAINER, 'ADAPTER', None)
@@ -108,9 +99,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        # Ensure mean_x is a tensor to satisfy type checker
         if not isinstance(mean_x, torch.Tensor):
             raise TypeError("Mean module must return a tensor")
+
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
     def forward_and_kl(self):
@@ -121,17 +112,12 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         """
         q = self.variational_strategy(self._templates.to(torch.float32))  # MultivariateNormal (batch)
 
-        # Note: Variance floor enforcement would require kernel-level modifications in GPyTorch
-        # For now, we rely on the initialization and regularization to prevent collapse
-
         # Always draw stochastic samples for maximum stochasticity  
-        alpha = q.rsample()  # Shape should be [K, M]
+        alpha = q.rsample() # [K, M]
 
-        # Ensure correct shape [K, M] (classes × templates)
         if alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
-            alpha = alpha.t()  # Transpose to [K, M]
+            alpha = alpha.t()
             
-        # Use raw alpha values as template weights
         if isinstance(self.weight_transform, str) and self.weight_transform.lower() == 'softmax':
             w = torch.softmax(alpha, dim=-1)
         else:
@@ -181,13 +167,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
-        # Ensure device is properly typed
-        templates_device = self._templates.device
-        if isinstance(templates_device, torch.device):
-            target_device = templates_device
-        else:
-            target_device = self.orig_device
-        return prototypes.to(dtype=self.orig_dtype, device=target_device)
+        # Match device and dtype to stored templates (guide type checker via cast)
+        templates_tensor = cast(torch.Tensor, self._templates)
+        return prototypes.to(templates_tensor)
 
 class PerTemplateMean(gpytorch.means.Mean):
     """Learnable mean of shape [K, M] (one bias per class & template)."""

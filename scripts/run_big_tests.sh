@@ -6,13 +6,6 @@
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <experiment_name> [GPU_ID]"
     echo "Example: $0 big_test_v1 0"
-    echo ""
-echo "This script will run both baseline and GP experiments for:"
-echo "  - oxford_pets (reg: 0.1)"
-echo "  - oxford_flowers (reg: 0.1)" 
-echo "  - caltech101 (reg: 0.1)"
-echo "  - dtd (reg: 0.1)"
-echo "  - fgvc_aircraft (reg: 0.1)"
     exit 1
 fi
 

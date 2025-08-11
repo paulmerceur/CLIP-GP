@@ -59,7 +59,6 @@ python train.py \
   --dataset Caltech101 \
   --shots 4 \
   --backbone RN50 \
-  --trainer ADAPTER \
   --config-file configs/trainers/baseline.yaml \
   --output-dir output/demo/baseline
 
@@ -69,7 +68,6 @@ python train.py \
   --dataset Caltech101 \
   --shots 4 \
   --backbone RN50 \
-  --trainer ADAPTER \
   --config-file configs/trainers/gp.yaml \
   --use-gp --num-templates 7 --gp-lr 0.1 --gp-beta 0.001 \
   --output-dir output/demo/gp

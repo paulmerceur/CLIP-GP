@@ -98,7 +98,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "ADAPTER"
+    trainer_name: str = "Trainer"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -218,7 +218,7 @@ def parse_args_to_config() -> Config:
     # Model arguments
     parser.add_argument("--backbone", type=str, default="RN50", 
                        help="CLIP backbone name")
-    parser.add_argument("--trainer", type=str, default="ADAPTER",
+    parser.add_argument("--trainer", type=str, default="Trainer",
                        help="Trainer name")
     parser.add_argument("--head", type=str, default="", help="Head name")
     

@@ -41,7 +41,6 @@ for SEED in "${SEEDS[@]}"; do
         CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
             --root $DATA \
             --seed $SEED \
-            --trainer ADAPTER \
             --dataset-config-file configs/datasets/${DATASET}.yaml \
             --config-file configs/trainers/${CONFIG}.yaml \
             --output-dir $DIR \
