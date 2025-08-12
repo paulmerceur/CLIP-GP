@@ -50,10 +50,8 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         super().__init__(variational_strategy)
 
-        # Mean and covariance modules
+        # Initialise the per-template mean
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
-
-        # Initialise the per-template mean with external logits (e.g. zero-shot soft prompts)
         if mean_init is not None:
             assert mean_init.shape == (self.num_classes, self.num_templates), \
                 "mean_init must have shape [num_classes, num_templates]"
@@ -176,8 +174,9 @@ class PerTemplateMean(gpytorch.means.Mean):
 
     def __init__(self, num_classes: int, num_templates: int):
         super().__init__()
-        # One scalar per (class, template) pair – initialised at 0.
-        self.mean_param = torch.nn.Parameter(torch.zeros(num_classes, num_templates))
+        # One scalar per (class, template) pair
+        #self.mean_param = torch.nn.Parameter(torch.zeros(num_classes, num_templates))
+        self.mean_param = torch.nn.Parameter(torch.full((num_classes, num_templates), 1.0 / float(num_templates)))
 
     def forward(self, x):  # noqa: D401 – simple forward override
         """Return mean of shape [K, N] where N = x.size(-2).
