@@ -65,6 +65,38 @@ def build_optimizer(parameters, config) -> torch.optim.Optimizer:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
 
+def build_optimizer_from_param_groups(param_groups: List[dict], config) -> torch.optim.Optimizer:
+    """
+    Build an optimizer from pre-constructed parameter groups.
+
+    This is useful when different groups need different hyper-parameters
+    (e.g., base params vs GP params). Honors config for optimizer selection
+    and common hyper-parameters.
+
+    Args:
+        param_groups: List of parameter group dicts
+        config: Optimization configuration (expects .name, .betas, .eps, .momentum)
+
+    Returns:
+        Instantiated torch optimizer
+    """
+    name = getattr(config, 'name', 'sgd').lower()
+    if name == 'sgd':
+        momentum = getattr(config, 'momentum', 0.9)
+        nesterov = getattr(config, 'nesterov', False)
+        return SGD(param_groups, momentum=momentum, nesterov=nesterov)
+    elif name == 'adam':
+        betas = getattr(config, 'betas', (0.9, 0.999))
+        eps = getattr(config, 'eps', 1e-8)
+        return Adam(param_groups, betas=betas, eps=eps)
+    elif name == 'adamw':
+        betas = getattr(config, 'betas', (0.9, 0.999))
+        eps = getattr(config, 'eps', 1e-8)
+        return AdamW(param_groups, betas=betas, eps=eps)
+    else:
+        raise ValueError(f"Unsupported optimizer: {name}")
+
+
 def build_lr_scheduler(optimizer: torch.optim.Optimizer, config) -> Any:
     """
     Build learning rate scheduler from configuration.

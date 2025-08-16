@@ -27,46 +27,55 @@ from typing import Dict, List, Tuple, Any
 # ───────────────────────────
 # Regex helpers
 # ───────────────────────────
-_RE_ACC = re.compile(r"\*\s+accuracy:\s+([\d.]+)%")
-_RE_ECE = re.compile(r"\*\s+ECE:\s+([\d.]+)%")
+_RE_ACC = re.compile(r"\*\s+accuracy:\s+([\d.]+)%", re.IGNORECASE)
+_RE_ECE = re.compile(r"\*\s+ECE:\s+([\d.]+)%", re.IGNORECASE)
 _RE_SHOTS_IN_DIR = re.compile(r"_(\d+)shots?", re.IGNORECASE)
-# Pattern for sub-directory naming the GP learning-rate & β (created by scripts/adapt.sh)
-_RE_LR_BETA_DIR = re.compile(r"LR([\d.eE+-]+)_B([\d.eE+-]+)")
 
-# Parse hyper-parameters from log files (TRAINER.ADAPTER.* entries)
-_RE_LOG_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)")
-_RE_LOG_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)")
-_RE_LOG_L2_LAMBDA = re.compile(r"L2_LAMBDA:\s+([\d.eE+-]+)")
+# Prefer explicit base LR matches and avoid GP_LR collisions
+_RE_LOG_LR_UPPER = re.compile(r"(?<!GP_)LR:\s+([\d.eE+-]+)")  # matches 'LR:' but not 'GP_LR:'
+_RE_LOG_LR_LOWER = re.compile(r"(?<!gp_)lr:\s+([\d.eE+-]+)")  # matches 'lr:' but not 'gp_lr:'
+_RE_LOG_GP_LR = re.compile(r"GP_LR:\s+([\d.eE+-]+)", re.IGNORECASE)
+_RE_LOG_GP_BETA = re.compile(r"GP_BETA:\s+([\d.eE+-]+)", re.IGNORECASE)
+_RE_LOG_L2_LAMBDA = re.compile(r"L2_LAMBDA:\s+([\d.eE+-]+)", re.IGNORECASE)
+
+# Fallback: read lr from directory name suffix like '_lr0.001'
+_RE_DIR_LR = re.compile(r"_lr([\d.eE+-]+)", re.IGNORECASE)
 
 # ───────────────────────────
 # Single-file parser
 # ───────────────────────────
 
-def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None]:
-    """Return (accuracy, ece, lr, beta) extracted from *log_path*."""
+def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None, str | None]:
+    """Return (accuracy, ece, lr, gp_lr, gp_beta, l2_lambda) extracted from *log_path*.
+
+    Robust to different capitalisations and avoids confusing LR with GP_LR.
+    """
     try:
         text = log_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
         print(f"! Could not read {log_path}: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     acc_match = _RE_ACC.search(text)
     ece_match = _RE_ECE.search(text)
-    lr_match = _RE_LOG_LR.search(text)
-    beta_match = _RE_LOG_BETA.search(text)
+    # Try base LR in multiple forms, avoiding GP_LR
+    lr_match = _RE_LOG_LR_UPPER.search(text) or _RE_LOG_LR_LOWER.search(text)
+    gp_lr_match = _RE_LOG_GP_LR.search(text)
+    gp_beta_match = _RE_LOG_GP_BETA.search(text)
     l2_lambda_match = _RE_LOG_L2_LAMBDA.search(text)
 
     if acc_match is None:
         print(f"! Could not read {log_path}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
     lr = lr_match.group(1) if lr_match else None
-    beta = beta_match.group(1) if beta_match else None
+    gp_lr = gp_lr_match.group(1) if gp_lr_match else None
+    gp_beta = gp_beta_match.group(1) if gp_beta_match else None
     l2_lambda = l2_lambda_match.group(1) if l2_lambda_match else None
 
-    return acc, ece, lr, beta, l2_lambda
+    return acc, ece, lr, gp_lr, gp_beta, l2_lambda
 
 
 # ───────────────────────────
@@ -92,46 +101,43 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
             if not config_dir.is_dir():
                 continue
 
-            cfg_name_full = config_dir.name  # e.g. GP_rbf_length1e-2_4shots
+            cfg_name_full = config_dir.name
             # Extract #shots from directory name (fallback to 0)
             m = _RE_SHOTS_IN_DIR.search(cfg_name_full)
             num_shots = int(m.group(1)) if m else 0
             # Config label without trailing "_4shots"
             config_label = cfg_name_full[: m.start()] if m else cfg_name_full
 
-            # 1️⃣ Find variant sub-directories (LR / Beta combos)
-            variant_dirs = [d for d in config_dir.iterdir()
-                            if d.is_dir() and _RE_LR_BETA_DIR.match(d.name)]
-
-            # If no such dirs, treat *config_dir* itself as variant holder
-            if not variant_dirs:
-                variant_dirs = [config_dir]
+            # Treat each config_dir as a variant holder (our runs encode lr in the name)
+            variant_dirs = [config_dir]
 
             for variant_dir in variant_dirs:
                 name_dir = variant_dir.name
-                m_lr = _RE_LR_BETA_DIR.search(name_dir)
-                lr_val = m_lr.group(1) if m_lr else None
-                beta_val = m_lr.group(2) if m_lr else None
+                # Prefer LR from log; fallback to directory suffix '_lr<val>'
+                dir_lr_match = _RE_DIR_LR.search(name_dir)
 
                 variant_label = config_label  # keep base name only
 
                 acc_values: List[float] = []
                 ece_values: List[float] = []
-                lr_val: str | None = None
-                beta_val: str | None = None
+                lr_val: str | None = dir_lr_match.group(1) if dir_lr_match else None
+                gp_lr_val: str | None = None
+                gp_beta_val: str | None = None
                 l2_lambda_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece, lr, beta, l2_lambda = parse_log(log_file)
+                    acc, ece, lr, gp_lr, gp_beta, l2_lambda = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
                         ece_values.append(ece)
-                    # Take first non-None hyper-param value (should be same across seeds)
-                    if lr_val is None and lr is not None:
+                    # Prefer log-derived LR over dir-derived; take first non-None
+                    if lr is not None:
                         lr_val = lr
-                    if beta_val is None and beta is not None:
-                        beta_val = beta
+                    if gp_lr_val is None and gp_lr is not None:
+                        gp_lr_val = gp_lr
+                    if gp_beta_val is None and gp_beta is not None:
+                        gp_beta_val = gp_beta
                     if l2_lambda_val is None and l2_lambda is not None:
                         l2_lambda_val = l2_lambda
                 if not acc_values and not ece_values:
@@ -140,7 +146,8 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                 record = {
                     "config": variant_label,
                     "lr": lr_val,
-                    "beta": beta_val,
+                    "gp_lr": gp_lr_val,
+                    "gp_beta": gp_beta_val,
                     "l2_lambda": l2_lambda_val,
                     "shots": num_shots,
                     "n_seeds": max(len(acc_values), len(ece_values)),
@@ -168,14 +175,14 @@ def print_results(results: Dict[str, List[Dict[str, Any]]]):
             continue
         print("\n=== Dataset:", dataset, "===")
         header = (
-            f"{'Config':<50} {'LR':>8} {'Beta':>8} {'L2_LAMBDA':>8} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<50} {'LR':>8} {'GP_LR':>8} {'GP_BETA':>8} {'L2_LAMBDA':>8} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
         )
         print(header)
         print("-" * len(header))
         for r in records:
             print(
-                f"{r['config']:<50} {r['lr'] or '-':>8} {r['beta'] or '-':>8} "
+                f"{r['config']:<50} {r['lr'] or '-':>8} {r['gp_lr'] or '-':>8} {r['gp_beta'] or '-':>8} "
                 f"{r['l2_lambda'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "

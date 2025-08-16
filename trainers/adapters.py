@@ -11,7 +11,7 @@ import math
 from utils.trainer import BaseTrainer
 from utils.metrics import compute_accuracy, AverageMeter
 from utils.checkpoint import load_pretrained_weights
-from utils.optimization import build_optimizer, build_lr_scheduler
+from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 
 from clip import clip
@@ -67,21 +67,21 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     """Extract text features for all templates and classes."""
     device = next(clip_model.parameters()).device
     
-    # Get template strings (using the sophisticated logic from the old version)
+    # Get template strings 
     templates = ["a photo of a {}."]
     
+    # Add templates from IMAGENET_TEMPLATES_SELECT
     if config.adapter.num_templates > 1:
         num_needed = min(
-            config.adapter.num_templates - 1, # -1 because we already have "a photo of a {}"
+            config.adapter.num_templates - 1,
             len(IMAGENET_TEMPLATES_SELECT),
         )
         templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
+    # If we need more templates, add the rest from IMAGENET_TEMPLATES
     if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
-        # Add templates from IMAGENET_TEMPLATES
         templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
     
     # Encode all prompts once - returned tensor is reused by caller.
-    print("     Encoding text features")
     emb_list = []
     with torch.no_grad():
         for name in classnames:
@@ -97,7 +97,6 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     text_embeds = torch.stack(emb_list) # [K,M,D]
 
     # Instantiate GP
-    print("     Instantiating GP")
     if config.adapter.use_gp and len(templates) > 1:
         with torch.no_grad():
             class_mean = text_embeds.mean(dim=1, keepdim=True) # [K,1,D]
@@ -146,21 +145,17 @@ class CustomCLIP(nn.Module):
         # Store CLIP components
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
-        # Use the correct vision dimension calculation (like the old version)
         self.vision_dim = clip_model.text_projection.shape[1]
         
         # Create TextEncoder for proper text encoding
-        print("[DEBUG] Creating TextEncoder")
         self.text_encoder = TextEncoder(clip_model)
         
         # Get text features and setup GP if needed
-        print("[DEBUG] Getting text features")
         base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(
             config, classnames, clip_model, self.text_encoder
         )
         
         # Create adapter
-        print("[DEBUG] Creating adapter")
         self.adapter = LinearAdapter(
             input_dim=self.vision_dim,
             output_dim=self.vision_dim,
@@ -233,7 +228,6 @@ class CustomCLIP(nn.Module):
     def sample_forward(self, image, num_samples=50):
         """Forward pass with GP sampling (for evaluation)."""
         if self.gp_weighter is None:
-            # No GP, just use regular forward
             return self.forward(image)
         
         # Sample multiple prototypes from GP
@@ -326,22 +320,9 @@ class Trainer(BaseTrainer):
                 },
             ]
 
-            optim_map = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam}
-            BaseOptim = optim_map.get(config.optim.name.lower(), torch.optim.SGD)
-            
-            # Add SGD-specific parameters for explicit control
-            if config.optim.name.lower() == "sgd":
-                self.optim = BaseOptim(param_groups, momentum=float(config.optim.momentum))
-            else:
-                self.optim = BaseOptim(param_groups)
-            
-            # Create scheduler manually for GP case
-            if config.optim.lr_scheduler.lower() == "cosine":
-                from torch.optim.lr_scheduler import CosineAnnealingLR
-                self.sched = CosineAnnealingLR(self.optim, T_max=config.optim.max_epoch)
-            else:
-                # Default: no scheduler
-                self.sched = None
+            # Use generic builder (supports sgd/adam/adamw with param groups)
+            self.optim = build_optimizer_from_param_groups(param_groups, config.optim)
+            self.sched = build_lr_scheduler(self.optim, config.optim)
         else:
             # Single parameter group for baseline
             baseline_params = []
