@@ -3,6 +3,7 @@ Optimization utilities for CLIP-GP.
 """
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import (
@@ -11,6 +12,46 @@ from torch.optim.lr_scheduler import (
 )
 from typing import Any, List, Union, Optional
 import math
+
+"""
+Optional Muon optimizer support
+"""
+try:  # Lazy optional dependency; only required if OPTIM.NAME == "muon"
+    # Muon is available at: https://github.com/KellerJordan/Muon
+    # Install with: pip install git+https://github.com/KellerJordan/Muon
+    from muon import MuonWithAuxAdam  # type: ignore
+    _HAS_MUON = True
+except Exception:
+    MuonWithAuxAdam = None  # type: ignore
+    _HAS_MUON = False
+
+
+def _ensure_single_process_distributed_initialized() -> None:
+    """Initialize a 1-process default process group if none exists.
+
+    Muon calls torch.distributed.get_world_size() during step(). In single-process
+    runs without DDP this raises unless a default group exists. This makes a
+    best-effort single-process init using gloo (or nccl if CUDA is available).
+    """
+    try:
+        if not dist.is_available() or dist.is_initialized():
+            return
+        backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        import os, tempfile
+        init_file = os.path.join(tempfile.gettempdir(), f"muon_pg_{os.getpid()}")
+        init_method = f"file://{init_file}"
+        dist.init_process_group(backend=backend, init_method=init_method, rank=0, world_size=1)
+    except Exception:
+        # Fall back to gloo if nccl or file init fails
+        try:
+            if not dist.is_initialized():
+                import os, tempfile
+                init_file = os.path.join(tempfile.gettempdir(), f"muon_pg_{os.getpid()}_gloo")
+                init_method = f"file://{init_file}"
+                dist.init_process_group(backend='gloo', init_method=init_method, rank=0, world_size=1)
+        except Exception:
+            # Ignore; Muon will raise a clear error if it still needs dist
+            pass
 
 
 def build_optimizer(parameters, config) -> torch.optim.Optimizer:
@@ -61,6 +102,44 @@ def build_optimizer(parameters, config) -> torch.optim.Optimizer:
             eps=eps
         )
     
+    elif optimizer_name == "muon":
+        if not _HAS_MUON:
+            raise ImportError(
+                "Muon optimizer requested but the 'muon' package is not installed. "
+                "Install it with: pip install git+https://github.com/KellerJordan/Muon"
+            )
+        _ensure_single_process_distributed_initialized()
+        # Split parameters by dimensionality: >=2D (weights) -> Muon, <2D -> auxiliary AdamW
+        params_list = list(parameters)
+        muon_params = [p for p in params_list if getattr(p, 'ndim', 0) >= 2 and p.requires_grad]
+        aux_params = [p for p in params_list if getattr(p, 'ndim', 0) < 2 and p.requires_grad]
+
+        # Allow overriding aux optimizer hyper-params from the same config fields
+        betas = getattr(config, 'betas', (0.9, 0.999))
+        eps = getattr(config, 'eps', 1e-8)
+        aux_lr = getattr(config, 'aux_lr', lr)
+        aux_weight_decay = getattr(config, 'aux_weight_decay', weight_decay)
+
+        param_groups = []
+        if len(muon_params) > 0:
+            param_groups.append({
+                'params': muon_params,
+                'lr': lr,
+                'weight_decay': weight_decay,
+                'use_muon': True
+            })
+        if len(aux_params) > 0:
+            param_groups.append({
+                'params': aux_params,
+                'lr': aux_lr,
+                'weight_decay': aux_weight_decay,
+                'betas': betas,
+                'eps': eps,
+                'use_muon': False
+            })
+
+        return MuonWithAuxAdam(param_groups)  # type: ignore
+    
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
@@ -93,6 +172,45 @@ def build_optimizer_from_param_groups(param_groups: List[dict], config) -> torch
         betas = getattr(config, 'betas', (0.9, 0.999))
         eps = getattr(config, 'eps', 1e-8)
         return AdamW(param_groups, betas=betas, eps=eps)
+    elif name == 'muon':
+        if not _HAS_MUON:
+            raise ImportError(
+                "Muon optimizer requested but the 'muon' package is not installed. "
+                "Install it with: pip install git+https://github.com/KellerJordan/Muon"
+            )
+        _ensure_single_process_distributed_initialized()
+        # Transform incoming param_groups by splitting each into Muon vs auxiliary
+        transformed: List[dict] = []
+        betas = getattr(config, 'betas', (0.9, 0.999))
+        eps = getattr(config, 'eps', 1e-8)
+        for group in param_groups:
+            group_params = [p for p in group.get('params', []) if p is not None and p.requires_grad]
+            if len(group_params) == 0:
+                continue
+            group_lr = group.get('lr', getattr(config, 'lr', 1e-3))
+            group_wd = group.get('weight_decay', getattr(config, 'weight_decay', 0.0))
+
+            muon_params = [p for p in group_params if getattr(p, 'ndim', 0) >= 2]
+            aux_params = [p for p in group_params if getattr(p, 'ndim', 0) < 2]
+
+            if len(muon_params) > 0:
+                transformed.append({
+                    'params': muon_params,
+                    'lr': group_lr,
+                    'weight_decay': group_wd,
+                    'use_muon': True
+                })
+            if len(aux_params) > 0:
+                transformed.append({
+                    'params': aux_params,
+                    'lr': group_lr,
+                    'weight_decay': group_wd,
+                    'betas': betas,
+                    'eps': eps,
+                    'use_muon': False
+                })
+
+        return MuonWithAuxAdam(transformed)  # type: ignore
     else:
         raise ValueError(f"Unsupported optimizer: {name}")
 
