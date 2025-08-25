@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Union
 import numpy as np
 from tqdm import tqdm
 
-from utils.metrics import compute_accuracy, compute_ece
+from utils.metrics import compute_accuracy, compute_ece, compute_aece
 
 
 class BaseTrainer:
@@ -291,14 +291,17 @@ class BaseTrainer:
         except ImportError:
             macro_f1 = 0.0
         
-        # Compute ECE (returned in [0,1]); report as percentage for consistency
+        # Compute calibration metrics (0-1), report as percentage for consistency
         ece = compute_ece(all_outputs, all_labels)
         ece_pct = ece * 100.0
+        aece = compute_aece(all_outputs, all_labels)
+        aece_pct = aece * 100.0
         
         results = {
             "accuracy": accuracy,
             "macro_f1": macro_f1,
-            "ece": ece_pct
+            "ece": ece_pct,
+            "aece": aece_pct
         }
         
         # Print results
@@ -309,6 +312,7 @@ class BaseTrainer:
         print(f"* error: {100 - accuracy:.1f}%")
         print(f"* macro_f1: {macro_f1:.1f}%")
         print(f"* ECE: {ece_pct:.2f}%")
+        print(f"* AECE: {aece_pct:.2f}%")
         
         # Write to TensorBoard
         for k, v in results.items():

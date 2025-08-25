@@ -56,7 +56,7 @@ def compute_macro_f1(logits: torch.Tensor, labels: torch.Tensor) -> float:
     f1 = f1_score(labels_np, pred, average='macro')
     return float(f1 * 100)
 
-def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 15) -> float:
+def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -> float:
     """
     Expected Calibration Error (ECE).
     Args:
@@ -69,8 +69,8 @@ def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 15) ->
     import torch.nn.functional as F
     device = logits.device
     probs = F.softmax(logits, dim=-1)
-    conf, preds = probs.max(dim=-1)       # [N]
-    acc = preds.eq(labels).float()        # [N]
+    conf, preds = probs.max(dim=-1)
+    acc = preds.eq(labels).float() 
     ece = torch.zeros(1, device=device)
     bin_boundaries = torch.linspace(0, 1, n_bins + 1, device=device)
     for i in range(n_bins):
@@ -81,6 +81,58 @@ def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 15) ->
             avg_conf_in_bin = conf[in_bin].mean()
             ece += torch.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
     return ece.item()
+
+
+def compute_aece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -> float:
+    """
+    Adaptive Expected Calibration Error (AECE).
+    Bins are formed by equal-frequency quantiles of confidence (i.e., each bin
+    contains approximately the same number of samples). Returns a value in [0, 1].
+
+    Args:
+        logits: [N, C] model outputs (unnormalized)
+        labels: [N] true labels
+        n_bins: number of adaptive bins
+    Returns:
+        AECE value (float, 0-1)
+    """
+    import torch.nn.functional as F
+    if logits.numel() == 0:
+        return 0.0
+    device = logits.device
+    probs = F.softmax(logits, dim=-1)
+    conf, preds = probs.max(dim=-1)
+    acc = preds.eq(labels).float()
+
+    num_samples = conf.numel()
+    if num_samples == 0:
+        return 0.0
+    n_bins = max(1, min(int(n_bins), int(num_samples)))
+
+    # Sort by confidence and split into contiguous bins with ~equal counts
+    sorted_conf, sort_idx = torch.sort(conf)
+    sorted_acc = acc[sort_idx]
+
+    # Bin edges as indices into the sorted arrays
+    edges = torch.linspace(0, num_samples, n_bins + 1, device=device)
+    edges = edges.round().long()
+    edges[0] = 0
+    edges[-1] = num_samples
+
+    aece = torch.zeros(1, device=device)
+    for i in range(n_bins):
+        left = int(edges[i].item())
+        right = int(edges[i + 1].item())
+        if right <= left:
+            continue
+        bin_conf = sorted_conf[left:right]
+        bin_acc = sorted_acc[left:right]
+        prop_in_bin = (right - left) / float(num_samples)
+        avg_conf_in_bin = bin_conf.mean()
+        accuracy_in_bin = bin_acc.mean()
+        aece += torch.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
+
+    return float(aece.item())
 
 
 class AverageMeter:
