@@ -88,7 +88,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Register the (fixed) template embeddings for downstream use.
         self._templates: torch.Tensor
         self.register_buffer("_templates", text_embeddings.detach())
-        # Optional weight transform; if 'softmax', constrain weights to convex combination over templates
         adapter_cfg = getattr(cfg, 'adapter', None) if not hasattr(cfg, 'TRAINER') else getattr(cfg.TRAINER, 'ADAPTER', None)
         self.weight_transform = None
         if adapter_cfg is not None:
@@ -107,7 +106,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         """
         Return class prototypes and KL term for a single stochastic sample.
         """
-        return self.prototypes_and_kl(num_samples=1)
+        proto_s = self.sample_prototypes(num_samples=1).squeeze(0)  # [K,D]
+        kl = self.variational_strategy.kl_divergence().sum()
+        return proto_s.to(dtype=self.orig_dtype, device=self.orig_device), kl
     
     def get_weight_distribution(self):
         return self.variational_strategy(self._templates.to(torch.float32))
@@ -138,44 +139,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         templates_tensor = cast(torch.Tensor, self._templates)
         return prototypes.to(templates_tensor)
 
-    def prototypes_and_kl(self, num_samples: int = 1):
-        """
-        Return averaged class prototypes over num_samples and KL term.
-        Uses the same stochastic path for both training and testing.
-        """
-        q = self.get_weight_distribution()  # batch of K multivariate normals over templates
-
-        if num_samples is None or int(num_samples) <= 1:
-            alpha = q.rsample()  # [K,M]
-            if alpha.size(0) == self.num_templates and alpha.size(1) == self.num_classes:
-                alpha = alpha.t()
-            if isinstance(self.weight_transform, str) and self.weight_transform.lower() == 'softmax':
-                w = torch.softmax(alpha, dim=-1)
-            else:
-                w = alpha
-            prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())  # [K,D]
-        else:
-            alpha = q.rsample(torch.Size([int(num_samples)]))  # [S,K,M]
-            if isinstance(self.weight_transform, str) and self.weight_transform.lower() == 'softmax':
-                w = torch.softmax(alpha, dim=-1)
-            else:
-                w = alpha  # [S,K,M]
-            prototypes_s = torch.einsum("skm,kmd->skd", w, self._templates.float())  # [S,K,D]
-            prototypes = prototypes_s.mean(dim=0)  # [K,D]
-
-        prototypes = prototypes.to(dtype=self.orig_dtype, device=self.orig_device)
-        kl = self.variational_strategy.kl_divergence().sum()
-
-        if self.training:
-            with torch.no_grad():
-                try:
-                    var_mean = q.variance.mean()
-                    if var_mean < 1e-3:
-                        print("[WARN] GP variance < 1e-3 – consider stronger KL or lower GP_LR")
-                except Exception:
-                    pass
-
-        return prototypes, kl
 
 class PerTemplateMean(gpytorch.means.Mean):
     """Learnable mean of shape [K, M] (one bias per class & template)."""
