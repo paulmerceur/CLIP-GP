@@ -116,7 +116,7 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                 # Prefer LR from log; fallback to directory suffix '_lr<val>'
                 dir_lr_match = _RE_DIR_LR.search(name_dir)
 
-                variant_label = config_label  # keep base name only
+                variant_label = name_dir
 
                 acc_values: List[float] = []
                 ece_values: List[float] = []

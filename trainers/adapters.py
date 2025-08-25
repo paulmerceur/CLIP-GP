@@ -100,8 +100,10 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     if config.adapter.use_gp and len(templates) > 1:
         with torch.no_grad():
             class_mean = text_embeds.mean(dim=1, keepdim=True) # [K,1,D]
-            zs_logits = (text_embeds * class_mean).sum(-1) # [K,M]
-        mean_init = zs_logits.to(dtype=torch.float32, device=device)
+            text_norm = F.normalize(text_embeds, p=2, dim=-1)            # [K,M,D]
+            class_mean_norm = F.normalize(class_mean, p=2, dim=-1)      # [K,1,D]
+            zs_cos = (text_norm * class_mean_norm).sum(-1)              # [K,M] in [-1,1]
+        mean_init = zs_cos.to(dtype=torch.float32, device=device)
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=config, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
         return proto, text_embeds, gp, kl
@@ -174,85 +176,40 @@ class CustomCLIP(nn.Module):
             features = self.image_encoder(image.type(self.dtype))
         return features
     
-    def forward_prototypes(self):
-        """Get current class prototypes (baseline or GP-weighted)."""
+    def forward_prototypes(self, num_samples: int = 1):
+        """Get class prototypes; if GP is enabled, average over num_samples."""
+        target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
-            current_prototypes, kl = self.gp_weighter.forward_and_kl()
+            current_prototypes, kl = self.gp_weighter.prototypes_and_kl(num_samples=num_samples)
             self._last_gp_kl = kl
-            # Ensure prototypes are on the same device as the model
-            target_device = next(self.parameters()).device
             if current_prototypes.device != target_device:
                 current_prototypes = current_prototypes.to(target_device)
-            
             return current_prototypes
-        else:
-            # Use base prototypes (mean across templates)
-            self._last_gp_kl = None
-            prototypes = self.text_embeddings_all.mean(dim=1)  # [K, D]
-            # Ensure prototypes are on the same device as the model
-            target_device = next(self.parameters()).device
-            if prototypes.device != target_device:
-                prototypes = prototypes.to(target_device)
-            
-            
-            
-            return prototypes
+        # Baseline: mean across templates
+        self._last_gp_kl = None
+        prototypes = self.text_embeddings_all.mean(dim=1)
+        if prototypes.device != target_device:
+            prototypes = prototypes.to(target_device)
+        return prototypes
     
     def forward(self, image, label=None):
-        """Forward pass for training."""
-        # Get visual features
+        """Forward pass for both train/test using unified sampling."""
         features = self.forward_features(image)
-        
-        # Get prototypes
-        prototypes = self.forward_prototypes()  # [K, D]
-        
-        # Apply adapter transformation to features
-        adapted_features = self.adapter(features)  # [B, num_classes]
-        
-        # Ensure same dtype and device
+        adapted_features = self.adapter(features)
+        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+        prototypes = self.forward_prototypes(num_samples=num_samples)
         if adapted_features.dtype != prototypes.dtype:
             prototypes = prototypes.to(dtype=adapted_features.dtype)
         if adapted_features.device != prototypes.device:
             prototypes = prototypes.to(device=adapted_features.device)
-        
-        # Compute logits via similarity with adapted features
         adapted_features_norm = adapted_features / adapted_features.norm(dim=-1, keepdim=True)
         prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
-        
-        # Ensure same dtype for matrix multiplication
         adapted_features_norm = adapted_features_norm.to(prototypes_norm.dtype)
-        logits = self.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
-        
-        return logits
+        return self.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
     
     def sample_forward(self, image, num_samples=50):
-        """Forward pass with GP sampling (for evaluation)."""
-        if self.gp_weighter is None:
-            return self.forward(image)
-        
-        # Sample multiple prototypes from GP
-        prototypes_s = self.gp_weighter.sample_prototypes(num_samples)  # [S, K, D]
-        
-        # Get visual features
-        features = self.forward_features(image)  # [B, D]
-        
-        # Apply adapter transformation to features
-        adapted_features = self.adapter(features)  # [B, D]
-        adapted_features_norm = adapted_features / adapted_features.norm(dim=-1, keepdim=True)
-        
-        # Compute logits for each sample
-        logits_samples = []
-        for s in range(num_samples):
-            proto_s = prototypes_s[s]  # [K, D]
-            proto_s_norm = proto_s / proto_s.norm(dim=-1, keepdim=True)
-            # Ensure same dtype for matrix multiplication by casting prototype to features dtype
-            proto_s_norm = proto_s_norm.to(adapted_features_norm.dtype)
-            logits_s = self.logit_scale.exp() * adapted_features_norm @ proto_s_norm.t()
-            logits_samples.append(logits_s)
-        
-        # Average across samples
-        logits = torch.stack(logits_samples, dim=0).mean(dim=0)
-        return logits
+        """Deprecated: forward() already supports averaging via gp_num_mc_samples."""
+        return self.forward(image)
 
 
 
@@ -392,7 +349,9 @@ class Trainer(BaseTrainer):
                 test_features = test_features.to(dtype=model.adapter.adapter.weight.dtype)
             test_projected = test_features
             test_adapted = model.adapter(test_projected)
-            test_prototypes = model.forward_prototypes()
+            # Quick test metric: use the same unified path
+            num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+            test_prototypes = model.forward_prototypes(num_samples=num_samples)
             if test_adapted.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_adapted.dtype)
             test_features_norm = test_adapted / test_adapted.norm(dim=-1, keepdim=True)
