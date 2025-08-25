@@ -209,8 +209,8 @@ class CustomCLIP(nn.Module):
             prototypes = prototypes.to(dtype=adapted_features.dtype)
         if adapted_features.device != prototypes.device:
             prototypes = prototypes.to(device=adapted_features.device)
-        adapted_features_norm = adapted_features / adapted_features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
+        adapted_features_norm = F.normalize(adapted_features, p=2, dim=-1)
+        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         adapted_features_norm = adapted_features_norm.to(prototypes_norm.dtype)
         return self.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
     
@@ -245,11 +245,7 @@ class Trainer(BaseTrainer):
 
         # Setup parameter groups
         for name, param in self.model.named_parameters():
-            if "logit_scale" in name:
-                param.requires_grad = True
-            elif "adapter" in name:
-                param.requires_grad = True
-            elif "gp_weighter" in name:
+            if "adapter" in name or "gp_weighter" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -266,8 +262,6 @@ class Trainer(BaseTrainer):
             # Two parameter groups: base params and GP params
             base_params = []
             base_params.extend([p for p in self.model.adapter.parameters() if p.requires_grad])
-            if self.model.logit_scale.requires_grad:
-                base_params.append(self.model.logit_scale)
             
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
 
@@ -291,8 +285,6 @@ class Trainer(BaseTrainer):
             # Single parameter group for baseline
             baseline_params = []
             baseline_params.extend(list(self.model.adapter.parameters()))
-            if self.model.logit_scale.requires_grad:
-                baseline_params.append(self.model.logit_scale)
             
             # Use utils optimization functions
             self.optim = build_optimizer(baseline_params, config.optim)
@@ -338,8 +330,8 @@ class Trainer(BaseTrainer):
         if adapted_features.device != prototypes.device:
             prototypes = prototypes.to(device=adapted_features.device)
         # Compute similarity logits with adapted features
-        adapted_features_norm = adapted_features / adapted_features.norm(dim=-1, keepdim=True)
-        prototypes_norm = prototypes / prototypes.norm(dim=-1, keepdim=True)
+        adapted_features_norm = F.normalize(adapted_features, p=2, dim=-1)
+        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         logits = model.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
         # Compute loss
         loss = self.compute_loss(logits, labels)
@@ -361,8 +353,8 @@ class Trainer(BaseTrainer):
             test_prototypes = model.forward_prototypes(num_samples=num_samples)
             if test_adapted.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_adapted.dtype)
-            test_features_norm = test_adapted / test_adapted.norm(dim=-1, keepdim=True)
-            test_prototypes_norm = test_prototypes / test_prototypes.norm(dim=-1, keepdim=True)
+            test_features_norm = F.normalize(test_adapted, p=2, dim=-1)
+            test_prototypes_norm = F.normalize(test_prototypes, p=2, dim=-1)
             test_logits = model.logit_scale.exp() * test_features_norm @ test_prototypes_norm.t()
             acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0]
         return {
@@ -398,13 +390,16 @@ class Trainer(BaseTrainer):
         l2_lambda = self.config.adapter.l2_lambda
         if l2_lambda > 0:
             shots = self.config.dataset.num_shots
-            identity = torch.eye(
-                model.adapter.adapter.weight.size(0),
-                device=model.adapter.adapter.weight.device,
-                dtype=model.adapter.adapter.weight.dtype
-            )
-            diff = torch.norm(model.adapter.adapter.weight - identity, p='fro') ** 2
-            l2_contribution = l2_lambda * diff / shots
+            base_prototypes = model.text_embeddings_all.mean(dim=1)
+            # Ensure base prototypes are on the same device/dtype as the adapter before applying it
+            target_device = model.adapter.adapter.weight.device
+            target_dtype = model.adapter.adapter.weight.dtype
+            if base_prototypes.device != target_device or base_prototypes.dtype != target_dtype:
+                base_prototypes = base_prototypes.to(device=target_device, dtype=target_dtype)
+            adapted_base_prototypes = model.adapter.adapter(base_prototypes)
+            # Dissimilarity per class (squared L2), average across classes
+            dissimilitude = (adapted_base_prototypes - base_prototypes).pow(2).sum(dim=-1).mean()
+            l2_contribution = l2_lambda * dissimilitude / shots
             total_loss += l2_contribution
         else:
             l2_contribution = None
@@ -601,12 +596,6 @@ class Trainer(BaseTrainer):
                                 f"  [DBG] proto_norms: mean={ps['mean']:.4f} std={ps['std']:.4f} "
                                 f"min={ps['min']:.4f} max={ps['max']:.4f}"
                             )
-                        # Logit scale (exp)
-                        try:
-                            ls_val = float(model.logit_scale.detach().exp().item())
-                            print(f"  [DBG] logit_scale(exp)={ls_val:.4f}")
-                        except Exception:
-                            pass
                         # Optimizer LRs (base vs GP when applicable) and grad norms
                         try:
                             if hasattr(self, "optim") and hasattr(self.optim, "param_groups"):
