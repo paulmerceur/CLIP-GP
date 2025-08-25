@@ -103,7 +103,6 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
             text_norm = F.normalize(text_embeds, p=2, dim=-1)            # [K,M,D]
             class_mean_norm = F.normalize(class_mean, p=2, dim=-1)      # [K,1,D]
             zs_cos = (text_norm * class_mean_norm).sum(-1)              # [K,M] in [-1,1]
-            print(f"zs_cos: {zs_cos}")
         mean_init = zs_cos.to(dtype=torch.float32, device=device)
         gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=config, mean_init=mean_init).to(device)
         proto, kl = gp.forward_and_kl()
