@@ -3,8 +3,8 @@
 Aggregate experimental results logged under ./output/EXPERIMENT_NAME/ …
 
 The script walks the directory tree produced by *scripts/adapt.sh* runs and
-summarises test metrics (accuracy & ECE) across random seeds.  It prints a
-readable table to stdout – no CSV or plots, just quick inspection.
+summarises test metrics (accuracy, ECE, AECE) across random seeds. It prints a
+readable table to stdout and saves plots per dataset (accuracy, ECE, AECE).
 
 Usage
 -----
@@ -29,6 +29,7 @@ from typing import Dict, List, Tuple, Any
 # ───────────────────────────
 _RE_ACC = re.compile(r"\*\s+accuracy:\s+([\d.]+)%", re.IGNORECASE)
 _RE_ECE = re.compile(r"\*\s+ECE:\s+([\d.]+)%", re.IGNORECASE)
+_RE_AECE = re.compile(r"\*\s+AECE:\s+([\d.]+)%", re.IGNORECASE)
 _RE_SHOTS_IN_DIR = re.compile(r"_(\d+)shots?", re.IGNORECASE)
 
 # Prefer explicit base LR matches and avoid GP_LR collisions
@@ -45,8 +46,8 @@ _RE_DIR_LR = re.compile(r"_lr([\d.eE+-]+)", re.IGNORECASE)
 # Single-file parser
 # ───────────────────────────
 
-def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str | None, str | None, str | None, str | None]:
-    """Return (accuracy, ece, lr, gp_lr, gp_beta, l2_lambda) extracted from *log_path*.
+def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, float | None, str | None, str | None, str | None, str | None]:
+    """Return (accuracy, ece, aece, lr, gp_lr, gp_beta, l2_lambda) extracted from *log_path*.
 
     Robust to different capitalisations and avoids confusing LR with GP_LR.
     """
@@ -54,10 +55,11 @@ def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str |
         text = log_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
         print(f"! Could not read {log_path}: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     acc_match = _RE_ACC.search(text)
     ece_match = _RE_ECE.search(text)
+    aece_match = _RE_AECE.search(text)
     # Try base LR in multiple forms, avoiding GP_LR
     lr_match = _RE_LOG_LR_UPPER.search(text) or _RE_LOG_LR_LOWER.search(text)
     gp_lr_match = _RE_LOG_GP_LR.search(text)
@@ -66,16 +68,17 @@ def parse_log(log_path: pathlib.Path) -> Tuple[float | None, float | None, str |
 
     if acc_match is None:
         print(f"! Could not read {log_path}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     acc = float(acc_match.group(1)) if acc_match else None
     ece = float(ece_match.group(1)) if ece_match else None
+    aece = float(aece_match.group(1)) if aece_match else None
     lr = lr_match.group(1) if lr_match else None
     gp_lr = gp_lr_match.group(1) if gp_lr_match else None
     gp_beta = gp_beta_match.group(1) if gp_beta_match else None
     l2_lambda = l2_lambda_match.group(1) if l2_lambda_match else None
 
-    return acc, ece, lr, gp_lr, gp_beta, l2_lambda
+    return acc, ece, aece, lr, gp_lr, gp_beta, l2_lambda
 
 
 # ───────────────────────────
@@ -120,17 +123,20 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
 
                 acc_values: List[float] = []
                 ece_values: List[float] = []
+                aece_values: List[float] = []
                 lr_val: str | None = dir_lr_match.group(1) if dir_lr_match else None
                 gp_lr_val: str | None = None
                 gp_beta_val: str | None = None
                 l2_lambda_val: str | None = None
 
                 for log_file in variant_dir.glob("seed*/log.txt"):
-                    acc, ece, lr, gp_lr, gp_beta, l2_lambda = parse_log(log_file)
+                    acc, ece, aece, lr, gp_lr, gp_beta, l2_lambda = parse_log(log_file)
                     if acc is not None:
                         acc_values.append(acc)
                     if ece is not None:
                         ece_values.append(ece)
+                    if aece is not None:
+                        aece_values.append(aece)
                     # Prefer log-derived LR over dir-derived; take first non-None
                     if lr is not None:
                         lr_val = lr
@@ -150,11 +156,13 @@ def walk_experiment(exp_name: str) -> Dict[str, List[Dict[str, Any]]]:
                     "gp_beta": gp_beta_val,
                     "l2_lambda": l2_lambda_val,
                     "shots": num_shots,
-                    "n_seeds": max(len(acc_values), len(ece_values)),
+                    "n_seeds": max(len(acc_values), len(ece_values), len(aece_values)),
                     "acc_mean": statistics.mean(acc_values) if acc_values else float("nan"),
                     "acc_std": statistics.stdev(acc_values) if len(acc_values) > 1 else 0.0,
                     "ece_mean": statistics.mean(ece_values) if ece_values else float("nan"),
                     "ece_std": statistics.stdev(ece_values) if len(ece_values) > 1 else 0.0,
+                    "aece_mean": statistics.mean(aece_values) if aece_values else float("nan"),
+                    "aece_std": statistics.stdev(aece_values) if len(aece_values) > 1 else 0.0,
                 }
                 dataset_records.append(record)
 
@@ -176,7 +184,7 @@ def print_results(results: Dict[str, List[Dict[str, Any]]]):
         print("\n=== Dataset:", dataset, "===")
         header = (
             f"{'Config':<50} {'LR':>8} {'GP_LR':>8} {'GP_BETA':>8} {'L2_LAMBDA':>8} {'Shots':>5} {'Seeds':>5} | "
-            f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7}"
+            f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7} | {'AECE µ':>7} {'AECE σ':>7}"
         )
         print(header)
         print("-" * len(header))
@@ -186,7 +194,8 @@ def print_results(results: Dict[str, List[Dict[str, Any]]]):
                 f"{r['l2_lambda'] or '-':>8} "
                 f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
-                f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f}"
+                f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f} | "
+                f"{r['aece_mean']:7.2f} {r['aece_std']:7.2f}"
             )
 
 
@@ -214,17 +223,13 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for r in records:
             if "baseline" in r["config"]:
-                # Differentiate between baseline variants
-                if "baseline_VP" in r["config"]:
-                    label = "baseline_VP"
-                else:
-                    label = "baseline"
+                label = "baseline"
             else:
-                    label = f"GP_L2{r['l2_lambda']}"
+                label = f"GP_L2{r['l2_lambda']}_B{r['gp_beta']}"
             grouped.setdefault(label, []).append(r)
 
-        # Combined figure with Accuracy and ECE side-by-side
-        fig, (ax_acc, ax_ece) = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
+        # Combined figure with Accuracy, ECE and AECE side-by-side
+        fig, (ax_acc, ax_ece, ax_aece) = plt.subplots(1, 3, figsize=(16, 5), sharex=True)
 
         # Collect unique shot counts for common x-axis ticks
         unique_shots = sorted({rec["shots"] for rec in records if rec["shots"] > 0})
@@ -241,9 +246,14 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
             ys_ece = [rec["ece_mean"] for rec in recs_sorted]
             ax_ece.plot(xs, ys_ece, marker="o", label=label)
 
+            # AECE
+            ys_aece = [rec["aece_mean"] for rec in recs_sorted]
+            ax_aece.plot(xs, ys_aece, marker="o", label=label)
+
         if unique_shots:
             ax_acc.set_xticks(unique_shots)
             ax_ece.set_xticks(unique_shots)
+            ax_aece.set_xticks(unique_shots)
 
         ax_acc.set_xlabel("# Shots")
         ax_acc.set_ylabel("Accuracy (%)")
@@ -252,6 +262,10 @@ def make_plots(results: Dict[str, List[Dict[str, Any]]], exp_name: str):
         ax_ece.set_xlabel("# Shots")
         ax_ece.set_ylabel("ECE (%)")
         ax_ece.set_title("ECE")
+
+        ax_aece.set_xlabel("# Shots")
+        ax_aece.set_ylabel("AECE (%)")
+        ax_aece.set_title("AECE")
 
         # Shared legend – place slightly below the title
         handles, labels = ax_acc.get_legend_handles_labels()
