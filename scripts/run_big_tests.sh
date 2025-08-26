@@ -12,25 +12,10 @@ fi
 EXPERIMENT_NAME=$1
 GPU_ID=${2:-0}  # Default to GPU 0 if not provided
 
-# Dataset configurations: dataset_name:regularization_value
-DATASETS=(
-    "oxford_pets:50.0"
-    "oxford_flowers:10.0"
-    "caltech101:20.0"
-    "dtd:20.0"
-    "fgvc_aircraft:20.0"
-    "eurosat:20.0"
-    "food101:20.0"
-    "stanford_cars:50.0"
-    "ucf101:20.0"
-)
+DATASETS=("oxford_pets" "oxford_flowers" "caltech101" "dtd" "fgvc_aircraft" "eurosat" "food101" "stanford_cars" "ucf101")
 
-for dataset_config in "${DATASETS[@]}"; do
-    # Parse dataset name and regularization value
-    dataset_name=$(echo $dataset_config | cut -d: -f1)
-    reg_value=$(echo $dataset_config | cut -d: -f2)
-    
-    ./scripts/run_baseline.sh "${EXPERIMENT_NAME}" "$dataset_name" "$reg_value" "$GPU_ID"
+for dataset_name in "${DATASETS[@]}"; do
+    ./scripts/run_baseline.sh "${EXPERIMENT_NAME}" "$dataset_name" "$GPU_ID"
     baseline_exit_code=$?
     
     if [ $baseline_exit_code -ne 0 ]; then
@@ -39,7 +24,7 @@ for dataset_config in "${DATASETS[@]}"; do
         log_with_timestamp "✓ Baseline experiment completed for $dataset_name"
     fi
     
-    ./scripts/run_gp.sh "${EXPERIMENT_NAME}" "$dataset_name" "$reg_value" "$GPU_ID"
+    ./scripts/run_gp.sh "${EXPERIMENT_NAME}" "$dataset_name" "$GPU_ID"
     gp_exit_code=$?
     
     if [ $gp_exit_code -ne 0 ]; then

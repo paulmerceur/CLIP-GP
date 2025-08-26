@@ -87,52 +87,63 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
         for name in classnames:
             tok = clip.tokenize([t.format(name) for t in templates]).to(device)
             if text_encoder is not None:
-                # Use custom TextEncoder (the correct way!)
                 e = clip_model.token_embedding(tok).type(clip_model.dtype)
                 emb = text_encoder(e, tok)
             else:
-                # Fallback to CLIP's encode_text
                 emb = clip_model.encode_text(tok)
             emb_list.append(emb)
     text_embeds = torch.stack(emb_list) # [K,M,D]
 
-    # Instantiate GP
-    if config.adapter.use_gp and len(templates) > 1:
-        with torch.no_grad():
-            class_mean = text_embeds.mean(dim=1, keepdim=True) # [K,1,D]
-            text_norm = F.normalize(text_embeds, p=2, dim=-1)            # [K,M,D]
-            class_mean_norm = F.normalize(class_mean, p=2, dim=-1)      # [K,1,D]
-            zs_cos = (text_norm * class_mean_norm).sum(-1)              # [K,M] in [-1,1]
-        mean_init = zs_cos.to(dtype=torch.float32, device=device)
-        gp = GaussianProcessTemplateWeighter(text_embeddings=text_embeds, cfg=config, mean_init=mean_init).to(device)
-        proto, kl = gp.forward_and_kl()
-        return proto, text_embeds, gp, kl
-
     # GP disabled -> simple average
-    return text_embeds.mean(1), text_embeds, None, None
+    return text_embeds.mean(1), text_embeds
 
 
 class LinearAdapter(nn.Module):
     """Simple linear adapter with learnable scaling."""
 
-    def __init__(self, input_dim: int, output_dim: int, init_type: str = "identity"):
+    def __init__(self, base_text_features: torch.Tensor):
         super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.init_type = init_type
+        self.register_buffer("base_text_features", base_text_features)
+        self.base_text_features = base_text_features
+        # Per-class l2 regularization multipliers
+        num_classes = base_text_features.size(0)
+        self.register_buffer("alpha_constraint", torch.ones(num_classes, dtype=base_text_features.dtype, device=base_text_features.device))
 
-        # Learnable adapter weights
-        self.adapter = nn.Linear(self.input_dim, self.output_dim, bias=False)
+        # ZS Initialization
+        self.prototypes = nn.Parameter(base_text_features.clone())
 
-        # Identity if square, else Kaiming
-        with torch.no_grad():
-            if self.input_dim == self.output_dim and self.init_type.lower() in {"identity", "id", "zs"}:
-                self.adapter.weight.copy_(torch.eye(self.output_dim, dtype=self.adapter.weight.dtype))
-            else:
-                nn.init.kaiming_uniform_(self.adapter.weight, a=math.sqrt(5))
+    def constraint(self):
+        # Compare raw embeddings; forward already normalizes for logits
+        dissimilitude = (self.prototypes - self.base_text_features.clone()).pow(2).sum(dim=-1)
+        alpha = cast(torch.Tensor, self.alpha_constraint)
+        return torch.mean(alpha * dissimilitude)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.adapter(features)
+    @torch.no_grad()
+    def init_alpha_from_zero_shot(self, labels: torch.Tensor, logits: torch.Tensor):
+        """
+        Initialize per-class alpha multipliers from zero-shot predictions.
+        Uses per-class error rate, normalized to have mean 1 for scale stability.
+        """
+        alpha_buf = cast(torch.Tensor, self.alpha_constraint)
+        dev = alpha_buf.device
+        labels = labels.to(dev)
+        logits = logits.to(dev)
+        preds = logits.argmax(dim=1)
+        num_classes = int(alpha_buf.shape[0])
+        # Compute per-class counts and corrects via bincount
+        labels_i64 = labels.to(torch.int64)
+        counts = torch.bincount(labels_i64, minlength=num_classes).clamp_min(1)
+        correct_labels = labels_i64[preds.eq(labels)]
+        corrects = torch.bincount(correct_labels, minlength=num_classes)
+        acc = corrects.float() / counts.float()
+        error = 1.0 - acc
+        # Normalize to mean 1
+        mean_error = error.mean().clamp_min(1e-6)
+        alpha = error / mean_error
+        alpha_buf.copy_(alpha.to(dtype=alpha_buf.dtype))
+
+    def forward(self) -> torch.Tensor:
+        return self.prototypes
 
 
 class CustomCLIP(nn.Module):
@@ -141,37 +152,32 @@ class CustomCLIP(nn.Module):
     def __init__(self, config, classnames, clip_model):
         super().__init__()
         self.config = config
-        self.num_classes = len(classnames)
-        self.dtype = clip_model.dtype
-        
         # Store CLIP components
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
-        self.vision_dim = clip_model.text_projection.shape[1]
+        self.dtype = clip_model.dtype
+        
+        self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
         
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
         
         # Get text features and setup GP if needed
-        base_proto, self.text_embeddings_all, self.gp_weighter, _ = _get_base_text_features(
-            config, classnames, clip_model, self.text_encoder
-        )
+        base_text_features, self.text_embeddings_all = _get_base_text_features(config, classnames, clip_model, self.text_encoder)
         
         # Create adapter
-        self.adapter = LinearAdapter(
-            input_dim=self.vision_dim,
-            output_dim=self.vision_dim,
-            init_type=getattr(config.adapter, "init", "identity"),
-        )
+        self.adapter = LinearAdapter(base_text_features=base_text_features)
+
+        # Create GP weighter if needed
+        self.gp_weighter = None
+        if getattr(config.adapter, 'use_gp', False):
+            self.gp_weighter = GaussianProcessTemplateWeighter(
+                text_embeddings=self.text_embeddings_all,
+                cfg=config,
+            )
     
-    def get_gp_kl_divergence(self):
-        """Get KL divergence from GP (if using GP)."""
-        if not hasattr(self, '_last_gp_kl'):
-            return None
-        return getattr(self, "_last_gp_kl", None)
-    
-    def forward_features(self, image):
-        """Extract visual features."""
+    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
+        """Extract visual features from images without grad."""
         with torch.no_grad():
             features = self.image_encoder(image.type(self.dtype))
         return features
@@ -180,39 +186,65 @@ class CustomCLIP(nn.Module):
         """Get class prototypes; if GP is enabled, average over num_samples."""
         target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
-            if num_samples is None or int(num_samples) <= 1:
-                proto_s, kl = self.gp_weighter.forward_and_kl()
-                current_prototypes = proto_s
-                self._last_gp_kl = kl
-            else:
-                # Draw S samples and average; record KL once
-                proto_s = self.gp_weighter.sample_prototypes(int(num_samples))  # [S,K,D]
-                current_prototypes = proto_s.mean(dim=0)
-                self._last_gp_kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
+            if num_samples <= 1: num_samples = 1
+            proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+            current_prototypes = proto_s.squeeze(0) if num_samples == 1 else proto_s.mean(dim=0)
+
             if current_prototypes.device != target_device:
                 current_prototypes = current_prototypes.to(target_device)
+                
+            # Mirror CLAP behavior: keep adapter prototypes in sync with the prototypes used for logits
+            # so that the zero-shot constraint applies to the same vectors.
+            try:
+                if self.training and hasattr(self, 'adapter') and hasattr(self.adapter, 'prototypes'):
+                    # Match norms to base_text_features so L2 constraint compares like-for-like
+                    with torch.no_grad():
+                        base = cast(torch.Tensor, self.adapter.base_text_features)
+                        target_norm = base.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                        cur_norm = current_prototypes.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                        current_prototypes_rescaled = current_prototypes * (target_norm / cur_norm)
+                    self.adapter.prototypes.data = current_prototypes_rescaled.detach().to(
+                        dtype=self.adapter.prototypes.dtype, device=self.adapter.prototypes.device
+                    )
+            except Exception:
+                pass
             return current_prototypes
-        # Baseline: mean across templates
-        self._last_gp_kl = None
-        prototypes = self.text_embeddings_all.mean(dim=1)
+        # Baseline when GP is disabled: use learnable prototypes (adapter)
+        prototypes = self.adapter.forward()
         if prototypes.device != target_device:
             prototypes = prototypes.to(target_device)
         return prototypes
     
-    def forward(self, image, label=None):
-        """Forward pass for both train/test using unified sampling."""
-        features = self.forward_features(image)
-        adapted_features = self.adapter(features)
-        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+    def forward_features(self, features: torch.Tensor) -> torch.Tensor:
+        """Compute logits from precomputed visual features (CLAP-style forward_lp).
+
+        This normalizes features, obtains (possibly GP-sampled) prototypes,
+        normalizes them, and returns the scaled cosine similarities.
+        """
+        num_samples = self.gp_num_mc_samples
         prototypes = self.forward_prototypes(num_samples=num_samples)
-        if adapted_features.dtype != prototypes.dtype:
-            prototypes = prototypes.to(dtype=adapted_features.dtype)
-        if adapted_features.device != prototypes.device:
-            prototypes = prototypes.to(device=adapted_features.device)
-        adapted_features_norm = F.normalize(adapted_features, p=2, dim=-1)
+        # Ensure same dtype/device
+        if features.dtype != prototypes.dtype:
+            prototypes = prototypes.to(dtype=features.dtype)
+        if features.device != prototypes.device:
+            prototypes = prototypes.to(device=features.device)
+        features_norm = F.normalize(features, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-        adapted_features_norm = adapted_features_norm.to(prototypes_norm.dtype)
-        return self.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
+        features_norm = features_norm.to(prototypes_norm.dtype)
+        return self.logit_scale.exp() * features_norm @ prototypes_norm.t()
+
+    def forward(self, image: torch.Tensor, return_features: bool = False):
+        """CLAP-like forward.
+
+        - Extract image features (encode_image)
+        - Compute logits via forward_features (normalization + prototypes)
+        - Optionally return both logits and features
+        """
+        features = self.encode_image(image)
+        logits = self.forward_features(features)
+        if return_features:
+            return logits, features
+        return logits
     
     def sample_forward(self, image, num_samples=50):
         """Deprecated: forward() already supports averaging via gp_num_mc_samples."""
@@ -302,12 +334,7 @@ class Trainer(BaseTrainer):
             labels = torch.tensor(labels).to(self.device)
         else:
             labels = labels.detach().clone().to(self.device)
-        if features.dtype != model.adapter.adapter.weight.dtype:
-            features = features.to(dtype=model.adapter.adapter.weight.dtype)
         projected_features = features
-        
-        # Apply adapter transformation to features
-        adapted_features = model.adapter(projected_features)
         
         # Get prototypes
         prototypes = model.forward_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
@@ -325,14 +352,12 @@ class Trainer(BaseTrainer):
             # Keep training resilient if any debug metric fails
             self._dbg_proto_stats = None
         # Ensure same dtype and device
-        if adapted_features.dtype != prototypes.dtype:
-            prototypes = prototypes.to(dtype=adapted_features.dtype)
-        if adapted_features.device != prototypes.device:
-            prototypes = prototypes.to(device=adapted_features.device)
-        # Compute similarity logits with adapted features
-        adapted_features_norm = F.normalize(adapted_features, p=2, dim=-1)
-        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-        logits = model.logit_scale.exp() * adapted_features_norm @ prototypes_norm.t()
+        if projected_features.dtype != prototypes.dtype:
+            prototypes = prototypes.to(dtype=projected_features.dtype)
+        if projected_features.device != prototypes.device:
+            prototypes = prototypes.to(device=projected_features.device)
+        # Compute logits via the model's centralized path (keeps logic in model)
+        logits = model.forward_features(projected_features)
         # Compute loss
         loss = self.compute_loss(logits, labels)
         # Backward pass
@@ -344,18 +369,13 @@ class Trainer(BaseTrainer):
             # Test accuracy (using stored test features)
             test_features = self.features_test.to(self.device)
             # Test features are CLIP visual features
-            if test_features.dtype != model.adapter.adapter.weight.dtype:
-                test_features = test_features.to(dtype=model.adapter.adapter.weight.dtype)
             test_projected = test_features
-            test_adapted = model.adapter(test_projected)
             # Quick test metric: use the same unified path
             num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
             test_prototypes = model.forward_prototypes(num_samples=num_samples)
-            if test_adapted.dtype != test_prototypes.dtype:
-                test_prototypes = test_prototypes.to(dtype=test_adapted.dtype)
-            test_features_norm = F.normalize(test_adapted, p=2, dim=-1)
-            test_prototypes_norm = F.normalize(test_prototypes, p=2, dim=-1)
-            test_logits = model.logit_scale.exp() * test_features_norm @ test_prototypes_norm.t()
+            if test_projected.dtype != test_prototypes.dtype:
+                test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
+            test_logits = model.forward_features(test_projected)
             acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0]
         return {
             "loss": loss.item(),
@@ -373,36 +393,18 @@ class Trainer(BaseTrainer):
 
         # Add GP KL divergence if using GP
         if self.config.adapter.use_gp and model.gp_weighter is not None:
-            kl_loss = model.get_gp_kl_divergence()
-            if kl_loss is not None:
-                beta = self.config.adapter.gp_beta
-                kl_contribution = beta * kl_loss
-                total_loss += kl_contribution
-            else:
-                beta = self.config.adapter.gp_beta
-                kl_contribution = None
+            kl_loss = model.gp_weighter.kl_term
+            beta = self.config.adapter.gp_beta
+            kl_contribution = beta * kl_loss
+            total_loss += kl_contribution
         else:
             kl_loss = None
             kl_contribution = None
             beta = getattr(self.config.adapter, "gp_beta", 0.0)
         
-        # Add adapter regularization (toward identity)
-        l2_lambda = self.config.adapter.l2_lambda
-        if l2_lambda > 0:
-            shots = self.config.dataset.num_shots
-            base_prototypes = model.text_embeddings_all.mean(dim=1)
-            # Ensure base prototypes are on the same device/dtype as the adapter before applying it
-            target_device = model.adapter.adapter.weight.device
-            target_dtype = model.adapter.adapter.weight.dtype
-            if base_prototypes.device != target_device or base_prototypes.dtype != target_dtype:
-                base_prototypes = base_prototypes.to(device=target_device, dtype=target_dtype)
-            adapted_base_prototypes = model.adapter.adapter(base_prototypes)
-            # Dissimilarity per class (squared L2), average across classes
-            dissimilitude = (adapted_base_prototypes - base_prototypes).pow(2).sum(dim=-1).mean()
-            l2_contribution = l2_lambda * dissimilitude / shots
-            total_loss += l2_contribution
-        else:
-            l2_contribution = None
+        # Adapter regularization: keep learnable prototypes close to zero-shot base
+        l2_contribution = model.adapter.constraint()
+        total_loss += l2_contribution
         
         # Store debug components for periodic printing
         try:
@@ -503,6 +505,10 @@ class Trainer(BaseTrainer):
 
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
+        # Initialize per-class alpha_constraint once from zero-shot train logits
+        model_ref = cast(CustomCLIP, self.model)
+        if hasattr(model_ref, 'adapter') and hasattr(model_ref.adapter, 'init_alpha_from_zero_shot'):
+            model_ref.adapter.init_alpha_from_zero_shot(self.labels_train, logits_zs)
 
         # Run the actual training using the base class training loop
         self.before_train()
@@ -574,6 +580,8 @@ class Trainer(BaseTrainer):
                     info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
                     info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]
                     info += [f"loss {loss_summary['loss']:.4f}"]
+                    info += [f"acc_train {loss_summary['acc_train']:.4f}"]
+                    info += [f"acc_test {loss_summary['acc_test']:.4f}"]
                     info += [f"eta {eta}"]
                     print(" ".join(info))
 
@@ -696,17 +704,8 @@ class Trainer(BaseTrainer):
             if data_loader is not None:
                 for batch_idx, batch in enumerate(data_loader):
                     input_data, labels = self.parse_batch_train(batch)
-                    
                     with torch.no_grad():
-                        if hasattr(self.model, 'forward_features'):
-                            features = self.model.forward_features(input_data)  # type: ignore
-                            # Use model_inference to enable GP sampling at eval
-                            logits = self.model_inference(input_data)  # type: ignore
-                        else:
-                            # Fallback if model doesn't have forward_features
-                            logits = self.model_inference(input_data)  # type: ignore
-                            features = logits  # Use logits as features
-                    
+                        logits, features = self.model(input_data, return_features=True)  # type: ignore
                     labels_ds.append(labels.cpu())
                     logits_ds.append(logits.cpu())
                     features_ds.append(features.cpu())

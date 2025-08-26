@@ -9,7 +9,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     GP-based template weighter that leans entirely on GPyTorch's built-ins.
     """
 
-    def __init__(self, text_embeddings: torch.Tensor, cfg: Any, mean_init: Optional[torch.Tensor] = None, **kwargs) -> None:
+    def __init__(self, text_embeddings: torch.Tensor, cfg: Any, **kwargs) -> None:
         # Keep original dtype/device for later but run GP in fp32 for numerical stability (GPyTorch is primarily tested in fp32).
         self.orig_dtype = text_embeddings.dtype
         self.orig_device = text_embeddings.device
@@ -52,10 +52,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         # Initialise the per-template mean
         self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
-        if mean_init is None:
-            raise ValueError("GaussianProcessTemplateWeighter requires mean_init computed from zero-shot normalized template scores.")
-        assert mean_init.shape == (self.num_classes, self.num_templates), \
-            "mean_init must have shape [num_classes, num_templates]"
+        with torch.no_grad():
+            class_mean = text_embeddings_fp32.mean(dim=1, keepdim=True)  # [K,1,D]
+            text_norm = F.normalize(text_embeddings_fp32, p=2, dim=-1)   # [K,M,D]
+            class_mean_norm = F.normalize(class_mean, p=2, dim=-1)       # [K,1,D]
+            mean_init = (text_norm * class_mean_norm).sum(-1)            # [K,M]
         self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
 
         kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
@@ -138,6 +139,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
         templates_tensor = cast(torch.Tensor, self._templates)
         return prototypes.to(templates_tensor)
+
+    @property
+    def kl_term(self) -> torch.Tensor:
+        """GP variational KL divergence (summed over classes)."""
+        return self.variational_strategy.kl_divergence().sum()
 
 
 class PerTemplateMean(gpytorch.means.Mean):
