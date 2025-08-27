@@ -31,7 +31,4 @@ TRAINER:
     CONSTRAINT: none  
     PREC: fp16
     NUM_TEMPLATES: 7
-    # Baseline configuration (no GP)
     USE_GP: False
-    # Adapter L2 toward identity (smaller default)
-    L2_LAMBDA: 0.1

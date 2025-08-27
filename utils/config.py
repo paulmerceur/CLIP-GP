@@ -28,10 +28,6 @@ class AdapterConfig:
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_weight_transform: str = "linear"  # "linear" or "softmax" over templates
     
-    # Regularization (adapter weight toward identity)
-    l2_lambda: float = 0.1
-    res_l2_coef: float = 1e-4  # Residual L2 coefficient
-
 
 @dataclass
 class ModelConfig:
