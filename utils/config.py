@@ -14,11 +14,9 @@ from pathlib import Path
 class AdapterConfig:
     """Adapter-specific configuration"""
     # Basic adapter settings
-    init: str = "ZS"  # Initialization method
-    constraint: str = "none"  # Constraint type: "none", "l2"
-    enhanced_base: str = "none"  # Enhanced base classifier
     prec: str = "fp16"  # Precision: "fp16", "fp32", "amp"
     num_templates: int = 1  # Number of templates to use
+    l2_lambda: float = 100.0  # L2 regularization weight
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -41,7 +39,7 @@ class ModelConfig:
 class DatasetConfig:
     """Dataset configuration"""
     name: str = "Caltech101"  # Dataset name
-    root: str = "/scratch/pmerceur/data"  # Path to dataset root
+    root: str = "/export/datasets/public"  # Path to dataset root
     num_shots: int = 1  # Number of shots for few-shot learning
     subsample_classes: str = "all"  # "all", "base", or "new"
     source_domains: Optional[List[str]] = None  # Source domains for DA/DG
@@ -201,7 +199,7 @@ def parse_args_to_config() -> Config:
     parser = argparse.ArgumentParser(description="CLIP-GP Training")
     
     # Dataset arguments
-    parser.add_argument("--root", type=str, default="/scratch/pmerceur/data", 
+    parser.add_argument("--root", type=str, default="/export/datasets/public", 
                        help="Path to dataset root")
     parser.add_argument("--dataset", type=str, default="Caltech101",
                        choices=["Caltech101", "OxfordPets", "OxfordFlowers", "FGVCAircraft", 
@@ -257,8 +255,6 @@ def parse_args_to_config() -> Config:
                        help="Target domains for DA/DG")
     parser.add_argument("--transforms", type=str, nargs="+",
                        help="Data augmentation methods")
-    parser.add_argument("--enhanced-base", type=str, default="none",
-                       help="Enhanced base classifier weight")
     
     # Additional config options
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER,
@@ -319,8 +315,6 @@ def parse_args_to_config() -> Config:
         config.dataset.target_domains = args.target_domains
     if args.transforms:
         config.input.transforms = args.transforms
-    if args.enhanced_base:
-        config.adapter.enhanced_base = args.enhanced_base
     
     # Load configuration files
     if args.dataset_config_file:

@@ -20,17 +20,11 @@ SEEDS=(1 2 3)
 SHOTS=(1 4 8 16)
 CONFIG="gp"
 BETA=0.001
-
-echo "Running GP experiments..."
-echo "Experiment: $EXPERIMENT_NAME"
-echo "BETA: $BETA"
-echo "Datasets: ${DATASET[*]}"
-echo "Shots: ${SHOTS[*]}"
-echo ""
+L2_LAMBDA=0.1
 
 for SEED in "${SEEDS[@]}"; do
     for SHOT in "${SHOTS[@]}"; do
-        DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}_${SHOT}shots_beta${BETA}/seed${SEED}
+        DIR=output/${EXPERIMENT_NAME}/${DATASET}/${CONFIG}_${SHOT}shots_beta${BETA}_l2${L2_LAMBDA}/seed${SEED}
         if [ -d "$DIR" ]; then
             echo "Oops! The results exist at ${DIR} (so skip this job)"
             continue
@@ -45,6 +39,7 @@ for SEED in "${SEEDS[@]}"; do
             --config-file configs/trainers/${CONFIG}.yaml \
             --output-dir $DIR \
             DATASET.NUM_SHOTS $SHOT \
+            TRAINER.ADAPTER.L2_LAMBDA $L2_LAMBDA \
             TRAINER.ADAPTER.GP_BETA $BETA
     done
 done

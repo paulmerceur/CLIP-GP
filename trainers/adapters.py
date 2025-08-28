@@ -10,7 +10,7 @@ import math
 
 from utils.trainer import BaseTrainer
 from utils.metrics import compute_accuracy, AverageMeter
-from utils.checkpoint import load_pretrained_weights
+ 
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 
@@ -99,7 +99,7 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
 
 
 class LinearAdapter(nn.Module):
-    """Simple linear adapter with learnable scaling."""
+    """Legacy linear probe (not used in training)."""
 
     def __init__(self, base_text_features: torch.Tensor):
         super().__init__()
@@ -165,8 +165,15 @@ class CustomCLIP(nn.Module):
         # Get text features and setup GP if needed
         base_text_features, self.text_embeddings_all = _get_base_text_features(config, classnames, clip_model, self.text_encoder)
         
-        # Create adapter
-        self.adapter = LinearAdapter(base_text_features=base_text_features)
+        # Register base text features (frozen zero-shot prototypes)
+        self.register_buffer("base_text_features", base_text_features)
+
+        # Learnable visual projection W (full-rank, bias-free), initialized to identity
+        dim = int(base_text_features.shape[-1])
+        self.visual_proj = nn.Linear(dim, dim, bias=False)
+        with torch.no_grad():
+            eye = torch.eye(dim)
+            self.visual_proj.weight.copy_(eye)
 
         # Create GP weighter if needed
         self.gp_weighter = None
@@ -183,7 +190,11 @@ class CustomCLIP(nn.Module):
         return features
     
     def forward_prototypes(self, num_samples: int = 1):
-        """Get class prototypes; if GP is enabled, average over num_samples."""
+        """Get class prototypes; if GP is enabled, average over num_samples.
+
+        When GP is disabled, use the zero-shot base text features (no trainable
+        linear probe over class prototypes).
+        """
         target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
             if num_samples <= 1: num_samples = 1
@@ -192,28 +203,12 @@ class CustomCLIP(nn.Module):
 
             if current_prototypes.device != target_device:
                 current_prototypes = current_prototypes.to(target_device)
-                
-            # Mirror CLAP behavior: keep adapter prototypes in sync with the prototypes used for logits
-            # so that the zero-shot constraint applies to the same vectors.
-            try:
-                if self.training and hasattr(self, 'adapter') and hasattr(self.adapter, 'prototypes'):
-                    # Match norms to base_text_features so L2 constraint compares like-for-like
-                    with torch.no_grad():
-                        base = cast(torch.Tensor, self.adapter.base_text_features)
-                        target_norm = base.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-                        cur_norm = current_prototypes.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-                        current_prototypes_rescaled = current_prototypes * (target_norm / cur_norm)
-                    self.adapter.prototypes.data = current_prototypes_rescaled.detach().to(
-                        dtype=self.adapter.prototypes.dtype, device=self.adapter.prototypes.device
-                    )
-            except Exception:
-                pass
             return current_prototypes
-        # Baseline when GP is disabled: use learnable prototypes (adapter)
-        prototypes = self.adapter.forward()
-        if prototypes.device != target_device:
-            prototypes = prototypes.to(target_device)
-        return prototypes
+        # Baseline when GP is disabled: use zero-shot base text features (frozen)
+        base = cast(torch.Tensor, self.base_text_features)
+        if base.device != target_device:
+            base = base.to(target_device)
+        return base
     
     def forward_features(self, features: torch.Tensor) -> torch.Tensor:
         """Compute logits from precomputed visual features (CLAP-style forward_lp).
@@ -228,7 +223,9 @@ class CustomCLIP(nn.Module):
             prototypes = prototypes.to(dtype=features.dtype)
         if features.device != prototypes.device:
             prototypes = prototypes.to(device=features.device)
-        features_norm = F.normalize(features, p=2, dim=-1)
+        # Apply learnable visual projection W before normalization
+        projected = self.visual_proj(features)
+        features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         features_norm = features_norm.to(prototypes_norm.dtype)
         return self.logit_scale.exp() * features_norm @ prototypes_norm.t()
@@ -245,11 +242,6 @@ class CustomCLIP(nn.Module):
         if return_features:
             return logits, features
         return logits
-    
-    def sample_forward(self, image, num_samples=50):
-        """Deprecated: forward() already supports averaging via gp_num_mc_samples."""
-        return self.forward(image)
-
 
 
 @TRAINER_REGISTRY.register("Trainer")
@@ -275,15 +267,14 @@ class Trainer(BaseTrainer):
         print("Building custom CLIP")
         self.model = CustomCLIP(config, classnames, clip_model)
 
-        # Setup parameter groups
+        # Setup parameter groups: train only visual_proj and GP (if enabled)
         for name, param in self.model.named_parameters():
-            if "adapter" in name or "gp_weighter" in name:
+            if "visual_proj" in name or "gp_weighter" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
 
-        if config.model.init_weights:
-            load_pretrained_weights(self.model.adapter, config.model.init_weights)
+        # No pretrained adapter weights: linear probe is not used for training
 
         self.model.to(self.device)
         self.model.float()
@@ -293,7 +284,7 @@ class Trainer(BaseTrainer):
         if config.adapter.use_gp and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
             base_params = []
-            base_params.extend([p for p in self.model.adapter.parameters() if p.requires_grad])
+            base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
             
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
 
@@ -316,7 +307,7 @@ class Trainer(BaseTrainer):
         else:
             # Single parameter group for baseline
             baseline_params = []
-            baseline_params.extend(list(self.model.adapter.parameters()))
+            baseline_params.extend(list(self.model.visual_proj.parameters()))
             
             # Use utils optimization functions
             self.optim = build_optimizer(baseline_params, config.optim)
@@ -336,7 +327,7 @@ class Trainer(BaseTrainer):
             labels = labels.detach().clone().to(self.device)
         projected_features = features
         
-        # Get prototypes
+        # Get prototypes (for diagnostics only)
         prototypes = model.forward_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
@@ -356,10 +347,11 @@ class Trainer(BaseTrainer):
             prototypes = prototypes.to(dtype=projected_features.dtype)
         if projected_features.device != prototypes.device:
             prototypes = prototypes.to(device=projected_features.device)
-        # Compute logits via the model's centralized path (keeps logic in model)
+        # Compute loss with Monte Carlo expectation over GP prototypes (if enabled)
+        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+        loss = self.compute_loss_from_features(projected_features, labels, num_samples=num_samples)
+        # Compute logits via the model's centralized path for metrics
         logits = model.forward_features(projected_features)
-        # Compute loss
-        loss = self.compute_loss(logits, labels)
         # Backward pass
         self._backward_and_update(loss)
         # Compute accuracies for logging
@@ -402,9 +394,17 @@ class Trainer(BaseTrainer):
             kl_contribution = None
             beta = getattr(self.config.adapter, "gp_beta", 0.0)
         
-        # Adapter regularization: keep learnable prototypes close to zero-shot base
-        l2_contribution = model.adapter.constraint()
-        total_loss += l2_contribution
+        # Identity regularizer on visual projection W
+        try:
+            W = model.visual_proj.weight
+            eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
+            l2_reg = (W - eye).pow(2).sum()
+            # Scale by number of shots
+            shots = self.config.dataset.num_shots
+            l2_reg = l2_reg * self.config.adapter.l2_lambda / shots
+            total_loss += l2_reg
+        except Exception:
+            l2_reg = None
         
         # Store debug components for periodic printing
         try:
@@ -415,7 +415,89 @@ class Trainer(BaseTrainer):
                 "kl_beta": float(beta),
                 "kl": float(kl_contribution.detach().item()) if kl_contribution is not None else 0.0,
                 "kl_per_img": float((kl_contribution / batch_size).detach().item()) if kl_contribution is not None and batch_size > 0 else 0.0,
-                "l2": float(l2_contribution.detach().item()) if l2_contribution is not None else 0.0,
+                "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
+                "total": float(total_loss.detach().item()),
+            }
+        except Exception:
+            pass
+
+        return total_loss
+
+    def compute_loss_from_features(self, features: torch.Tensor, labels: torch.Tensor, num_samples: int = 1):
+        """Compute loss using MC expectation over GP prototypes when enabled.
+
+        If GP is enabled and num_samples > 1, draws num_samples prototype sets,
+        computes per-sample cross-entropy, and averages them. Otherwise falls
+        back to a single forward.
+        """
+        from typing import cast
+        model = cast(CustomCLIP, self.model)
+
+        use_gp = bool(getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None)
+        gp_weighter = getattr(model, 'gp_weighter', None)
+        num_samples = int(num_samples or 1)
+
+        if use_gp and num_samples > 1 and gp_weighter is not None:
+            # Sample S prototype sets [S,K,D] in fp32 for stability
+            protos = gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+            # Ensure device/dtype match
+            if protos.device != features.device:
+                protos = protos.to(device=features.device)
+            if protos.dtype != features.dtype:
+                protos = protos.to(dtype=features.dtype)
+
+            # Normalize features once
+            projected = model.visual_proj(features)
+            features_norm = F.normalize(projected, p=2, dim=-1)
+            scale = model.logit_scale.exp()
+
+            ce_vals = []
+            for s in range(num_samples):
+                prototypes_s = protos[s]  # [K,D]
+                prototypes_norm = F.normalize(prototypes_s, p=2, dim=-1)
+                logits_s = scale * (features_norm @ prototypes_norm.t())
+                ce_vals.append(F.cross_entropy(logits_s, labels))
+            ce_loss = torch.stack(ce_vals, dim=0).mean()
+        else:
+            # Single-sample path (or GP disabled): reuse model path
+            logits = model.forward_features(features)
+            ce_loss = F.cross_entropy(logits, labels)
+
+        total_loss = ce_loss
+
+        # KL regularization when GP is used
+        if use_gp and gp_weighter is not None:
+            kl_loss = gp_weighter.kl_term
+            beta = self.config.adapter.gp_beta
+            total_loss = total_loss + beta * kl_loss
+        else:
+            kl_loss = None
+            beta = 0.0
+
+        # Identity regularizer on visual projection W
+        try:
+            W = model.visual_proj.weight
+            eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
+            l2_reg = (W - eye).pow(2).sum()
+            l2_lambda = self.config.adapter.l2_lambda
+            # Scale by number of shots
+            shots = self.config.dataset.num_shots
+            l2_reg = l2_reg * l2_lambda / shots
+            total_loss += l2_reg
+        except Exception:
+            print("Error in l2 regularization")
+            l2_reg = None
+
+        # Debug components
+        try:
+            batch_size = float(labels.size(0)) if hasattr(labels, 'size') else 1.0
+            self._dbg_loss_components = {
+                "ce": float(ce_loss.detach().item()),
+                "kl_raw": float(kl_loss.detach().item()) if kl_loss is not None else 0.0,
+                "kl_beta": float(beta),
+                "kl": float((beta * kl_loss).detach().item()) if kl_loss is not None else 0.0,
+                "kl_per_img": float(((beta * kl_loss) / batch_size).detach().item()) if kl_loss is not None and batch_size > 0 else 0.0,
+                "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
                 "total": float(total_loss.detach().item()),
             }
         except Exception:
@@ -424,15 +506,10 @@ class Trainer(BaseTrainer):
         return total_loss
 
     def model_inference(self, input_data):
-        """Model inference with GP sampling during evaluation."""
+        """Model inference; forward() internally uses GP sampling if enabled."""
         from typing import cast
         model = cast(CustomCLIP, self.model)
-        if not model.training and model.gp_weighter is not None:
-            # Use GP sampling for evaluation
-            num_samples = self.config.adapter.gp_num_mc_samples
-            return model.sample_forward(input_data, num_samples)
-        else:
-            return model(input_data)
+        return model(input_data)
 
     def _backward_and_update(self, loss):
         """Backward pass and optimizer step."""
@@ -505,10 +582,6 @@ class Trainer(BaseTrainer):
 
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
-        # Initialize per-class alpha_constraint once from zero-shot train logits
-        model_ref = cast(CustomCLIP, self.model)
-        if hasattr(model_ref, 'adapter') and hasattr(model_ref.adapter, 'init_alpha_from_zero_shot'):
-            model_ref.adapter.init_alpha_from_zero_shot(self.labels_train, logits_zs)
 
         # Run the actual training using the base class training loop
         self.before_train()
@@ -595,7 +668,7 @@ class Trainer(BaseTrainer):
                             print(
                                 f"  [DBG] loss: CE={comp.get('ce', 0):.4f} KL(raw)={comp.get('kl_raw', 0):.4f} "
                                 f"beta={comp.get('kl_beta', 0):.3f} KL*beta={comp.get('kl', 0):.4f} "
-                                f"L2={comp.get('l2', 0):.4f} Total={comp.get('total', 0):.4f}"
+                                f"l2_reg={comp.get('l2_reg', comp.get('l2', 0)):.4f} Total={comp.get('total', 0):.4f}"
                             )
                         # Prototype stats
                         if hasattr(self, "_dbg_proto_stats") and self._dbg_proto_stats is not None:
