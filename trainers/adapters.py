@@ -157,8 +157,6 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
         
-        self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
-        
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
         
@@ -177,17 +175,12 @@ class CustomCLIP(nn.Module):
 
         # Create GP weighter if needed
         self.gp_weighter = None
+        self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
         if getattr(config.adapter, 'use_gp', False):
             self.gp_weighter = GaussianProcessTemplateWeighter(
                 text_embeddings=self.text_embeddings_all,
                 cfg=config,
             )
-    
-    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        """Extract visual features from images without grad."""
-        with torch.no_grad():
-            features = self.image_encoder(image.type(self.dtype))
-        return features
     
     def forward_prototypes(self, num_samples: int = 1):
         """Get class prototypes; if GP is enabled, average over num_samples.
@@ -218,26 +211,29 @@ class CustomCLIP(nn.Module):
         """
         num_samples = self.gp_num_mc_samples
         prototypes = self.forward_prototypes(num_samples=num_samples)
+        
         # Ensure same dtype/device
         if features.dtype != prototypes.dtype:
             prototypes = prototypes.to(dtype=features.dtype)
         if features.device != prototypes.device:
             prototypes = prototypes.to(device=features.device)
+
         # Apply learnable visual projection W before normalization
         projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         features_norm = features_norm.to(prototypes_norm.dtype)
+
         return self.logit_scale.exp() * features_norm @ prototypes_norm.t()
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
         """CLAP-like forward.
 
-        - Extract image features (encode_image)
+        - Extract image features
         - Compute logits via forward_features (normalization + prototypes)
         - Optionally return both logits and features
         """
-        features = self.encode_image(image)
+        features = self.image_encoder(image.type(self.dtype))
         logits = self.forward_features(features)
         if return_features:
             return logits, features
@@ -266,6 +262,8 @@ class Trainer(BaseTrainer):
 
         print("Building custom CLIP")
         self.model = CustomCLIP(config, classnames, clip_model)
+        self.model.to(self.device)
+        self.model.float()
 
         # Setup parameter groups: train only visual_proj and GP (if enabled)
         for name, param in self.model.named_parameters():
@@ -274,18 +272,11 @@ class Trainer(BaseTrainer):
             else:
                 param.requires_grad = False
 
-        # No pretrained adapter weights: linear probe is not used for training
-
-        self.model.to(self.device)
-        self.model.float()
-        
-            
         # Setup optimizer with different learning rates for GP
         if config.adapter.use_gp and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
             base_params = []
             base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
-            
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
 
             param_groups = [
@@ -340,20 +331,23 @@ class Trainer(BaseTrainer):
                     "max": float(proto_norms.max().item()),
                 }
         except Exception:
-            # Keep training resilient if any debug metric fails
             self._dbg_proto_stats = None
-        # Ensure same dtype and device
+        
         if projected_features.dtype != prototypes.dtype:
             prototypes = prototypes.to(dtype=projected_features.dtype)
         if projected_features.device != prototypes.device:
             prototypes = prototypes.to(device=projected_features.device)
+        
         # Compute loss with Monte Carlo expectation over GP prototypes (if enabled)
         num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
-        loss = self.compute_loss_from_features(projected_features, labels, num_samples=num_samples)
+        loss = self.compute_loss(projected_features, labels, num_samples=num_samples)
+
         # Compute logits via the model's centralized path for metrics
         logits = model.forward_features(projected_features)
+
         # Backward pass
         self._backward_and_update(loss)
+        
         # Compute accuracies for logging
         with torch.no_grad():
             # Training accuracy
@@ -375,55 +369,7 @@ class Trainer(BaseTrainer):
             "acc_test": acc_test
         }
 
-    def compute_loss(self, logits, labels):
-        from typing import cast
-        model = cast(CustomCLIP, self.model)
-        """Compute loss including GP KL term and visual projection regularization."""
-        # Cross-entropy loss
-        ce_loss = F.cross_entropy(logits, labels)
-        total_loss = ce_loss
-
-        # Add GP KL divergence if using GP
-        if self.config.adapter.use_gp and model.gp_weighter is not None:
-            kl_loss = model.gp_weighter.kl_term
-            beta = self.config.adapter.gp_beta
-            kl_contribution = beta * kl_loss
-            total_loss += kl_contribution
-        else:
-            kl_loss = None
-            kl_contribution = None
-            beta = getattr(self.config.adapter, "gp_beta", 0.0)
-        
-        # Identity regularizer on visual projection W
-        try:
-            W = model.visual_proj.weight
-            eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
-            l2_reg = (W - eye).pow(2).sum()
-            # Scale by number of shots
-            shots = self.config.dataset.num_shots
-            l2_reg = l2_reg * self.config.adapter.l2_lambda / shots
-            total_loss += l2_reg
-        except Exception:
-            l2_reg = None
-        
-        # Store debug components for periodic printing
-        try:
-            batch_size = float(labels.size(0)) if hasattr(labels, 'size') else 1.0
-            self._dbg_loss_components = {
-                "ce": float(ce_loss.detach().item()),
-                "kl_raw": float(kl_loss.detach().item()) if kl_loss is not None else 0.0,
-                "kl_beta": float(beta),
-                "kl": float(kl_contribution.detach().item()) if kl_contribution is not None else 0.0,
-                "kl_per_img": float((kl_contribution / batch_size).detach().item()) if kl_contribution is not None and batch_size > 0 else 0.0,
-                "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
-                "total": float(total_loss.detach().item()),
-            }
-        except Exception:
-            pass
-
-        return total_loss
-
-    def compute_loss_from_features(self, features: torch.Tensor, labels: torch.Tensor, num_samples: int = 1):
+    def compute_loss(self, features: torch.Tensor, labels: torch.Tensor, num_samples: int = 1):
         """Compute loss using MC expectation over GP prototypes when enabled.
 
         If GP is enabled and num_samples > 1, draws num_samples prototype sets,
@@ -504,12 +450,6 @@ class Trainer(BaseTrainer):
             pass
 
         return total_loss
-
-    def model_inference(self, input_data):
-        """Model inference; forward() internally uses GP sampling if enabled."""
-        from typing import cast
-        model = cast(CustomCLIP, self.model)
-        return model(input_data)
 
     def _backward_and_update(self, loss):
         """Backward pass and optimizer step."""

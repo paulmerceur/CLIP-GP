@@ -24,7 +24,6 @@ class AdapterConfig:
     gp_beta: float = 0.001  # KL weight for ELBO loss
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
-    gp_weight_transform: str = "linear"  # "linear" or "softmax" over templates
     
 
 @dataclass
