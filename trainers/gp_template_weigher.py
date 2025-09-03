@@ -46,20 +46,19 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             self,
             inducing_inputs,
             variational_dist,
-            learn_inducing_locations=False,
+            learn_inducing_locations=True,
         )
 
         super().__init__(variational_strategy)
 
         # Initialise the per-template mean
-        # self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
-        # with torch.no_grad():
-        #     class_mean = text_embeddings_down_fp32.mean(dim=1, keepdim=True)  # [K,1,D]
-        #     text_norm = F.normalize(text_embeddings_down_fp32, p=2, dim=-1)   # [K,M,D]
-        #     class_mean_norm = F.normalize(class_mean, p=2, dim=-1)       # [K,1,D]
-        #     mean_init = (text_norm * class_mean_norm).sum(-1)            # [K,M]
-        # self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
-        self.mean_module = gpytorch.means.LinearMean(input_size=inducing_inputs.shape[-1], batch_shape=batch_shape)
+        self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
+        with torch.no_grad():
+            class_mean = text_embeddings_down_fp32.mean(dim=1, keepdim=True)  # [K,1,D]
+            text_norm = F.normalize(text_embeddings_down_fp32, p=2, dim=-1)   # [K,M,D]
+            class_mean_norm = F.normalize(class_mean, p=2, dim=-1)       # [K,1,D]
+            mean_init = (text_norm * class_mean_norm).sum(-1)            # [K,M]
+        self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
 
         kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
         if kernel_type == "rbf":
