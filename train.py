@@ -86,6 +86,7 @@ def main():
     
     # Build trainer
     logger.info(f"Loading trainer: {config.trainer_name}")
+    print(f"CUDA is available: {torch.cuda.is_available()}")
     trainer = build_trainer(config, data_manager)
     
     # Handle different execution modes

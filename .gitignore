@@ -17,3 +17,6 @@ logs/
 metrics/
 results/
 *plots/
+
+*.ipynb
+clip_weights

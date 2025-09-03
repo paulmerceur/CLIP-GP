@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DATA="/export/datasets/public"
+DATA="/mnt/features/VDATA"
 
 # Run GP experiments  
 # Usage: ./run_gp.sh <experiment_name> <dataset> [L2_LAMBDA] [GPU_ID]

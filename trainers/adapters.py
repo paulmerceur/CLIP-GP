@@ -62,7 +62,6 @@ def load_clip_to_cpu(config):
     model = clip.build_model(state_dict)
     return model
 
-
 def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
     """Extract text features for all templates and classes."""
     device = next(clip_model.parameters()).device
@@ -170,7 +169,7 @@ class CustomCLIP(nn.Module):
 
         # Learnable visual projection W (full-rank, bias-free), initialized to identity
         dim = int(base_text_features.shape[-1])
-        self.visual_proj = nn.Linear(dim, dim, bias=False)
+        self.visual_proj = nn.Linear(dim, dim, bias=False).to(dtype=torch.float32)
         with torch.no_grad():
             eye = torch.eye(dim)
             self.visual_proj.weight.copy_(eye)
@@ -178,16 +177,44 @@ class CustomCLIP(nn.Module):
         # Create GP weighter if needed
         self.gp_weighter = None
         if getattr(config.adapter, 'use_gp', False):
+            D = self.base_text_features.shape[-1]
+            k = getattr(config.adapter, "k", D)
+            if k is None or k >= D:
+                Z_templates = None
+            else:
+                P = self.project_prototypes(k=128)
+                Z_templates = self.text_embeddings_all @ P
+
             self.gp_weighter = GaussianProcessTemplateWeighter(
-                text_embeddings=self.text_embeddings_all,
+                text_embeddings=self.text_embeddings_all, text_embeddings_down=Z_templates,
                 cfg=config,
             )
+            self.register_buffer("text_embeddings_all_orig", self.text_embeddings_all)
     
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
         """Extract visual features from images without grad."""
         with torch.no_grad():
             features = self.image_encoder(image.type(self.dtype))
         return features
+    
+    def project_prototypes(self, k: int = 128):
+        '''
+        Limit the dimensionality of prototypes' space before sending to GP. Current attempt
+        decomposes the visual projection matrix via svd and keeps only top-k dimensions with the
+        largest eigenvalue deviation from unitary matrix.
+        '''
+        W = self.visual_proj.weight.detach().to(torch.float32)
+        U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+        dev = (S - 1.0).abs()
+        idx = torch.argsort(dev, descending=True)[:k]
+        P = Vh[idx, :].T.contiguous()  # [1024, k]
+        P = P.to(dtype=self.text_embeddings_all.dtype, device=self.text_embeddings_all.device)
+
+        # Register for reuse
+        self.register_buffer("gp_projector", P, persistent=True)
+        self._gp_idx = idx
+        self._gp_svals = S[idx]
+        return P
     
     def forward_prototypes(self, num_samples: int = 1):
         """Get class prototypes; if GP is enabled, average over num_samples.
@@ -199,6 +226,7 @@ class CustomCLIP(nn.Module):
         if self.gp_weighter is not None:
             if num_samples <= 1: num_samples = 1
             proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+            # print(f"proto_s shape: {proto_s.shape}")
             current_prototypes = proto_s.squeeze(0) if num_samples == 1 else proto_s.mean(dim=0)
 
             if current_prototypes.device != target_device:
@@ -244,6 +272,7 @@ class CustomCLIP(nn.Module):
         return logits
 
 
+
 @TRAINER_REGISTRY.register("Trainer")
 class Trainer(BaseTrainer):
     """Unified adapter trainer supporting both baseline and GP methods."""
@@ -260,6 +289,8 @@ class Trainer(BaseTrainer):
 
         print(f"Loading CLIP (backbone: {config.model.backbone_name})")
         clip_model = load_clip_to_cpu(config)
+        clip_model = clip_model.to(self.device)
+        print(self.device)
 
         if config.adapter.prec == "fp32" or config.adapter.prec == "amp":
             clip_model.float()
@@ -279,7 +310,7 @@ class Trainer(BaseTrainer):
         self.model.to(self.device)
         self.model.float()
         
-            
+        
         # Setup optimizer with different learning rates for GP
         if config.adapter.use_gp and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
@@ -789,3 +820,4 @@ class Trainer(BaseTrainer):
         features_ds = torch.cat(features_ds, dim=0)
 
         return labels_ds, logits_ds, features_ds
+

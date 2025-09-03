@@ -1,13 +1,13 @@
 #!/bin/bash
 
-DATA="/export/datasets/public"
+DATA="/mnt/features/VDATA"
 
 # Run baseline experiments
 # Usage: ./run_baseline.sh <experiment_name> <dataset> [GPU_ID]
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <experiment_name> <dataset> [GPU_ID]"
-    echo "Example: $0 baseline_test caltech101 0"
+    echo "Example: $0 baseline_test caltech-101 0"
     exit 1
 fi
 

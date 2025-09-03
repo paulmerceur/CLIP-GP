@@ -25,6 +25,7 @@ class AdapterConfig:
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_weight_transform: str = "linear"  # "linear" or "softmax" over templates
+    k: int = 1024 # Template projection subspace dimensionality
     
 
 @dataclass
@@ -199,7 +200,7 @@ def parse_args_to_config() -> Config:
     parser = argparse.ArgumentParser(description="CLIP-GP Training")
     
     # Dataset arguments
-    parser.add_argument("--root", type=str, default="/export/datasets/public", 
+    parser.add_argument("--root", type=str, default="/mnt/features/VDATA", 
                        help="Path to dataset root")
     parser.add_argument("--dataset", type=str, default="Caltech101",
                        choices=["Caltech101", "OxfordPets", "OxfordFlowers", "FGVCAircraft", 
