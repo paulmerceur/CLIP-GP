@@ -43,5 +43,5 @@ TRAINER:
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
-    GP_LR: 0.1
+    GP_LR: 0.01
     GP_BETA: 0.001

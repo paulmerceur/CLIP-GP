@@ -47,17 +47,14 @@ class Trial:
     sweep_name: str
 
     def signature(self) -> str:
-        # Produce a short signature by hashing sorted key=value pairs
-        items = sorted([(k, str(v)) for k, v in self.grid_overrides.items()])
-        sig_src = ",".join([f"{k}={v}" for k, v in items]) or "default"
-        h = hashlib.sha1(sig_src.encode("utf-8")).hexdigest()[:8]
-        # Also include readable mini-keys
-        human = "_".join([f"{k.split('.')[-1]}{str(v)}" for k, v in items])
-        if len(human) > 48:
-            human = human[:48]
-        if human:
-            return f"{human}_{h}"
-        return h
+        # Human-readable signature: join "<lastkey><value>" pairs without hashing
+        if not self.grid_overrides:
+            return "default"
+        parts: List[str] = []
+        for k, v in sorted(self.grid_overrides.items()):
+            short = k.split(".")[-1]
+            parts.append(f"{short}{v}")
+        return "_".join(parts)
 
     def format_outdir(self) -> Path:
         # Prepare placeholders
@@ -175,7 +172,7 @@ def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Tri
                         shots=int(nshot),
                         base_trainer_cfg=base_trainer_cfg,
                         dataset_cfg=dataset_cfg,
-                        output_root=output_root / name,
+                        output_root=output_root,
                         output_template=template,
                         grid_overrides=overrides,
                         extra_env={},
@@ -201,8 +198,14 @@ def assign_devices(trials: List[Trial], devices: List[str]) -> None:
 
 
 def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retries: int) -> List[Dict[str, Any]]:
-    """Run trials enforcing even per-GPU concurrency (jobs per GPU)."""
+    """Run trials enforcing even per-GPU concurrency (jobs per GPU), printing concise progress.
+
+    Child stdout/stderr are suppressed; logs are still written inside each trial's output dir.
+    """
     results: List[Dict[str, Any]] = []
+    total = len(trials)
+    completed = {"n": 0}
+
     task_q: "queue.Queue[Trial]" = queue.Queue()
     for t in trials:
         task_q.put(t)
@@ -234,7 +237,8 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
                 while True:
                     attempt += 1
                     cmd, env = trial.to_command()
-                    rc = subprocess.call(cmd, env=env)
+                    # Suppress child outputs; logs are still written to file by train.py
+                    rc = subprocess.call(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     success = (rc == 0)
                     with lock:
                         results.append({
@@ -248,6 +252,9 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
                             "return_code": rc,
                             "attempt": attempt,
                         })
+                        completed["n"] += 1
+                        status = "OK" if success else "FAIL"
+                        print(f"[{completed['n']}/{total}] {status} dataset={trial.dataset} shots={trial.shots} seed={trial.seed} dir={trial.format_outdir()}")
                     if success or attempt > retries:
                         break
             task_q.task_done()
@@ -261,7 +268,8 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
 
 
 def write_manifest_and_summary(meta: Dict[str, Any], trials: List[Trial], results: List[Dict[str, Any]]):
-    base = Path(trials[0].output_root) if trials else Path("output/search") / meta.get("name", "sweep")
+    # Place sweep-level artifacts under output_root/{sweep}
+    base = (trials[0].output_root / meta.get("name", "sweep")) if trials else Path("output/search") / meta.get("name", "sweep")
     base.mkdir(parents=True, exist_ok=True)
 
     # Manifest
@@ -322,7 +330,7 @@ def main():
 
     results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), retries=args.retries)
     write_manifest_and_summary(meta, trials, results)
-    print(f"Sweep complete: {meta['name']} -> {trials[0].output_root if trials else 'output/search'}")
+    print(f"Sweep complete: {meta['name']} -> {(trials[0].output_root / meta['name']) if trials else (Path('output/search') / meta['name'])}")
 
 
 if __name__ == "__main__":
