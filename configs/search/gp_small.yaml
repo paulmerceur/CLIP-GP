@@ -1,0 +1,34 @@
+name: gp_small
+# Single dataset or a list via "datasets"
+dataset: caltech101
+# datasets: [caltech101]
+
+# Seeds and shots to sweep
+seeds: [1, 2, 3]
+shots: [1, 4, 8, 16]
+
+# Optional dataset root override (falls back to defaults in utils.config)
+# root: /export/datasets/public
+
+# Base trainer/dataset configs
+trainer_config: configs/trainers/gp.yaml
+# If omitted, defaults to configs/datasets/{dataset}.yaml
+dataset_config: configs/datasets/caltech101.yaml
+
+# Where to store results for this sweep
+output_root: output/search
+
+# Grid of hyperparameters (keys follow existing config override notation)
+# You can set singletons here as lists of one value.
+# Examples shown for GP; remove parameters you don’t need.
+grid:
+  TRAINER.ADAPTER.GP_BETA: [0.0005, 0.001, 0.002]
+  TRAINER.ADAPTER.NUM_TEMPLATES: [1, 4, 7, 14]
+  OPTIM.LR: [0.005, 0.01]
+  ADAPTER.L2_LAMBDA: [0.05, 0.1]
+
+# Output directory template; placeholders available:
+# {sweep}, {dataset}, {shots}, {seed}, {sig}
+# {sig} is a compact signature of all grid parameters.
+template: "{sweep}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
+

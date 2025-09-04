@@ -1,0 +1,31 @@
+name: baseline_l2
+# Single dataset or a list via "datasets"
+dataset: caltech101
+# datasets: [caltech101]
+
+# Seeds and shots to sweep
+seeds: [1, 2, 3]
+shots: [1, 4, 8, 16]
+
+# Optional dataset root override
+# root: /export/datasets/public
+
+# Base trainer/dataset configs
+trainer_config: configs/trainers/baseline.yaml
+# If omitted, defaults to configs/datasets/{dataset}.yaml
+dataset_config: configs/datasets/caltech101.yaml
+
+# Where to store results for this sweep
+output_root: output/search
+
+# Grid of hyperparameters (keys follow existing config override notation)
+# You can set singletons here as lists of one value.
+# Example for baseline: sweeping only L2.
+grid:
+  ADAPTER.L2_LAMBDA: [0.01, 0.05, 0.1, 0.2]
+
+# Output directory template
+# {sweep}, {dataset}, {shots}, {seed}, {sig}
+# {sig} is a compact signature of all grid parameters.
+template: "{sweep}/{dataset}/baseline_{shots}shots_{sig}/seed{seed}"
+
