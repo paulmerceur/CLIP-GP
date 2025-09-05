@@ -172,6 +172,12 @@ class CustomCLIP(nn.Module):
         with torch.no_grad():
             eye = torch.eye(dim)
             self.visual_proj.weight.copy_(eye)
+        # Align projection layer dtype/device with CLIP modules
+        try:
+            target_device = next(self.image_encoder.parameters()).device
+        except StopIteration:
+            target_device = base_text_features.device
+        self.visual_proj.to(device=target_device, dtype=self.dtype)
 
         # Create GP weighter if needed
         self.gp_weighter = None
@@ -218,13 +224,20 @@ class CustomCLIP(nn.Module):
         if features.device != prototypes.device:
             prototypes = prototypes.to(device=features.device)
 
+        # Ensure features match projection dtype/device before matmul
+        proj_weight = self.visual_proj.weight
+        if features.dtype != proj_weight.dtype:
+            features = features.to(dtype=proj_weight.dtype)
+        if features.device != proj_weight.device:
+            features = features.to(device=proj_weight.device)
+        
         # Apply learnable visual projection W before normalization
         projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         features_norm = features_norm.to(prototypes_norm.dtype)
-
-        return self.logit_scale.exp() * features_norm @ prototypes_norm.t()
+        scale = self.logit_scale.exp().to(features_norm.dtype)
+        return scale * (features_norm @ prototypes_norm.t())
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
         """CLAP-like forward.
@@ -257,13 +270,20 @@ class Trainer(BaseTrainer):
         print(f"Loading CLIP (backbone: {config.model.backbone_name})")
         clip_model = load_clip_to_cpu(config)
 
+        # Move CLIP to target device BEFORE building CustomCLIP so that
+        # prompt/text encoding in _get_base_text_features runs on GPU.
+        clip_model = clip_model.to(self.device)
+
+        # Precision handling:
+        # - CLIP's build_model already applies selective fp16 via convert_weights.
+        # - For fp32 or amp we upcast to float, but we avoid generic .half() to
+        #   preserve LN/buffer dtypes expected by CLIP.
         if config.adapter.prec == "fp32" or config.adapter.prec == "amp":
             clip_model.float()
 
         print("Building custom CLIP")
         self.model = CustomCLIP(config, classnames, clip_model)
         self.model.to(self.device)
-        self.model.float()
 
         # Setup parameter groups: train only visual_proj and GP (if enabled)
         for name, param in self.model.named_parameters():
@@ -387,15 +407,23 @@ class Trainer(BaseTrainer):
             # Sample S prototype sets [S,K,D] in fp32 for stability
             protos = gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
             # Ensure device/dtype match
-            if protos.device != features.device:
-                protos = protos.to(device=features.device)
-            if protos.dtype != features.dtype:
-                protos = protos.to(dtype=features.dtype)
+            proj_weight = model.visual_proj.weight
+            target_device = proj_weight.device
+            target_dtype = proj_weight.dtype
+            if protos.device != target_device:
+                protos = protos.to(device=target_device)
+            if protos.dtype != target_dtype:
+                protos = protos.to(dtype=target_dtype)
 
             # Normalize features once
-            projected = model.visual_proj(features)
+            f = features
+            if f.device != target_device:
+                f = f.to(device=target_device)
+            if f.dtype != target_dtype:
+                f = f.to(dtype=target_dtype)
+            projected = model.visual_proj(f)
             features_norm = F.normalize(projected, p=2, dim=-1)
-            scale = model.logit_scale.exp()
+            scale = model.logit_scale.exp().to(dtype=features_norm.dtype)
 
             ce_vals = []
             for s in range(num_samples):
@@ -406,7 +434,13 @@ class Trainer(BaseTrainer):
             ce_loss = torch.stack(ce_vals, dim=0).mean()
         else:
             # Single-sample path (or GP disabled): reuse model path
-            logits = model.forward_features(features)
+            f = features
+            proj_weight = model.visual_proj.weight
+            if f.device != proj_weight.device:
+                f = f.to(device=proj_weight.device)
+            if f.dtype != proj_weight.dtype:
+                f = f.to(dtype=proj_weight.dtype)
+            logits = model.forward_features(f)
             ce_loss = F.cross_entropy(logits, labels)
 
         total_loss = ce_loss
