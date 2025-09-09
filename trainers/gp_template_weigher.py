@@ -80,6 +80,8 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self.covar_module = gpytorch.kernels.ScaleKernel(
             base_kernel, batch_shape=batch_shape
         )
+        # Gaussian likelihood for supervised regression on per-template targets
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=batch_shape)
 
         # Break symmetry: initialise variational mean with small noise
         with torch.no_grad():
@@ -106,9 +108,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         kl = self.variational_strategy.kl_divergence().sum()
         return proto_s.to(dtype=self.orig_dtype, device=self.orig_device), kl
     
-    def get_weight_distribution(self):
-        return self.variational_strategy(self._templates.to(torch.float32))
-
     def sample_prototypes(self, num_samples: int) -> torch.Tensor:
         """
         Draw *num_samples* sets of template-weighted class prototypes.
@@ -121,23 +120,85 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             A tensor of shape ``[S, K, D]`` where *S* is ``num_samples``,
             *K* the number of classes and *D* the embedding dimension.
         """
-        q = self.get_weight_distribution()
-
-        # Always use stochastic sampling
-        alpha = q.rsample(torch.Size([num_samples]))  # [S,K,M]
-        # Use raw alpha values as weights
-        w = alpha  # [S,K,M]
+        # Distribution over latent function values at template inputs
+        qf = self(self._templates.to(torch.float32))
+        # Stochastic sampling of latent function values
+        f_samples = qf.rsample(torch.Size([num_samples]))  # [S,K,M]
+        # Map function values to convex weights per class/template
+        w = torch.softmax(f_samples, dim=-1)  # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
         templates_tensor = cast(torch.Tensor, self._templates)
         return prototypes.to(templates_tensor)
 
+    @torch.no_grad()
+    def prototypes_from_posterior_mean(self) -> torch.Tensor:
+        """Deterministic prototypes using posterior mean weights.
 
-    @property
-    def kl_term(self) -> torch.Tensor:
-        """GP variational KL divergence (summed over classes)."""
-        return self.variational_strategy.kl_divergence().sum()
+        Returns a tensor of shape [K, D].
+        """
+        self.eval()
+        try:
+            self.likelihood.eval()
+        except Exception:
+            pass
+        f_dist = self(self._templates.to(torch.float32))
+        f_mean = f_dist.mean  # [K,M]
+        w = torch.softmax(f_mean, dim=-1)  # [K,M]
+        prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())  # [K,D]
+        templates_tensor = cast(torch.Tensor, self._templates)
+        return prototypes.to(templates_tensor)
+
+    def fit_targets(self, targets: torch.Tensor, epochs: int = 300, lr: float = 1e-2, weight_decay: float = 0.0, verbose: bool = True) -> None:
+        """Fit the batched GP to per-template targets of shape [K, M].
+
+        Optimizes the variational ELBO with a Gaussian likelihood.
+        """
+        # Validate shapes
+        if targets.dim() != 2:
+            raise ValueError("targets must have shape [num_classes, num_templates]")
+        if int(targets.shape[0]) != int(self.num_classes) or int(targets.shape[1]) != int(self.num_templates):
+            raise ValueError("targets shape must match [K, M] of stored templates")
+
+        device = self._templates.device
+        self.to(device=device)
+        self.likelihood.to(device=device)
+
+        self.train()
+        self.likelihood.train()
+
+        # Separate model vs likelihood parameters to avoid overlaps
+        lik_params = list(self.likelihood.parameters())
+        lik_param_ids = {id(p) for p in lik_params}
+        model_params = [p for p in self.parameters() if id(p) not in lik_param_ids]
+        optimizer = torch.optim.Adam([
+            {"params": model_params, "lr": lr, "weight_decay": weight_decay},
+            {"params": lik_params, "lr": lr, "weight_decay": 0.0},
+        ])
+        mll = gpytorch.mlls.VariationalELBO(self.likelihood, self, num_data=int(self.num_templates))
+
+        y = targets.to(device=device, dtype=torch.float32)
+        x = self._templates.to(device=device, dtype=torch.float32)
+
+        if verbose:
+            try:
+                print(f"[GP] Prefit: x={tuple(x.shape)} y={tuple(y.shape)} K={self.num_classes} M={self.num_templates} device={x.device}")
+            except Exception:
+                pass
+        for ep in range(int(epochs)):
+            optimizer.zero_grad(set_to_none=True)
+            output = self(x)
+            elbo = mll(output, y)  # shape [K]
+            loss = (-elbo).sum()
+            loss.backward()
+            optimizer.step()
+            if verbose and ((ep + 1) % max(1, int(epochs) // 5) == 0 or ep == 0):
+                try:
+                    print(f"[GP] Prefit ep {ep+1}/{epochs} loss={float(loss.detach().item()):.4f} elbo_mean={float(elbo.mean().detach().item()):.4f}")
+                except Exception:
+                    pass
+
 
 
 class PerTemplateMean(gpytorch.means.Mean):

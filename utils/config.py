@@ -25,6 +25,12 @@ class AdapterConfig:
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     
+    # GP prefit settings
+    gp_reg_prefit: bool = True  # Whether to use GP prefit
+    gp_reg_epochs: int = 50  # Number of epochs for GP prefit
+    gp_reg_lr: float = 0.01  # Learning rate for GP prefit
+    gp_joint_training: bool = False  # Whether to jointly train GP and model
+    
 
 @dataclass
 class ModelConfig:

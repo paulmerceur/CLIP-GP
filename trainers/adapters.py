@@ -4,6 +4,7 @@ import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import gpytorch  # used for ELBO in joint GP training
 from torch.amp.grad_scaler import GradScaler    
 import numpy as np
 import math
@@ -196,9 +197,12 @@ class CustomCLIP(nn.Module):
         """
         target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
-            if num_samples <= 1: num_samples = 1
-            proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
-            current_prototypes = proto_s.squeeze(0) if num_samples == 1 else proto_s.mean(dim=0)
+            # Prefer deterministic posterior-mean prototypes when not sampling
+            if num_samples <= 1:
+                current_prototypes = self.gp_weighter.prototypes_from_posterior_mean()
+            else:
+                proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+                current_prototypes = proto_s.mean(dim=0)
 
             if current_prototypes.device != target_device:
                 current_prototypes = current_prototypes.to(target_device)
@@ -445,14 +449,50 @@ class Trainer(BaseTrainer):
 
         total_loss = ce_loss
 
-        # KL regularization when GP is used
-        if use_gp and gp_weighter is not None:
-            kl_loss = gp_weighter.kl_term
-            beta = self.config.adapter.gp_beta
-            total_loss = total_loss + beta * kl_loss
-        else:
-            kl_loss = None
-            beta = 0.0
+        # If joint GP training is enabled, add ELBO (data term) and KL
+        if use_gp and gp_weighter is not None and bool(getattr(self.config.adapter, 'gp_joint_training', False)):
+            # Ensure targets exist (compute lazily if needed)
+            if not hasattr(self, '_gp_targets'):
+                try:
+                    self._gp_targets = self._compute_gp_template_targets_prob()
+                except Exception:
+                    self._gp_targets = None
+            if getattr(self, '_gp_targets', None) is not None:
+                try:
+                    # GP operates at template inputs; build ELBO in-place
+                    gp_weighter.train()
+                    if hasattr(gp_weighter, 'likelihood'):
+                        gp_weighter.likelihood.train()
+                    x = gp_weighter._templates.to(dtype=torch.float32, device=gp_weighter._templates.device)
+                    y = cast(torch.Tensor, self._gp_targets)
+                    if y.device != x.device:
+                        y = y.to(x.device)
+                    if y.dtype != torch.float32:
+                        y = y.to(torch.float32)
+
+                    # VariationalELBO expects num_data as number of points per batch GP
+                    mll = gpytorch.mlls.VariationalELBO(
+                        gp_weighter.likelihood,
+                        gp_weighter,
+                        num_data=int(gp_weighter.num_templates),
+                        beta=float(self.config.adapter.gp_beta),
+                    )
+
+                    out = gp_weighter(x)
+                    elbo = mll(out, y)  # may return per-class tensor for batched GPs
+                    # Reduce to scalar to be compatible with CE scalar loss
+                    if elbo.dim() > 0:
+                        elbo_scalar = elbo.mean()
+                    else:
+                        elbo_scalar = elbo
+                    total_loss = total_loss + (-elbo_scalar)
+                    try:
+                        if hasattr(self, 'batch_idx') and (int(self.batch_idx) % max(1, int(getattr(self.config.train, 'print_freq', 50)))) == 0:
+                            print(f"  [DBG][ELBO] value={float(elbo_scalar.detach().item()):.6f} beta={float(self.config.adapter.gp_beta):.4f}")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
         # Identity regularizer on visual projection W
         try:
@@ -470,13 +510,9 @@ class Trainer(BaseTrainer):
 
         # Debug components
         try:
-            batch_size = float(labels.size(0)) if hasattr(labels, 'size') else 1.0
             self._dbg_loss_components = {
                 "ce": float(ce_loss.detach().item()),
-                "kl_raw": float(kl_loss.detach().item()) if kl_loss is not None else 0.0,
-                "kl_beta": float(beta),
-                "kl": float((beta * kl_loss).detach().item()) if kl_loss is not None else 0.0,
-                "kl_per_img": float(((beta * kl_loss) / batch_size).detach().item()) if kl_loss is not None and batch_size > 0 else 0.0,
+                "elbo": float(elbo_scalar.detach().item()),
                 "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
                 "total": float(total_loss.detach().item()),
             }
@@ -556,6 +592,30 @@ class Trainer(BaseTrainer):
 
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
+
+        # Optional GP prefit on per-template targets
+        try:
+            if getattr(self.config.adapter, 'use_gp', False) and getattr(self.model, 'gp_weighter', None) is not None:
+                # Compute and cache targets once for both prefit and joint ELBO
+                self._gp_targets = self._compute_gp_template_targets_prob()
+                if getattr(self.config.adapter, 'gp_reg_prefit', True):
+                    gp_epochs = int(getattr(self.config.adapter, 'gp_reg_epochs', 400))
+                    gp_lr = float(getattr(self.config.adapter, 'gp_reg_lr', 1e-2))
+                    self.model.gp_weighter.fit_targets(self._gp_targets, epochs=gp_epochs, lr=gp_lr)
+                    # Freeze GP after prefit if joint training is disabled
+                    if not bool(getattr(self.config.adapter, 'gp_joint_training', False)):
+                        try:
+                            for p in self.model.gp_weighter.parameters():
+                                p.requires_grad = False
+                            if hasattr(self, 'optim') and hasattr(self.optim, 'param_groups'):
+                                gp_param_ids = {id(p) for p in self.model.gp_weighter.parameters()}
+                                for group in self.optim.param_groups:
+                                    if any(id(p) in gp_param_ids for p in group.get('params', [])):
+                                        group['lr'] = 0.0
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[WARN] GP prefit skipped due to error: {e}")
 
         # Run the actual training using the base class training loop
         self.before_train()
@@ -763,3 +823,43 @@ class Trainer(BaseTrainer):
         features_ds = torch.cat(features_ds, dim=0)
 
         return labels_ds, logits_ds, features_ds
+
+    @torch.no_grad()
+    def _compute_gp_template_targets_prob(self) -> torch.Tensor:
+        """Compute per-template targets y[k, m] as mean correct-class probability.
+
+        Computes targets from train features and text embeddings in fp32 on CPU.
+        Returns a tensor of shape [K, M].
+        """
+        features = self.features_train.detach().cpu().to(torch.float32)  # [N, D]
+        labels = self.labels_train.detach().cpu().to(torch.int64)        # [N]
+        text_emb = cast(torch.Tensor, self.model.text_embeddings_all).detach().cpu().to(torch.float32)  # [K, M, D]
+
+        K, M, D = int(text_emb.shape[0]), int(text_emb.shape[1]), int(text_emb.shape[2])
+        N = int(features.shape[0])
+
+        # Apply current projection W if present
+        try:
+            W = cast(torch.nn.Linear, self.model.visual_proj).weight.detach().cpu().to(torch.float32)  # [D, D]
+            feats_proj = features @ W.t()
+        except Exception:
+            feats_proj = features
+
+        feats_norm = F.normalize(feats_proj, p=2, dim=-1)  # [N, D]
+        scale = float(cast(torch.Tensor, self.model.logit_scale).exp().detach().cpu().item())
+
+        # Prepare per-class aggregation
+        labels_one_hot = torch.zeros(N, K, dtype=torch.float32)
+        labels_one_hot[torch.arange(N), labels] = 1.0
+        class_counts = labels_one_hot.sum(dim=0).clamp_min(1.0)  # [K]
+
+        targets = torch.zeros(K, M, dtype=torch.float32)
+        for m in range(M):
+            prot_m = text_emb[:, m, :]                 # [K, D]
+            prot_m = F.normalize(prot_m, p=2, dim=-1)  # [K, D]
+            logits = scale * (feats_norm @ prot_m.t()) # [N, K]
+            probs = torch.softmax(logits, dim=-1)      # [N, K]
+            sum_probs = (labels_one_hot * probs).sum(dim=0)  # [K]
+            targets[:, m] = sum_probs / class_counts
+
+        return targets
