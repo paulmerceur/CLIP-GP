@@ -1,19 +1,17 @@
-name: baseline_l2
+name: gp_prefit
 # Single dataset or a list via "datasets"
-dataset: caltech101
-# datasets: [caltech101]
+#dataset: caltech101
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
 # Seeds and shots to sweep
 seeds: [1, 2, 3]
 shots: [1, 4, 8, 16]
 
 # Optional dataset root override
-# root: /export/datasets/public
+root: /mnt/features/VDATA/
 
 # Base trainer/dataset configs
 trainer_config: configs/trainers/baseline.yaml
-# If omitted, defaults to configs/datasets/{dataset}.yaml
-dataset_config: configs/datasets/caltech101.yaml
 
 # Where to store results for this sweep
 output_root: output/search
@@ -22,7 +20,7 @@ output_root: output/search
 # You can set singletons here as lists of one value.
 # Example for baseline: sweeping only L2.
 grid:
-  ADAPTER.L2_LAMBDA: [0.01, 0.05, 0.1, 0.2]
+  ADAPTER.L2_LAMBDA: [0.1]
 
 # Output directory template
 # {sweep}, {dataset}, {shots}, {seed}, {sig}

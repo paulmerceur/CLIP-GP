@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import itertools
-import json
 import os
 import queue
 import subprocess
@@ -27,6 +25,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+import time
 
 import yaml
 
@@ -254,7 +253,7 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
                         })
                         completed["n"] += 1
                         status = "OK" if success else "FAIL"
-                        print(f"[{completed['n']}/{total}] {status} dataset={trial.dataset} shots={trial.shots} seed={trial.seed} dir={trial.format_outdir()}")
+                        print(f"[{completed['n']}/{total}] {status} dataset={trial.dataset} shots={trial.shots} seed={trial.seed} config={trial.signature()}")
                     if success or attempt > retries:
                         break
             task_q.task_done()
@@ -265,45 +264,6 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
     for th in threads:
         th.join()
     return results
-
-
-def write_manifest_and_summary(meta: Dict[str, Any], trials: List[Trial], results: List[Dict[str, Any]]):
-    # Place sweep-level artifacts under output_root/{sweep}
-    base = (trials[0].output_root / meta.get("name", "sweep")) if trials else Path("output/search") / meta.get("name", "sweep")
-    base.mkdir(parents=True, exist_ok=True)
-
-    # Manifest
-    manifest = {
-        "meta": meta,
-        "trials": [
-            {
-                "index": t.index,
-                "dataset": t.dataset,
-                "seed": t.seed,
-                "shots": t.shots,
-                "sig": t.signature(),
-                "out_dir": str(t.format_outdir()),
-                "overrides": t.grid_overrides,
-            }
-            for t in trials
-        ],
-        "results": results,
-    }
-    (base / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-    # Summary CSV – one row per result (final status only)
-    csv_path = base / "summary.csv"
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["index", "dataset", "seed", "shots", "sig", "out_dir", "return_code", "attempt"] + list(sorted(_collect_override_keys(trials))))
-        for r in results:
-            t = next((x for x in trials if x.index == r["index"]), None)
-            if not t:
-                continue
-            row = [r["index"], r["dataset"], r["seed"], r["shots"], r["sig"], r["out_dir"], r["return_code"], r["attempt"]]
-            for k in sorted(_collect_override_keys(trials)):
-                row.append(t.grid_overrides.get(k, ""))
-            writer.writerow(row)
 
 
 def _collect_override_keys(trials: List[Trial]) -> List[str]:
@@ -321,6 +281,8 @@ def main():
     ap.add_argument("--retries", type=int, default=0, help="Number of retries per failed trial")
     args = ap.parse_args()
 
+    timer_start = time.time()
+
     sweep_path = Path(args.sweep_file)
     cfg = load_sweep(sweep_path)
     trials, meta = build_trials(cfg, cli_devices=args.devices)
@@ -329,8 +291,9 @@ def main():
     assign_devices(trials, devices_list)
 
     results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), retries=args.retries)
-    write_manifest_and_summary(meta, trials, results)
     print(f"Sweep complete: {meta['name']} -> {(trials[0].output_root / meta['name']) if trials else (Path('output/search') / meta['name'])}")
+    timer_end = time.time()
+    print(f"Sweep completed in {timer_end - timer_start} seconds")
 
 
 if __name__ == "__main__":

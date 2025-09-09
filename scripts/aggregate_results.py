@@ -182,17 +182,18 @@ def print_results(results: Dict[str, List[Dict[str, Any]]]):
         if not records:
             continue
         print("\n=== Dataset:", dataset, "===")
+        
+        config_width = max(len(r['config']) for r in records) if records else 10
+        config_width += 5   
         header = (
-            f"{'Config':<35} {'LR':>8} {'GP_LR':>8} {'GP_BETA':>8} {'L2_LAMBDA':>10} {'Shots':>5} {'Seeds':>5} | "
+            f"{'Config':<{config_width}} {'Shots':>5} {'Seeds':>5} | "
             f"{'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7} | {'AECE µ':>7} {'AECE σ':>7}"
         )
         print(header)
         print("-" * len(header))
         for r in records:
             print(
-                f"{r['config']:<35} {r['lr'] or '-':>8} {r['gp_lr'] or '-':>8} {r['gp_beta'] or '-':>8} "
-                f"{r['l2_lambda'] or '-':>10} "
-                f"{r['shots']:>5d} {r['n_seeds']:>5d} | "
+                f"{r['config']:<{config_width}} {r['shots']:>5d} {r['n_seeds']:>5d} | "
                 f"{r['acc_mean']:7.2f} {r['acc_std']:7.2f} | "
                 f"{r['ece_mean']:7.2f} {r['ece_std']:7.2f} | "
                 f"{r['aece_mean']:7.2f} {r['aece_std']:7.2f}"

@@ -39,6 +39,7 @@ TRAINER:
     CONSTRAINT: none  
     PREC: fp16
     NUM_TEMPLATES: 7
+    L2_LAMBDA: 0.1
     # GP configuration
     USE_GP: True
     GP_KERNEL_TYPE: rbf

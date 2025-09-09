@@ -1,19 +1,17 @@
 name: gp_small
 # Single dataset or a list via "datasets"
-dataset: caltech101
-# datasets: [caltech101]
+#dataset: caltech101
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
 # Seeds and shots to sweep
 seeds: [1, 2, 3]
 shots: [1, 4, 8, 16]
 
 # Optional dataset root override (falls back to defaults in utils.config)
-# root: /export/datasets/public
+root: /mnt/features/VDATA/
 
 # Base trainer/dataset configs
 trainer_config: configs/trainers/gp.yaml
-# If omitted, defaults to configs/datasets/{dataset}.yaml
-dataset_config: configs/datasets/caltech101.yaml
 
 # Where to store results for this sweep
 output_root: output/search
@@ -22,10 +20,7 @@ output_root: output/search
 # You can set singletons here as lists of one value.
 # Examples shown for GP; remove parameters you don’t need.
 grid:
-  TRAINER.ADAPTER.GP_BETA: [0.0005, 0.001, 0.002]
-  TRAINER.ADAPTER.NUM_TEMPLATES: [1, 4, 7, 14]
-  OPTIM.LR: [0.005, 0.01]
-  ADAPTER.L2_LAMBDA: [0.05, 0.1]
+  TRAINER.ADAPTER.GP_BETA: [0.0001, 0.001, 0.01]
 
 # Output directory template; placeholders available:
 # {sweep}, {dataset}, {shots}, {seed}, {sig}
