@@ -1,0 +1,19 @@
+name: gp_prefit
+BASE_CONFIG: configs/trainers/default.yaml
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, ucf101, eurosat]
+
+seeds: [1, 2, 3]
+shots: [1, 4, 8, 16]
+
+root: /mnt/features/VDATA/
+
+# No grid by default; add overrides here if needed
+grid: {}
+
+template: "{experiment}/{dataset}/baseline_{shots}shots_{sig}/seed{seed}"
+
+TRAINER:
+  ADAPTER:
+    USE_GP: False
+

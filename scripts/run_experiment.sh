@@ -22,9 +22,9 @@ if [ $# -ge 1 ]; then
 fi
 
 if [ -n "$EXP_NAME" ]; then
-  python -m utils.hparam_search --sweep-file "${EXP_FILE}" --experiment-name "${EXP_NAME}" "$@"
+  python -m utils.hparam_search --config-file "${EXP_FILE}" --experiment-name "${EXP_NAME}" "$@"
 else
-  python -m utils.hparam_search --sweep-file "${EXP_FILE}" "$@"
+  python -m utils.hparam_search --config-file "${EXP_FILE}" "$@"
 fi
 
 

@@ -13,8 +13,8 @@ Notes:
 - The experiment name can be provided via --experiment-name; it defaults to the YAML filename stem.
 
 Usage examples:
-  python -m utils.hparam_search --sweep-file configs/trainers/gp_small.yaml --devices "0,1" --jobs-per-gpu 1
-  python -m utils.hparam_search --sweep-file configs/trainers/baseline_l2.yaml --jobs-per-gpu 1
+  python -m utils.hparam_search --config-file configs/trainers/gp_small.yaml --devices "0,1" --jobs-per-gpu 1
+  python -m utils.hparam_search --config-file configs/trainers/baseline_l2.yaml --jobs-per-gpu 1
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ class Trial:
         return mapping.get(name.lower(), name)
 
 
-def load_sweep(path: Path) -> Dict[str, Any]:
+def load_config(path: Path) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
@@ -155,7 +155,7 @@ def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Tri
     root_override = cfg.get("root")
     config_file_path = str(cfg.get("__config_file__", ""))
 
-    # Device hints from sweep file (fallback to CLI)
+    # Device hints from config file (fallback to CLI)
     devices = cfg.get("devices") or cli_devices or ""
     devices_list = [d.strip() for d in devices.split(",") if d.strip()]
 
@@ -205,7 +205,7 @@ def assign_devices(trials: List[Trial], devices: List[str]) -> None:
         t.extra_env["CUDA_VISIBLE_DEVICES"] = str(dev)
 
 
-def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retries: int) -> List[Dict[str, Any]]:
+def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int) -> List[Dict[str, Any]]:
     """Run trials enforcing even per-GPU concurrency (jobs per GPU), printing concise progress.
 
     Child stdout/stderr are suppressed; logs are still written inside each trial's output dir.
@@ -240,31 +240,25 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, retri
             sem = semaphores.get(dev, None)
             if sem is None:
                 sem = semaphores[""]
-            attempt = 0
             with sem:
-                while True:
-                    attempt += 1
-                    cmd, env = trial.to_command()
-                    # Suppress child outputs; logs are still written to file by train.py
-                    rc = subprocess.call(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    success = (rc == 0)
-                    with lock:
-                        results.append({
-                            "index": trial.index,
-                            "dataset": trial.dataset,
-                            "seed": trial.seed,
-                            "shots": trial.shots,
-                            "sig": trial.signature(),
-                            "out_dir": str(trial.format_outdir()),
-                            "overrides": trial.grid_overrides,
-                            "return_code": rc,
-                            "attempt": attempt,
-                        })
-                        completed["n"] += 1
-                        status = "OK" if success else "FAIL"
-                        print(f"[{completed['n']}/{total}] {status} dataset={trial.dataset} shots={trial.shots} seed={trial.seed} config={trial.signature()}")
-                    if success or attempt > retries:
-                        break
+                cmd, env = trial.to_command()
+                # Suppress child outputs; logs are still written to file by train.py
+                rc = subprocess.call(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                success = (rc == 0)
+                with lock:
+                    results.append({
+                        "index": trial.index,
+                        "dataset": trial.dataset,
+                        "seed": trial.seed,
+                        "shots": trial.shots,
+                        "sig": trial.signature(),
+                        "out_dir": str(trial.format_outdir()),
+                        "overrides": trial.grid_overrides,
+                        "return_code": rc,
+                    })
+                    completed["n"] += 1
+                    status = "OK" if success else "FAIL"
+                    print(f"[{completed['n']}/{total}] {status} dataset={trial.dataset} shots={trial.shots} seed={trial.seed} config={trial.signature()}")
             task_q.task_done()
 
     threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(n_threads)]
@@ -284,31 +278,30 @@ def _collect_override_keys(trials: List[Trial]) -> List[str]:
 
 def main():
     ap = argparse.ArgumentParser(description="Run experiments for CLIP-GP (grids or single runs).")
-    ap.add_argument("--sweep-file", required=True, help="Path to experiment YAML (e.g., configs/trainers/gp_small.yaml)")
+    ap.add_argument("--config-file", required=True, help="Path to experiment YAML (e.g., configs/trainers/gp_small.yaml)")
     ap.add_argument("--devices", default=None, help="Comma-separated GPU IDs, e.g., '0,1' (optional)")
     ap.add_argument("--jobs-per-gpu", type=int, default=1, help="Concurrent jobs per GPU (default 1)")
-    ap.add_argument("--retries", type=int, default=0, help="Number of retries per failed trial")
     ap.add_argument("--experiment-name", default=None, help="Optional experiment name (defaults to YAML filename or 'name' field)")
     args = ap.parse_args()
 
     timer_start = time.time()
 
-    sweep_path = Path(args.sweep_file)
-    cfg = load_sweep(sweep_path)
+    config_path = Path(args.config_file)
+    cfg = load_config(config_path)
     # Inject config file path for trainer consumption and naming
-    cfg["__config_file__"] = str(sweep_path)
+    cfg["__config_file__"] = str(config_path)
     # Determine experiment name
     if args.experiment_name:
         cfg["name"] = args.experiment_name
     elif not cfg.get("name"):
-        cfg["name"] = sweep_path.stem
+        cfg["name"] = config_path.stem
 
     trials, meta = build_trials(cfg, cli_devices=args.devices)
 
     devices_list = meta.get("devices", [])
     assign_devices(trials, devices_list)
 
-    results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), retries=args.retries)
+    results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu))
     exp_name = meta.get("experiment_name", "experiment")
     print(f"Experiment complete: {exp_name} -> {(trials[0].output_root / exp_name) if trials else (Path('output') / exp_name)}")
     timer_end = time.time()

@@ -1,18 +1,3 @@
-name: baseline_l2
-dataset: caltech101
-
-seeds: [1, 2, 3]
-shots: [1, 4, 8, 16]
-
-root: /mnt/features/VDATA/
-output_root: output
-
-# No grid by default; could add e.g., TRAINER.ADAPTER.L2_LAMBDA if desired
-grid: {}
-
-template: "{experiment}/{dataset}/baseline_{shots}shots_{sig}/seed{seed}"
-
-# Embedded trainer configuration (from previous baseline.yaml)
 DATALOADER:
   TRAIN_X:
     BATCH_SIZE: 128
@@ -36,6 +21,7 @@ OPTIM:
   WARMUP_TYPE: "constant"
   WARMUP_CONS_LR: 1e-5
   WEIGHT_DECAY: 0.0
+  MOMENTUM: 0.9
 
 TRAIN:
   PRINT_FREQ: 5
@@ -47,5 +33,4 @@ TRAINER:
     PREC: fp16
     NUM_TEMPLATES: 7
     L2_LAMBDA: 0.1
-    USE_GP: False
 

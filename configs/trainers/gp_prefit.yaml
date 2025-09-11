@@ -1,6 +1,7 @@
 name: gp_prefit
+BASE_CONFIG: configs/trainers/default.yaml
 # Single dataset or a list via "datasets"
-datasets: [stanford_cars]
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
 # Seeds and shots
 seeds: [1, 2, 3]
@@ -9,56 +10,18 @@ shots: [1, 4, 8, 16]
 # Optional dataset root override
 root: /mnt/features/VDATA/
 
-# Where to store results
-output_root: output
-
 # Grid: enable GP joint training for prefit schedule
 grid:
-  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true]
+  TRAINER.ADAPTER.GP_REG_PREFIT: [false, true]
+  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true, false]
+  TRAINER.ADAPTER.GP_REG_EPOCHS: [50, 200]
+  TRAINER.ADAPTER.GP_REG_LR: [0.01, 0.1]
 
 # Output layout
 template: "{experiment}/{dataset}/gp_prefit_{shots}shots_{sig}/seed{seed}"
 
-# Embedded trainer configuration (same as GP defaults)
-DATALOADER:
-  TRAIN_X:
-    BATCH_SIZE: 128
-  TEST:
-    BATCH_SIZE: 128
-  NUM_WORKERS: 8
-
-INPUT:
-  SIZE: (224, 224)
-  INTERPOLATION: "bicubic"
-  PIXEL_MEAN: [0.48145466, 0.4578275, 0.40821073]
-  PIXEL_STD: [0.26862954, 0.26130258, 0.27577711]
-  TRANSFORMS: ["random_resized_crop", "random_flip", "normalize"]
-
-OPTIM:
-  NAME: "sgd"
-  LR: 0.01
-  MAX_EPOCH: 300
-  LR_SCHEDULER: "cosine"
-  WARMUP_EPOCH: 1
-  WARMUP_TYPE: "constant"
-  WARMUP_CONS_LR: 1e-5
-  WEIGHT_DECAY: 0.0
-  MOMENTUM: 0.9
-  BETAS: [0.9, 0.999]
-  EPS: 1e-8
-  AUX_LR: 0.01
-  AUX_WEIGHT_DECAY: 0.0
-
-TRAIN:
-  PRINT_FREQ: 5
-
 TRAINER:
   ADAPTER:
-    INIT: ZS
-    CONSTRAINT: none
-    PREC: fp16
-    NUM_TEMPLATES: 7
-    L2_LAMBDA: 0.1
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10

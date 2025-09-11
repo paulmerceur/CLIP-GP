@@ -8,9 +8,12 @@ import gpytorch  # used for ELBO in joint GP training
 from torch.amp.grad_scaler import GradScaler    
 import numpy as np
 import math
+import json
+from pathlib import Path
 
 from utils.trainer import BaseTrainer
-from utils.metrics import compute_accuracy, AverageMeter
+from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece
+from utils.config import _config_to_dict
  
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
@@ -486,11 +489,6 @@ class Trainer(BaseTrainer):
                     else:
                         elbo_scalar = elbo
                     total_loss = total_loss + (-elbo_scalar)
-                    try:
-                        if hasattr(self, 'batch_idx') and (int(self.batch_idx) % max(1, int(getattr(self.config.train, 'print_freq', 50)))) == 0:
-                            print(f"  [DBG][ELBO] value={float(elbo_scalar.detach().item()):.6f} beta={float(self.config.adapter.gp_beta):.4f}")
-                    except Exception:
-                        pass
                 except Exception:
                     pass
 
@@ -580,6 +578,7 @@ class Trainer(BaseTrainer):
 
     def train(self):
         """Training loop with feature extraction and evaluation."""
+        _t0 = time.time()
         # Build model first (this is normally done in BaseTrainer.train())
         self.build_model()
         
@@ -624,6 +623,13 @@ class Trainer(BaseTrainer):
             self.run_epoch()
             self.after_epoch()
         self.after_train()
+
+        # After training completes, compute final test metrics and write metrics.json
+        try:
+            metrics = self._compute_final_metrics()
+            self._write_run_summary_json(metrics, start_time=_t0)
+        except Exception as e:
+            print(f"[WARN] Failed to write metrics.json: {e}")
 
     def run_epoch(self):
         """Run one training epoch."""
@@ -767,6 +773,17 @@ class Trainer(BaseTrainer):
                                     f"  [DBG][GP] var_mean={var_mean:.6f} lengthscale={ls_val:.6f} "
                                     f"outputscale={outscale_val:.6f} mean_param_norm={mean_norm:.4f} mean_abs={mean_abs:.4f}"
                                 )
+                                # Template weights for class 0 (posterior-mean softmax over templates)
+                                try:
+                                    with torch.no_grad():
+                                        x_t = gp._templates.to(dtype=torch.float32, device=gp._templates.device)
+                                        f_mean = gp(x_t).mean  # [K, M]
+                                        w = torch.softmax(f_mean, dim=-1)  # [K, M]
+                                        w0 = w[0].detach().cpu().tolist()
+                                        w0_str = ", ".join(f"{v:.3f}" for v in w0)
+                                        print(f"  [DBG][GP] template_weights[class=0]: [{w0_str}]")
+                                except Exception:
+                                    pass
                             else:
                                 print("  [DBG][GP] GP disabled at runtime (no weighter present).")
                     except Exception:
@@ -823,6 +840,55 @@ class Trainer(BaseTrainer):
         features_ds = torch.cat(features_ds, dim=0)
 
         return labels_ds, logits_ds, features_ds
+
+    @torch.no_grad()
+    def _compute_final_metrics(self) -> dict:
+        """Compute final test metrics using stored test features and current model."""
+        model = cast(CustomCLIP, self.model)
+        test_features = self.features_test.to(self.device)
+        test_logits = model.forward_features(test_features)
+        labels = self.labels_test.to(self.device)
+        acc = compute_accuracy(test_logits, labels)[0]
+        try:
+            ece_val = compute_ece(test_logits, labels)
+        except Exception:
+            ece_val = float('nan')
+        try:
+            aece_val = compute_aece(test_logits, labels)
+        except Exception:
+            aece_val = float('nan')
+        return {
+            "top1_acc": float(acc),
+            "ece": float(ece_val),
+            "aece": float(aece_val),
+        }
+
+    def _write_run_summary_json(self, metrics: dict, start_time: float) -> None:
+        """Write a JSON summary for this run under output_dir/metrics.json."""
+        out_dir = Path(self.config.output_dir)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # Minimal, reproducible snapshot
+        cfg_dict = _config_to_dict(self.config)
+
+        payload = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "dataset": self.config.dataset.name,
+            "shots": int(self.config.dataset.num_shots),
+            "seed": int(self.config.seed),
+            "method": "gp" if bool(getattr(self.config.adapter, 'use_gp', False)) else "baseline",
+            "backbone": self.config.model.backbone_name,
+            "metrics": metrics,
+            "config": cfg_dict,
+            "output_dir": str(out_dir),
+            "train_time_s": float(max(0.0, time.time() - start_time)),
+        }
+
+        with (out_dir / "metrics.json").open("w") as f:
+            json.dump(payload, f, indent=2)
 
     @torch.no_grad()
     def _compute_gp_template_targets_prob(self) -> torch.Tensor:
