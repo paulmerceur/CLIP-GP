@@ -1,0 +1,76 @@
+name: gp_small
+# Single dataset or a list via "datasets"
+dataset: caltech101
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+
+# Seeds and shots
+seeds: [1, 2, 3]
+shots: [1, 4, 8, 16]
+
+# Optional dataset root override (falls back to defaults in utils.config)
+root: /mnt/features/VDATA/
+
+# Where to store results for this experiment
+output_root: output
+
+# Grid of hyperparameters (keys follow existing config override notation)
+# You can set singletons here as lists of one value.
+grid:
+  TRAINER.ADAPTER.GP_REG_EPOCHS: [50, 300]
+  TRAINER.ADAPTER.GP_REG_LR: [0.01, 0.1]
+  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true]
+
+# Output directory template; placeholders available:
+# {experiment}, {sweep} (alias), {dataset}, {shots}, {seed}, {sig}
+# {sig} is a compact signature of all grid parameters.
+template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
+
+# Embedded trainer configuration (inlined from previous configs/trainers/gp.yaml)
+DATALOADER:
+  TRAIN_X:
+    BATCH_SIZE: 128
+  TEST:
+    BATCH_SIZE: 128
+  NUM_WORKERS: 8
+
+INPUT:
+  SIZE: (224, 224)
+  INTERPOLATION: "bicubic"
+  PIXEL_MEAN: [0.48145466, 0.4578275, 0.40821073]
+  PIXEL_STD: [0.26862954, 0.26130258, 0.27577711]
+  TRANSFORMS: ["random_resized_crop", "random_flip", "normalize"]
+
+OPTIM:
+  NAME: "sgd"
+  LR: 0.01
+  MAX_EPOCH: 300
+  LR_SCHEDULER: "cosine"
+  WARMUP_EPOCH: 1
+  WARMUP_TYPE: "constant"
+  WARMUP_CONS_LR: 1e-5
+  WEIGHT_DECAY: 0.0
+  MOMENTUM: 0.9
+  # ADAMW only
+  BETAS: [0.9, 0.999]
+  EPS: 1e-8
+  # MUON only
+  AUX_LR: 0.01
+  AUX_WEIGHT_DECAY: 0.0
+
+TRAIN:
+  PRINT_FREQ: 5
+
+TRAINER:
+  ADAPTER:
+    INIT: ZS
+    CONSTRAINT: none
+    PREC: fp16
+    NUM_TEMPLATES: 7
+    L2_LAMBDA: 0.1
+    # GP configuration
+    USE_GP: True
+    GP_KERNEL_TYPE: rbf
+    GP_NUM_MC_SAMPLES: 10
+    GP_LR: 0.01
+    GP_BETA: 0.001
+

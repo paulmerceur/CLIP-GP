@@ -16,7 +16,7 @@ class AdapterConfig:
     # Basic adapter settings
     prec: str = "fp16"  # Precision: "fp16", "fp32", "amp"
     num_templates: int = 1  # Number of templates to use
-    l2_lambda: float = 100.0  # L2 regularization weight
+    l2_lambda: float = 0.1  # L2 regularization weight
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -44,7 +44,8 @@ class ModelConfig:
 class DatasetConfig:
     """Dataset configuration"""
     name: str = "Caltech101"  # Dataset name
-    root: str = "/export/datasets/public"  # Path to dataset root
+    #root: str = "/export/datasets/public"  # Path to dataset root
+    root: str = "/mnt/features/VDATA"
     num_shots: int = 1  # Number of shots for few-shot learning
     subsample_classes: str = "all"  # "all", "base", or "new"
     source_domains: Optional[List[str]] = None  # Source domains for DA/DG

@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Hyperparameter sweep utility for CLIP-GP.
+Experiment runner for CLIP-GP (supports grids and single runs).
 
-- Reads a sweep YAML from configs/search/ specifying dataset(s), seeds, shots, and a grid of config overrides
+- Reads an experiment YAML (now stored under configs/trainers/) specifying dataset(s), seeds, shots,
+  optional grid of overrides, and may embed the trainer configuration (DATALOADER/INPUT/OPTIM/TRAIN/TRAINER).
 - Expands the Cartesian product and launches `python train.py` runs
 - Schedules evenly with per-GPU concurrency via --jobs-per-gpu (default 1)
-- Writes a manifest.json and a summary.csv under output_root/<sweep_name>/
+- Writes results under output/<experiment_name>/...
+
+Notes:
+- If you want a single run, omit the `grid` key (or leave it empty).
+- The experiment name can be provided via --experiment-name; it defaults to the YAML filename stem.
 
 Usage examples:
-  python -m utils.hparam_search --sweep-file configs/search/gp_small.yaml --devices "0,1" --jobs-per-gpu 1
-  python -m utils.hparam_search --sweep-file configs/search/baseline_l2.yaml --jobs-per-gpu 1
+  python -m utils.hparam_search --sweep-file configs/trainers/gp_small.yaml --devices "0,1" --jobs-per-gpu 1
+  python -m utils.hparam_search --sweep-file configs/trainers/baseline_l2.yaml --jobs-per-gpu 1
 """
 
 from __future__ import annotations
@@ -36,14 +41,15 @@ class Trial:
     dataset: str
     seed: int
     shots: int
-    base_trainer_cfg: str
     dataset_cfg: str
     output_root: Path
     output_template: str
     grid_overrides: Dict[str, Any]
     extra_env: Dict[str, str]
     root_override: str | None
-    sweep_name: str
+    experiment_name: str
+    base_opts: List[str]
+    config_file: str
 
     def signature(self) -> str:
         # Human-readable signature: join "<lastkey><value>" pairs without hashing
@@ -58,7 +64,9 @@ class Trial:
     def format_outdir(self) -> Path:
         # Prepare placeholders
         placeholders = {
-            "sweep": self.sweep_name,
+            # Backward compatibility: expose both names
+            "sweep": self.experiment_name,
+            "experiment": self.experiment_name,
             "dataset": self.dataset,
             "shots": self.shots,
             "seed": self.seed,
@@ -74,8 +82,8 @@ class Trial:
         out_dir = self.format_outdir()
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build opts overrides as a flat list
-        opts: List[str] = []
+        # Build opts: base trainer opts first, then overrides to allow overriding
+        opts: List[str] = list(self.base_opts)
         for k, v in sorted(self.grid_overrides.items()):
             opts.extend([k, str(v)])
         # Also set shots explicitly
@@ -88,7 +96,7 @@ class Trial:
             "--dataset-config-file",
             self.dataset_cfg,
             "--config-file",
-            self.base_trainer_cfg,
+            self.config_file,
             "--dataset",
             self.dataset_map(self.dataset),
             "--seed",
@@ -136,16 +144,16 @@ def load_sweep(path: Path) -> Dict[str, Any]:
 
 
 def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Trial], Dict[str, Any]]:
-    name = cfg.get("name", "sweep")
+    name = cfg.get("name") or "experiment"
     datasets = cfg.get("datasets") or [cfg.get("dataset")]
     seeds: List[int] = list(cfg.get("seeds", [1]))
     shots: List[int] = list(cfg.get("shots", [1]))
-    base_trainer_cfg = cfg.get("trainer_config", "configs/trainers/gp.yaml")
     dataset_cfg_from_yaml = cfg.get("dataset_config")  # optional
-    output_root = Path(cfg.get("output_root", "output/search"))
+    output_root = Path(cfg.get("output_root", "output"))
     grid: Dict[str, List[Any]] = cfg.get("grid", {})
-    template: str = cfg.get("template", "{sweep}/{dataset}/{sig}/seed{seed}")
+    template: str = cfg.get("template", "{experiment}/{dataset}/{sig}/seed{seed}")
     root_override = cfg.get("root")
+    config_file_path = str(cfg.get("__config_file__", ""))
 
     # Device hints from sweep file (fallback to CLI)
     devices = cfg.get("devices") or cli_devices or ""
@@ -169,19 +177,20 @@ def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Tri
                         dataset=ds,
                         seed=int(seed),
                         shots=int(nshot),
-                        base_trainer_cfg=base_trainer_cfg,
                         dataset_cfg=dataset_cfg,
                         output_root=output_root,
                         output_template=template,
                         grid_overrides=overrides,
                         extra_env={},
                         root_override=root_override,
-                        sweep_name=name,
+                        experiment_name=name,
+                        base_opts=[],
+                        config_file=config_file_path,
                     )
                     trials.append(trial)
                     idx += 1
     meta = {
-        "name": name,
+        "experiment_name": name,
         "n_trials": len(trials),
         "devices": devices_list,
     }
@@ -274,26 +283,36 @@ def _collect_override_keys(trials: List[Trial]) -> List[str]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run hyperparameter sweeps for CLIP-GP.")
-    ap.add_argument("--sweep-file", required=True, help="Path to sweep YAML (e.g., configs/search/gp_small.yaml)")
+    ap = argparse.ArgumentParser(description="Run experiments for CLIP-GP (grids or single runs).")
+    ap.add_argument("--sweep-file", required=True, help="Path to experiment YAML (e.g., configs/trainers/gp_small.yaml)")
     ap.add_argument("--devices", default=None, help="Comma-separated GPU IDs, e.g., '0,1' (optional)")
     ap.add_argument("--jobs-per-gpu", type=int, default=1, help="Concurrent jobs per GPU (default 1)")
     ap.add_argument("--retries", type=int, default=0, help="Number of retries per failed trial")
+    ap.add_argument("--experiment-name", default=None, help="Optional experiment name (defaults to YAML filename or 'name' field)")
     args = ap.parse_args()
 
     timer_start = time.time()
 
     sweep_path = Path(args.sweep_file)
     cfg = load_sweep(sweep_path)
+    # Inject config file path for trainer consumption and naming
+    cfg["__config_file__"] = str(sweep_path)
+    # Determine experiment name
+    if args.experiment_name:
+        cfg["name"] = args.experiment_name
+    elif not cfg.get("name"):
+        cfg["name"] = sweep_path.stem
+
     trials, meta = build_trials(cfg, cli_devices=args.devices)
 
     devices_list = meta.get("devices", [])
     assign_devices(trials, devices_list)
 
     results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), retries=args.retries)
-    print(f"Sweep complete: {meta['name']} -> {(trials[0].output_root / meta['name']) if trials else (Path('output/search') / meta['name'])}")
+    exp_name = meta.get("experiment_name", "experiment")
+    print(f"Experiment complete: {exp_name} -> {(trials[0].output_root / exp_name) if trials else (Path('output') / exp_name)}")
     timer_end = time.time()
-    print(f"Sweep completed in {timer_end - timer_start} seconds")
+    print(f"Completed in {timer_end - timer_start} seconds")
 
 
 if __name__ == "__main__":

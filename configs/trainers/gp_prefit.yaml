@@ -1,3 +1,25 @@
+name: gp_prefit
+# Single dataset or a list via "datasets"
+datasets: [stanford_cars]
+
+# Seeds and shots
+seeds: [1, 2, 3]
+shots: [1, 4, 8, 16]
+
+# Optional dataset root override
+root: /mnt/features/VDATA/
+
+# Where to store results
+output_root: output
+
+# Grid: enable GP joint training for prefit schedule
+grid:
+  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true]
+
+# Output layout
+template: "{experiment}/{dataset}/gp_prefit_{shots}shots_{sig}/seed{seed}"
+
+# Embedded trainer configuration (same as GP defaults)
 DATALOADER:
   TRAIN_X:
     BATCH_SIZE: 128
@@ -22,11 +44,8 @@ OPTIM:
   WARMUP_CONS_LR: 1e-5
   WEIGHT_DECAY: 0.0
   MOMENTUM: 0.9
-  # ADAMW only: these are used when OPTIM.NAME == "adamw"
   BETAS: [0.9, 0.999]
   EPS: 1e-8
-  
-  # MUON only: Muon uses an auxiliary Adam(W) for <2D params
   AUX_LR: 0.01
   AUX_WEIGHT_DECAY: 0.0
 
@@ -36,13 +55,13 @@ TRAIN:
 TRAINER:
   ADAPTER:
     INIT: ZS
-    CONSTRAINT: none  
+    CONSTRAINT: none
     PREC: fp16
     NUM_TEMPLATES: 7
     L2_LAMBDA: 0.1
-    # GP configuration
     USE_GP: True
     GP_KERNEL_TYPE: rbf
     GP_NUM_MC_SAMPLES: 10
     GP_LR: 0.01
     GP_BETA: 0.001
+
