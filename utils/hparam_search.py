@@ -269,13 +269,6 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int) -> Li
     return results
 
 
-def _collect_override_keys(trials: List[Trial]) -> List[str]:
-    keys: set[str] = set()
-    for t in trials:
-        keys.update(t.grid_overrides.keys())
-    return sorted(list(keys))
-
-
 def main():
     ap = argparse.ArgumentParser(description="Run experiments for CLIP-GP (grids or single runs).")
     ap.add_argument("--config-file", required=True, help="Path to experiment YAML (e.g., configs/trainers/gp_small.yaml)")

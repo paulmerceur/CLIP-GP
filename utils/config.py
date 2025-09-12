@@ -128,11 +128,40 @@ def load_config_from_yaml(yaml_path: str) -> dict:
 
 
 def merge_config_from_file(config: Config, config_file: str) -> None:
-    """Merge configuration from YAML file into existing config"""
-    if not config_file or not Path(config_file).exists():
+    """Merge configuration from YAML file into existing config.
+
+    Supports optional inheritance via BASE_CONFIG: path/to/base.yaml within the YAML.
+    The base is merged first, then the current file to allow overrides.
+    Paths in BASE_CONFIG are resolved relative to the referencing YAML file.
+    """
+    if not config_file:
         return
-        
-    file_config = load_config_from_yaml(config_file)
+    path = Path(config_file)
+    if not path.exists():
+        return
+
+    file_config = load_config_from_yaml(str(path)) or {}
+
+    # Handle BASE_CONFIG if present
+    base_cfg_path = file_config.pop("BASE_CONFIG", None)
+    if base_cfg_path:
+        base_path = Path(base_cfg_path)
+        resolved_base: Path
+        if base_path.is_absolute():
+            resolved_base = base_path
+        else:
+            candidate1 = (path.parent / base_path)
+            candidate2 = (Path.cwd() / base_path)
+            if candidate1.exists():
+                resolved_base = candidate1
+            elif candidate2.exists():
+                resolved_base = candidate2
+            else:
+                resolved_base = candidate1  # fall back
+        # Merge base first
+        merge_config_from_file(config, str(resolved_base))
+
+    # Merge the current file after the base to allow overrides
     merge_config_dict(config, file_config)
 
 
@@ -205,41 +234,41 @@ def parse_args_to_config() -> Config:
     parser = argparse.ArgumentParser(description="CLIP-GP Training")
     
     # Dataset arguments
-    parser.add_argument("--root", type=str, default="/export/datasets/public", 
+    parser.add_argument("--root", type=str, default=None, 
                        help="Path to dataset root")
-    parser.add_argument("--dataset", type=str, default="Caltech101",
+    parser.add_argument("--dataset", type=str, default=None,
                        choices=["Caltech101", "OxfordPets", "OxfordFlowers", "FGVCAircraft", 
                                "DescribableTextures", "EuroSAT", "StanfordCars", "Food101", 
                                "SUN397", "UCF101", "ImageNet", "ImageNetSketch", "ImageNetV2", 
                                "ImageNetA", "ImageNetR"],
                        help="Dataset name")
-    parser.add_argument("--shots", type=int, default=1, help="Number of shots")
+    parser.add_argument("--shots", type=int, default=None, help="Number of shots")
     
     # Model arguments
-    parser.add_argument("--backbone", type=str, default="RN50", 
+    parser.add_argument("--backbone", type=str, default=None, 
                        help="CLIP backbone name")
-    parser.add_argument("--trainer", type=str, default="Trainer",
+    parser.add_argument("--trainer", type=str, default=None,
                        help="Trainer name")
-    parser.add_argument("--head", type=str, default="", help="Head name")
+    parser.add_argument("--head", type=str, default=None, help="Head name")
     
     # Training arguments
-    parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
-    parser.add_argument("--epochs", type=int, default=300, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
-    parser.add_argument("--optimizer", type=str, default="sgd", 
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--epochs", type=int, default=None, help="Number of epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--optimizer", type=str, default=None, 
                        choices=["sgd", "adam", "adamw"], help="Optimizer")
     
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
-    parser.add_argument("--gp-lr", type=float, default=0.1, help="GP learning rate")
-    parser.add_argument("--gp-beta", type=float, default=0.001, help="GP KL weight")
-    parser.add_argument("--num-templates", type=int, default=1, help="Number of templates")
+    parser.add_argument("--gp-lr", type=float, default=None, help="GP learning rate")
+    parser.add_argument("--gp-beta", type=float, default=None, help="GP KL weight")
+    parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     
     # Environment arguments
-    parser.add_argument("--output-dir", type=str, default="output/default_experiment",
+    parser.add_argument("--output-dir", type=str, default=None,
                        help="Output directory")
-    parser.add_argument("--seed", type=int, default=1, help="Random seed")
-    parser.add_argument("--resume", type=str, default="", help="Resume from checkpoint")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     
     # Configuration files
     parser.add_argument("--config-file", type=str, default="",
@@ -270,64 +299,64 @@ def parse_args_to_config() -> Config:
     
     # Create base config
     config = Config()
-    
-    # Apply command line arguments
-    if args.root:
-        config.dataset.root = args.root
-    if args.dataset:
-        config.dataset.name = args.dataset
-    if args.shots:
-        config.dataset.num_shots = args.shots
-    if args.backbone:
-        config.model.backbone_name = args.backbone
-    if args.trainer:
-        config.trainer_name = args.trainer
-    if args.head:
-        config.model.head_name = args.head
-    if args.lr:
-        config.optim.lr = args.lr
-    if args.epochs:
-        config.optim.max_epoch = args.epochs
-    if args.batch_size:
-        config.dataloader.batch_size_train = args.batch_size
-        config.dataloader.batch_size_test = args.batch_size
-    if args.optimizer:
-        config.optim.name = args.optimizer
-    if args.use_gp:
-        config.adapter.use_gp = True
-    if args.gp_lr:
-        config.adapter.gp_lr = args.gp_lr
-    if args.gp_beta:
-        config.adapter.gp_beta = args.gp_beta
-    if args.num_templates:
-        config.adapter.num_templates = args.num_templates
-    if args.output_dir:
-        config.output_dir = args.output_dir
-    if args.seed:
-        config.seed = args.seed
-    if args.resume:
-        config.resume = args.resume
-    if args.eval_only:
-        config.eval_only = args.eval_only
-    if args.model_dir:
-        config.model_dir = args.model_dir
-    if args.load_epoch:
-        config.load_epoch = args.load_epoch
-    if args.no_train:
-        config.no_train = args.no_train
-    if args.source_domains:
-        config.dataset.source_domains = args.source_domains
-    if args.target_domains:
-        config.dataset.target_domains = args.target_domains
-    if args.transforms:
-        config.input.transforms = args.transforms
-    
-    # Load configuration files
+
+    # Load configuration files first (BASE_CONFIG handled in merge_config_from_file)
     if args.dataset_config_file:
         merge_config_from_file(config, args.dataset_config_file)
     if args.config_file:
         merge_config_from_file(config, args.config_file)
     
+    # Apply command line arguments (only if explicitly provided)
+    if args.root is not None:
+        config.dataset.root = args.root
+    if args.dataset is not None:
+        config.dataset.name = args.dataset
+    if args.shots is not None:
+        config.dataset.num_shots = args.shots
+    if args.backbone is not None:
+        config.model.backbone_name = args.backbone
+    if args.trainer is not None:
+        config.trainer_name = args.trainer
+    if args.head is not None:
+        config.model.head_name = args.head
+    if args.lr is not None:
+        config.optim.lr = args.lr
+    if args.epochs is not None:
+        config.optim.max_epoch = args.epochs
+    if args.batch_size is not None:
+        config.dataloader.batch_size_train = args.batch_size
+        config.dataloader.batch_size_test = args.batch_size
+    if args.optimizer is not None:
+        config.optim.name = args.optimizer
+    if args.use_gp:
+        config.adapter.use_gp = True
+    if args.gp_lr is not None:
+        config.adapter.gp_lr = args.gp_lr
+    if args.gp_beta is not None:
+        config.adapter.gp_beta = args.gp_beta
+    if args.num_templates is not None:
+        config.adapter.num_templates = args.num_templates
+    if args.output_dir is not None:
+        config.output_dir = args.output_dir
+    if args.seed is not None:
+        config.seed = args.seed
+    if args.resume is not None:
+        config.resume = args.resume
+    if args.eval_only:
+        config.eval_only = args.eval_only
+    if args.model_dir:
+        config.model_dir = args.model_dir
+    if args.load_epoch is not None:
+        config.load_epoch = args.load_epoch
+    if args.no_train:
+        config.no_train = args.no_train
+    if args.source_domains is not None:
+        config.dataset.source_domains = args.source_domains
+    if args.target_domains is not None:
+        config.dataset.target_domains = args.target_domains
+    if args.transforms is not None:
+        config.input.transforms = args.transforms
+
     # Process additional opts
     if args.opts:
         _merge_from_list(config, args.opts)
