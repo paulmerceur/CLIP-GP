@@ -165,6 +165,7 @@ def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Tri
 
     trials: List[Trial] = []
     idx = 0
+    if isinstance(datasets, str): datasets = [datasets]
     for ds in datasets:
         dataset_cfg = dataset_cfg_from_yaml or f"configs/datasets/{ds}.yaml"
         for seed in seeds:
@@ -205,7 +206,7 @@ def assign_devices(trials: List[Trial], devices: List[str]) -> None:
         t.extra_env["CUDA_VISIBLE_DEVICES"] = str(dev)
 
 
-def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int) -> List[Dict[str, Any]]:
+def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, verbose: bool = False) -> List[Dict[str, Any]]:
     """Run trials enforcing even per-GPU concurrency (jobs per GPU), printing concise progress.
 
     Child stdout/stderr are suppressed; logs are still written inside each trial's output dir.
@@ -242,8 +243,12 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int) -> Li
                 sem = semaphores[""]
             with sem:
                 cmd, env = trial.to_command()
-                # Suppress child outputs; logs are still written to file by train.py
-                rc = subprocess.call(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if verbose:
+                    # Print child outputs to this terminal (may interleave across threads)
+                    rc = subprocess.call(cmd, env=env)
+                else:
+                    # Suppress child outputs; logs are still written to file by train.py
+                    rc = subprocess.call(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 success = (rc == 0)
                 with lock:
                     results.append({
@@ -275,6 +280,7 @@ def main():
     ap.add_argument("--devices", default=None, help="Comma-separated GPU IDs, e.g., '0,1' (optional)")
     ap.add_argument("--jobs-per-gpu", type=int, default=1, help="Concurrent jobs per GPU (default 1)")
     ap.add_argument("--experiment-name", default=None, help="Optional experiment name (defaults to YAML filename or 'name' field)")
+    ap.add_argument("--verbose", action="store_true", help="If set, stream child process output to the terminal")
     args = ap.parse_args()
 
     timer_start = time.time()
@@ -294,7 +300,7 @@ def main():
     devices_list = meta.get("devices", [])
     assign_devices(trials, devices_list)
 
-    results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu))
+    results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), verbose=bool(args.verbose))
     exp_name = meta.get("experiment_name", "experiment")
     print(f"Experiment complete: {exp_name} -> {(trials[0].output_root / exp_name) if trials else (Path('output') / exp_name)}")
     timer_end = time.time()

@@ -17,9 +17,7 @@ output_root: output
 # Grid of hyperparameters (keys follow existing config override notation)
 # You can set singletons here as lists of one value.
 grid:
-  TRAINER.ADAPTER.GP_REG_EPOCHS: [50, 300]
-  TRAINER.ADAPTER.GP_REG_LR: [0.01, 0.1]
-  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true]
+  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, top3, minmax]
 
 # Output directory template; placeholders available:
 # {experiment}, {sweep} (alias), {dataset}, {shots}, {seed}, {sig}

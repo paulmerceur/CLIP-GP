@@ -25,11 +25,10 @@ class AdapterConfig:
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     
-    # GP prefit settings
-    gp_reg_prefit: bool = True  # Whether to use GP prefit
-    gp_reg_epochs: int = 50  # Number of epochs for GP prefit
-    gp_reg_lr: float = 0.01  # Learning rate for GP prefit
-    gp_joint_training: bool = False  # Whether to jointly train GP and model
+    # GP one-step initialization (replaces legacy prefit)
+    gp_reg_prefit: bool = True  # If True, perform one-step template weight initialization
+    gp_init_method: str = "val_weighted"  # One of: "val_weighted", "top3", "minmax"
+    gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     
 
 @dataclass
@@ -44,7 +43,6 @@ class ModelConfig:
 class DatasetConfig:
     """Dataset configuration"""
     name: str = "Caltech101"  # Dataset name
-    #root: str = "/export/datasets/public"  # Path to dataset root
     root: str = "/mnt/features/VDATA"
     num_shots: int = 1  # Number of shots for few-shot learning
     subsample_classes: str = "all"  # "all", "base", or "new"
@@ -168,6 +166,7 @@ def merge_config_from_file(config: Config, config_file: str) -> None:
 def merge_config_dict(config: Config, config_dict: dict) -> None:
     """Recursively merge dictionary into config object"""
     for key, value in config_dict.items():
+        if key.lower() == "dataset" and isinstance(value, str): config.dataset.name = value
         # Handle special cases first before general attribute checking
         if key == "TRAINER" and "ADAPTER" in value:
             adapter_config = value["ADAPTER"]

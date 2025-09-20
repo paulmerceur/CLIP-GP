@@ -2,10 +2,10 @@
 
 # Thin wrapper around the Python experiment runner
 # Usage:
-#   ./scripts/run_experiment.sh <experiment_yaml> [<experiment_name>] [--devices "0,1" --jobs-per-gpu 1 --retries 0]
+#   ./scripts/run_experiment.sh <experiment_yaml> [<experiment_name>] [--devices "0,1" --jobs-per-gpu 1 --verbose]
 
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <experiment_yaml> [<experiment_name>] [--devices \"0,1\" --jobs-per-gpu 1 --retries 0]"
+  echo "Usage: $0 <experiment_yaml> [<experiment_name>] [--devices \"0,1\" --jobs-per-gpu 1 --verbose]"
   exit 1
 fi
 

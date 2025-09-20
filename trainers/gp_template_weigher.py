@@ -92,6 +92,33 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self._templates: torch.Tensor
         self.register_buffer("_templates", text_embeddings.detach())
 
+    @torch.no_grad()
+    def initialize_from_weights(self, weights_km: torch.Tensor, temperature: float = 1.0) -> None:
+        """Initialize GP logits from per-class template weights.
+
+        Parameters
+        ----------
+        weights_km: torch.Tensor
+            Tensor of shape [K, M] with nonnegative weights summing to 1 per class.
+        temperature: float
+            Temperature to scale the initialization logits; >1 makes them softer.
+        """
+        w = weights_km.to(device=self._templates.device, dtype=torch.float32)
+        w = torch.clamp(w, min=1e-12)
+        f_init = torch.log(w) / max(float(temperature), 1e-6)  # [K, M]
+        try:
+            # Initialize mean module
+            if hasattr(self, "mean_module") and hasattr(self.mean_module, "mean_param"):
+                self.mean_module.mean_param.data.copy_(f_init)
+        except Exception:
+            pass
+        try:
+            # Initialize variational mean
+            vm = self.variational_strategy._variational_distribution.variational_mean
+            vm.data.copy_(f_init)
+        except Exception:
+            pass
+
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)

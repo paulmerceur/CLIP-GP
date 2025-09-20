@@ -12,13 +12,12 @@ root: /mnt/features/VDATA/
 
 # Grid: enable GP joint training for prefit schedule
 grid:
-  TRAINER.ADAPTER.GP_REG_PREFIT: [false, true]
-  TRAINER.ADAPTER.GP_JOINT_TRAINING: [true, false]
-  TRAINER.ADAPTER.GP_REG_EPOCHS: [50, 200]
-  TRAINER.ADAPTER.GP_REG_LR: [0.01, 0.1]
+  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, minmax]
+  TRAINER.ADAPTER.GP_USE_ELBO: [true, false]
+
 
 # Output layout
-template: "{experiment}/{dataset}/gp_prefit_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
 
 TRAINER:
   ADAPTER:
