@@ -1,0 +1,49 @@
+TRAINER:
+  NAME: FineTune
+  ADAPTER:
+    PREC: fp16
+  FINETUNE:
+    FT_HEAD_TYPE: linear
+    FT_TRAIN_VISUAL: True
+    FT_TRAIN_TEXT: False
+    FT_TRAIN_LOGIT_SCALE: True
+    NUM_TEMPLATES: 16
+    FREEZE_BN: True
+    GRAD_CLIP: 1.0
+    LABEL_SMOOTHING: 0.0
+    FT_RECOMPUTE_TEXT_EVERY: 0
+    USE_GP: False
+    GP_LR: 0.01
+    GP_BETA: 0.001
+    GP_USE_ELBO: True
+    GP_NUM_MC_SAMPLES: 1
+    GP_KERNEL_TYPE: rbf
+    GP_TARGETS_REFRESH_EVERY: 0
+
+OPTIM:
+  NAME: adamw
+  LR: 5.0e-5
+  BACKBONE_LR: 5.0e-6
+  HEAD_LR: 5.0e-4
+  WEIGHT_DECAY: 0.01
+  MAX_EPOCH: 50
+  LR_SCHEDULER: cosine
+  WARMUP_EPOCH: 5
+
+DATASET:
+  NAME: Caltech101
+  NUM_SHOTS: 1
+
+DATALOADER:
+  TRAIN_X:
+    BATCH_SIZE: 64
+  TEST:
+    BATCH_SIZE: 128
+
+INPUT:
+  SIZE: [224, 224]
+  INTERPOLATION: bicubic
+  TRANSFORMS: [random_resized_crop, random_flip, normalize]
+
+OUTPUT_DIR: output/finetune
+

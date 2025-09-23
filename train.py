@@ -34,6 +34,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # Import trainer to register it
 import trainers.adapters
+import trainers.finetune
 
 
 def print_args(config):

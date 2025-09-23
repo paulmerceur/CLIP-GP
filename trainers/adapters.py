@@ -174,14 +174,14 @@ class CustomCLIP(nn.Module):
         dim = int(base_text_features.shape[-1])
         self.visual_proj = nn.Linear(dim, dim, bias=False)
         with torch.no_grad():
-            eye = torch.eye(dim)
+            eye = torch.eye(dim, dtype=torch.float32)
             self.visual_proj.weight.copy_(eye)
-        # Align projection layer dtype/device with CLIP modules
+        # Keep projection weights in fp32 to avoid fp16 update instability
         try:
             target_device = next(self.image_encoder.parameters()).device
         except StopIteration:
             target_device = base_text_features.device
-        self.visual_proj.to(device=target_device, dtype=self.dtype)
+        self.visual_proj.to(device=target_device, dtype=torch.float32)
 
         # Create GP weighter if needed
         self.gp_weighter = None
@@ -240,8 +240,9 @@ class CustomCLIP(nn.Module):
         
         # Apply learnable visual projection W before normalization
         projected = self.visual_proj(features)
-        features_norm = F.normalize(projected, p=2, dim=-1)
-        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
+        # Use a safe eps to avoid fp16 underflow in normalization
+        features_norm = F.normalize(projected, p=2, dim=-1, eps=1e-6)
+        prototypes_norm = F.normalize(prototypes, p=2, dim=-1, eps=1e-6)
         features_norm = features_norm.to(prototypes_norm.dtype)
         scale = self.logit_scale.exp().to(features_norm.dtype)
         return scale * (features_norm @ prototypes_norm.t())
@@ -429,13 +430,13 @@ class Trainer(BaseTrainer):
             if f.dtype != target_dtype:
                 f = f.to(dtype=target_dtype)
             projected = model.visual_proj(f)
-            features_norm = F.normalize(projected, p=2, dim=-1)
+            features_norm = F.normalize(projected, p=2, dim=-1, eps=1e-6)
             scale = model.logit_scale.exp().to(dtype=features_norm.dtype)
 
             ce_vals = []
             for s in range(num_samples):
                 prototypes_s = protos[s]  # [K,D]
-                prototypes_norm = F.normalize(prototypes_s, p=2, dim=-1)
+                prototypes_norm = F.normalize(prototypes_s, p=2, dim=-1, eps=1e-6)
                 logits_s = scale * (features_norm @ prototypes_norm.t())
                 ce_vals.append(F.cross_entropy(logits_s, labels))
             ce_loss = torch.stack(ce_vals, dim=0).mean()
@@ -945,7 +946,7 @@ class Trainer(BaseTrainer):
         except Exception:
             feats_proj = features
 
-        feats_norm = F.normalize(feats_proj, p=2, dim=-1)  # [N, D]
+        feats_norm = F.normalize(feats_proj, p=2, dim=-1, eps=1e-6)  # [N, D]
         scale = float(cast(torch.Tensor, self.model.logit_scale).exp().detach().cpu().item())
 
         # Prepare per-class aggregation
@@ -956,7 +957,7 @@ class Trainer(BaseTrainer):
         targets = torch.zeros(K, M, dtype=torch.float32)
         for m in range(M):
             prot_m = text_emb[:, m, :]                 # [K, D]
-            prot_m = F.normalize(prot_m, p=2, dim=-1)  # [K, D]
+            prot_m = F.normalize(prot_m, p=2, dim=-1, eps=1e-6)  # [K, D]
             logits = scale * (feats_norm @ prot_m.t()) # [N, K]
             probs = torch.softmax(logits, dim=-1)      # [N, K]
             sum_probs = (labels_one_hot * probs).sum(dim=0)  # [K]

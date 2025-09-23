@@ -1,0 +1,35 @@
+name: finetune
+BASE_CONFIG: configs/trainers/finetune.yaml
+
+# Only Caltech101 for this sweep
+datasets: [caltech101]
+
+# Multiple runs per config for robustness
+seeds: [1, 2, 3]
+shots: [0]
+
+# Optional dataset root override
+root: /mnt/features/VDATA/
+
+# Where to store results for this experiment
+output_root: output
+
+# Grid of hyperparameters (override keys)
+# Keep grid compact to limit total runs while tuning impactful knobs
+grid:
+  OPTIM.LR: [5.0e-5, 1.0e-4]
+  OPTIM.BACKBONE_LR: [5.0e-6, 1.0e-5]
+  OPTIM.HEAD_LR: [5.0e-4]
+  OPTIM.WEIGHT_DECAY: [0.01, 0.05]
+  TRAINER.FINETUNE.FT_L2_TO_INIT: [0.0, 1.0e-3]
+  TRAINER.FINETUNE.FREEZE_BN: [True]
+  TRAINER.FINETUNE.FT_HEAD_TYPE: [linear]
+
+# Output directory template
+template: "{experiment}/{dataset}/ft_{shots}shots_{sig}/seed{seed}"
+
+# You can further override TRAINER/OPTIM fields inline if needed
+# TRAINER:
+#   ADAPTER:
+#     FT_TRAIN_TEXT: False
+

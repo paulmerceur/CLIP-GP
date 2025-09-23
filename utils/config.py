@@ -29,6 +29,35 @@ class AdapterConfig:
     gp_reg_prefit: bool = True  # If True, perform one-step template weight initialization
     gp_init_method: str = "val_weighted"  # One of: "val_weighted", "top3", "minmax"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
+
+
+@dataclass
+class FinetuneConfig:
+    """Fine-tuning configuration"""
+    # Head selection and core toggles
+    ft_head_type: str = "linear"  # "linear" or "prototypes"
+    ft_train_visual: bool = True
+    ft_train_text: bool = False
+    ft_train_logit_scale: bool = True
+
+    num_templates: int = 16  # for prototype head/template encoding
+
+    # Optimization knobs
+    ft_l2_to_init: float = 0.0  # regularize linear head towards its init
+    freeze_bn: bool = False
+    grad_clip: float = 0.0
+    label_smoothing: float = 0.0
+    ft_recompute_text_every: int = 0  # steps; 0 = recompute every step
+
+    # GP integration (B1): prototype head with GP weights, detached
+    use_gp: bool = False
+    gp_lr: float = 0.01
+    gp_beta: float = 0.001
+    gp_use_elbo: bool = True
+    gp_num_mc_samples: int = 1  # B1: start with posterior-mean; MC not used initially
+    gp_kernel_type: str = "rbf"
+    gp_targets_refresh_every: int = 0  # epochs; 0 = compute once per run
+    gp_detach_weights: bool = True  # B1 uses detached GP weights over current templates
     
 
 @dataclass
@@ -82,6 +111,10 @@ class OptimConfig:
     weight_decay: float = 0.0  # Weight decay
     momentum: float = 0.9  # SGD momentum
     betas: Tuple[float, float] = (0.9, 0.999)  # Adam betas
+    
+    # Optional separate learning rates for FT param groups
+    backbone_lr: Optional[float] = None
+    head_lr: Optional[float] = None
 
 
 @dataclass
@@ -98,6 +131,7 @@ class Config:
     # Core components
     trainer_name: str = "Trainer"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
+    finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
@@ -168,11 +202,17 @@ def merge_config_dict(config: Config, config_dict: dict) -> None:
     for key, value in config_dict.items():
         if key.lower() == "dataset" and isinstance(value, str): config.dataset.name = value
         # Handle special cases first before general attribute checking
-        if key == "TRAINER" and "ADAPTER" in value:
-            adapter_config = value["ADAPTER"]
-            for adapter_key, adapter_value in adapter_config.items():
-                if hasattr(config.adapter, adapter_key.lower()):
-                    setattr(config.adapter, adapter_key.lower(), adapter_value)
+        if key == "TRAINER":
+            if "ADAPTER" in value:
+                adapter_config = value["ADAPTER"]
+                for adapter_key, adapter_value in adapter_config.items():
+                    if hasattr(config.adapter, adapter_key.lower()):
+                        setattr(config.adapter, adapter_key.lower(), adapter_value)
+            if "FINETUNE" in value:
+                finetune_config = value["FINETUNE"]
+                for ft_key, ft_value in finetune_config.items():
+                    if hasattr(config.finetune, ft_key.lower()):
+                        setattr(config.finetune, ft_key.lower(), ft_value)
         elif key == "DATALOADER":
             if "TRAIN_X" in value and "BATCH_SIZE" in value["TRAIN_X"]:
                 config.dataloader.batch_size_train = value["TRAIN_X"]["BATCH_SIZE"]
@@ -372,13 +412,22 @@ def _merge_from_list(config: Config, opts: List[str]) -> None:
         key = opts[i]
         value = opts[i + 1]
         
-        # Parse value
-        if value.lower() in ["true", "false"]:
-            value = value.lower() == "true"
-        elif value.isdigit():
-            value = int(value)
-        elif value.replace(".", "").replace("-", "").isdigit():
-            value = float(value)
+        # Parse value (robust: bool -> int -> float with scientific notation)
+        if isinstance(value, str):
+            vlow = value.lower()
+            if vlow in ["true", "false"]:
+                value = (vlow == "true")
+            else:
+                # Try int
+                try:
+                    if value.strip().lstrip("-").isdigit():
+                        value = int(value)
+                    else:
+                        # Try float (handles scientific notation like 5e-5)
+                        value = float(value)
+                except ValueError:
+                    # leave as string
+                    pass
         
         # Apply to config
         _set_nested_attr(config, key, value)
@@ -395,6 +444,8 @@ def _set_nested_attr(config: Config, key: str, value) -> None:
             continue  # Skip trainer level for adapter config
         elif part_lower == "adapter" or (part.upper() == "ADAPTER"):
             obj = config.adapter
+        elif part_lower == "finetune" or (part.upper() == "FINETUNE"):
+            obj = config.finetune
         elif part_lower == "model":
             obj = config.model
         elif part_lower == "dataset":
