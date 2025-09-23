@@ -1,11 +1,11 @@
-name: gp_small
+name: gp_small2
 BASE_CONFIG: configs/trainers/default.yaml
-# Single dataset or a list via "datasets"
-dataset: caltech101
+# datasets: str or list
+datasets: caltech101
 #datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
 # Seeds and shots
-seeds: [1, 2, 3]
+seeds: [1]
 shots: [1, 4, 8, 16]
 
 # Optional dataset root override (falls back to defaults in utils.config)

@@ -145,7 +145,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 def build_trials(cfg: Dict[str, Any], cli_devices: str | None) -> Tuple[List[Trial], Dict[str, Any]]:
     name = cfg.get("name") or "experiment"
-    datasets = cfg.get("datasets") or [cfg.get("dataset")]
+    datasets = cfg.get("datasets")
     seeds: List[int] = list(cfg.get("seeds", [1]))
     shots: List[int] = list(cfg.get("shots", [1]))
     dataset_cfg_from_yaml = cfg.get("dataset_config")  # optional
