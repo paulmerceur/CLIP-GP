@@ -177,56 +177,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         templates_tensor = cast(torch.Tensor, self._templates)
         return prototypes.to(templates_tensor)
 
-    def fit_targets(self, targets: torch.Tensor, epochs: int = 300, lr: float = 1e-2, weight_decay: float = 0.0, verbose: bool = True) -> None:
-        """Fit the batched GP to per-template targets of shape [K, M].
-
-        Optimizes the variational ELBO with a Gaussian likelihood.
-        """
-        # Validate shapes
-        if targets.dim() != 2:
-            raise ValueError("targets must have shape [num_classes, num_templates]")
-        if int(targets.shape[0]) != int(self.num_classes) or int(targets.shape[1]) != int(self.num_templates):
-            raise ValueError("targets shape must match [K, M] of stored templates")
-
-        device = self._templates.device
-        self.to(device=device)
-        self.likelihood.to(device=device)
-
-        self.train()
-        self.likelihood.train()
-
-        # Separate model vs likelihood parameters to avoid overlaps
-        lik_params = list(self.likelihood.parameters())
-        lik_param_ids = {id(p) for p in lik_params}
-        model_params = [p for p in self.parameters() if id(p) not in lik_param_ids]
-        optimizer = torch.optim.Adam([
-            {"params": model_params, "lr": lr, "weight_decay": weight_decay},
-            {"params": lik_params, "lr": lr, "weight_decay": 0.0},
-        ])
-        mll = gpytorch.mlls.VariationalELBO(self.likelihood, self, num_data=int(self.num_templates))
-
-        y = targets.to(device=device, dtype=torch.float32)
-        x = self._templates.to(device=device, dtype=torch.float32)
-
-        if verbose:
-            try:
-                print(f"[GP] Prefit: x={tuple(x.shape)} y={tuple(y.shape)} K={self.num_classes} M={self.num_templates} device={x.device}")
-            except Exception:
-                pass
-        for ep in range(int(epochs)):
-            optimizer.zero_grad(set_to_none=True)
-            output = self(x)
-            elbo = mll(output, y)  # shape [K]
-            loss = (-elbo).sum()
-            loss.backward()
-            optimizer.step()
-            if verbose and ((ep + 1) % max(1, int(epochs) // 5) == 0 or ep == 0):
-                try:
-                    print(f"[GP] Prefit ep {ep+1}/{epochs} loss={float(loss.detach().item()):.4f} elbo_mean={float(elbo.mean().detach().item()):.4f}")
-                except Exception:
-                    pass
-
-
 
 class PerTemplateMean(gpytorch.means.Mean):
     """Learnable mean of shape [K, M] (one bias per class & template)."""

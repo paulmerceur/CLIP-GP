@@ -51,20 +51,20 @@ class TextEncoder(nn.Module):
         return x
 
 
-def load_clip_to_cpu(config):
+def load_clip(config, device):
     backbone_name = config.model.backbone_name
     url = clip._MODELS[backbone_name]
     model_path = clip._download(url)
 
     try:
         # loading JIT archive
-        jit_model = torch.jit.load(model_path, map_location="cpu").eval()
+        jit_model = torch.jit.load(model_path).eval()
         state_dict = jit_model.state_dict()
     except RuntimeError:
-        state_dict = torch.load(model_path, map_location="cpu")
+        state_dict = torch.load(model_path)
 
     model = clip.build_model(state_dict)
-    return model
+    return model.to(device)
 
 
 def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
@@ -275,11 +275,7 @@ class Trainer(BaseTrainer):
         classnames = self.dm.dataset.classnames
 
         print(f"Loading CLIP (backbone: {config.model.backbone_name})")
-        clip_model = load_clip_to_cpu(config)
-
-        # Move CLIP to target device BEFORE building CustomCLIP so that
-        # prompt/text encoding in _get_base_text_features runs on GPU.
-        clip_model = clip_model.to(self.device)
+        clip_model = load_clip(config, self.device)
 
         # Precision handling:
         # - CLIP's build_model already applies selective fp16 via convert_weights.
@@ -574,10 +570,9 @@ class Trainer(BaseTrainer):
 
     def train(self):
         """Training loop with feature extraction and evaluation."""
-        _t0 = time.time()
+        start_time = time.time()
         # Build model first (this is normally done in BaseTrainer.train())
         self.build_model()
-        
         self.set_model_mode("eval")
 
         # Feature extraction on test set
@@ -657,11 +652,12 @@ class Trainer(BaseTrainer):
             self.run_epoch()
             self.after_epoch()
         self.after_train()
+        print(f"Training completed in {time.time() - start_time:.2f} seconds")
 
         # After training completes, compute final test metrics and write metrics.json
         try:
             metrics = self._compute_final_metrics()
-            self._write_run_summary_json(metrics, start_time=_t0)
+            self._write_run_summary_json(metrics, start_time=start_time)
         except Exception as e:
             print(f"[WARN] Failed to write metrics.json: {e}")
 
