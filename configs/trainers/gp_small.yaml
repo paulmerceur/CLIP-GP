@@ -1,4 +1,4 @@
-name: gp_small2
+name: gp_small
 BASE_CONFIG: configs/trainers/default.yaml
 # datasets: str or list
 datasets: caltech101
@@ -17,7 +17,7 @@ output_root: output
 # Grid of hyperparameters (keys follow existing config override notation)
 # You can set singletons here as lists of one value.
 grid:
-  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, top3, minmax]
+  TRAINER.ADAPTER.TEMPLATE_INIT_METHOD: [uniform, val_weighted, top3, minmax]
 
 # Output directory template; placeholders available:
 # {experiment}, {sweep} (alias), {dataset}, {shots}, {seed}, {sig}

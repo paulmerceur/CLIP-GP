@@ -17,6 +17,7 @@ class AdapterConfig:
     prec: str = "fp16"  # Precision: "fp16", "fp32", "amp"
     num_templates: int = 1  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
+    template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -24,10 +25,6 @@ class AdapterConfig:
     gp_beta: float = 0.001  # KL weight for ELBO loss
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
-    
-    # GP one-step initialization (replaces legacy prefit)
-    gp_reg_prefit: bool = True  # If True, perform one-step template weight initialization
-    gp_init_method: str = "val_weighted"  # One of: "val_weighted", "top3", "minmax"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     
 

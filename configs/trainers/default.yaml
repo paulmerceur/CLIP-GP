@@ -28,8 +28,7 @@ TRAIN:
 
 TRAINER:
   ADAPTER:
-    INIT: ZS
-    CONSTRAINT: none
+    TEMPLATE_INIT_METHOD: uniform
     PREC: fp16
     NUM_TEMPLATES: 7
     L2_LAMBDA: 0.1

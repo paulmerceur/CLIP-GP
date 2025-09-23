@@ -67,23 +67,24 @@ def load_clip(config, device):
     return model.to(device)
 
 
-def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
-    """Extract text features for all templates and classes."""
-    device = next(clip_model.parameters()).device
-    
-    # Get template strings 
+def _get_templates(config):
+    """Get text templates based on NUM_TEMPLATES"""
     templates = ["a photo of a {}."]
-    
+
     # Add templates from IMAGENET_TEMPLATES_SELECT
     if config.adapter.num_templates > 1:
-        num_needed = min(
-            config.adapter.num_templates - 1,
-            len(IMAGENET_TEMPLATES_SELECT),
-        )
-        templates += IMAGENET_TEMPLATES_SELECT[:num_needed]
-    # If we need more templates, add the rest from IMAGENET_TEMPLATES
+        templates += IMAGENET_TEMPLATES_SELECT[:config.adapter.num_templates - 1]
+
+    # Add templates from IMAGENET_TEMPLATES
     if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
         templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
+    
+    return templates
+
+
+def _get_text_embeddings(templates, classnames, clip_model, text_encoder=None):
+    """Extract text features for all templates and classes."""
+    device = next(clip_model.parameters()).device
     
     # Encode all prompts once - returned tensor is reused by caller.
     emb_list = []
@@ -98,56 +99,96 @@ def _get_base_text_features(config, classnames, clip_model, text_encoder=None):
             emb_list.append(emb)
     text_embeds = torch.stack(emb_list) # [K,M,D]
 
-    # GP disabled -> simple average
-    return text_embeds.mean(1), text_embeds
+    return text_embeds
 
 
-class LinearAdapter(nn.Module):
-    """Legacy linear probe (not used in training)."""
+@torch.no_grad()
+def _get_template_weights(
+    config,
+    text_embeddings: torch.Tensor,
+    features: torch.Tensor | None,
+    labels: torch.Tensor | None,
+    logit_scale: torch.Tensor | float,
+) -> torch.Tensor:
+    """Compute per-class template weights of shape [K, M] (rows sum to 1).
 
-    def __init__(self, base_text_features: torch.Tensor):
-        super().__init__()
-        self.register_buffer("base_text_features", base_text_features)
-        self.base_text_features = base_text_features
-        # Per-class l2 regularization multipliers
-        num_classes = base_text_features.size(0)
-        self.register_buffer("alpha_constraint", torch.ones(num_classes, dtype=base_text_features.dtype, device=base_text_features.device))
+    Methods (config.adapter.template_init_method):
+      - "uniform": uniform 1/M weights per class
+      - "val_weighted": per-class per-template accuracy used as logits
+      - "top3": keep global top-3 templates by average accuracy, mask others
+      - "minmax": per-class min–max rescale of accuracies in [0,1]
 
-        # ZS Initialization
-        self.prototypes = nn.Parameter(base_text_features.clone())
+    The pipeline:
+      1) Compute zero-shot logits per template on provided features
+      2) Build per-class accuracy scores S[k,m]
+      3) Optionally transform S per method
+      4) Map to weights via row-wise softmax over log(S+eps)/temperature
+    """
+    method = str(getattr(config.adapter, 'template_init_method', 'uniform')).lower()
+    temperature = 1.0
 
-    def constraint(self):
-        # Compare raw embeddings; forward already normalizes for logits
-        dissimilitude = (self.prototypes - self.base_text_features.clone()).pow(2).sum(dim=-1)
-        alpha = cast(torch.Tensor, self.alpha_constraint)
-        return torch.mean(alpha * dissimilitude)
+    E = text_embeddings  # [K, M, D]
+    K = int(E.shape[0])
+    M = int(E.shape[1])
+    if M == 0:
+        return torch.empty(K, 0, device=E.device, dtype=E.dtype)
 
-    @torch.no_grad()
-    def init_alpha_from_zero_shot(self, labels: torch.Tensor, logits: torch.Tensor):
-        """
-        Initialize per-class alpha multipliers from zero-shot predictions.
-        Uses per-class error rate, normalized to have mean 1 for scale stability.
-        """
-        alpha_buf = cast(torch.Tensor, self.alpha_constraint)
-        dev = alpha_buf.device
-        labels = labels.to(dev)
-        logits = logits.to(dev)
-        preds = logits.argmax(dim=1)
-        num_classes = int(alpha_buf.shape[0])
-        # Compute per-class counts and corrects via bincount
-        labels_i64 = labels.to(torch.int64)
-        counts = torch.bincount(labels_i64, minlength=num_classes).clamp_min(1)
-        correct_labels = labels_i64[preds.eq(labels)]
-        corrects = torch.bincount(correct_labels, minlength=num_classes)
-        acc = corrects.float() / counts.float()
-        error = 1.0 - acc
-        # Normalize to mean 1
-        mean_error = error.mean().clamp_min(1e-6)
-        alpha = error / mean_error
-        alpha_buf.copy_(alpha.to(dtype=alpha_buf.dtype))
+    if method == 'uniform' or features is None or labels is None:
+        return torch.full((K, M), 1.0 / float(M), device=E.device, dtype=E.dtype)
 
-    def forward(self) -> torch.Tensor:
-        return self.prototypes
+    # Build per-class per-template accuracy matrix S[k, m]
+    feats = features.to(device=E.device, dtype=torch.float32)
+    feats = F.normalize(feats, p=2, dim=-1)  # CLIP ZS features
+    labels_i64 = labels.to(device=feats.device, dtype=torch.int64)
+
+    E_float = E.to(dtype=torch.float32, device=feats.device)
+    scale = logit_scale if isinstance(logit_scale, torch.Tensor) else torch.tensor(float(logit_scale), device=feats.device)
+    scale = scale.to(dtype=feats.dtype)
+
+    counts_k = torch.bincount(labels_i64, minlength=K).to(feats.dtype).clamp_min(1)
+    scores = torch.zeros(K, M, dtype=feats.dtype, device=feats.device)
+
+    for m in range(M):
+        prot_m = F.normalize(E_float[:, m, :], p=2, dim=-1)  # [K, D]
+        logits = scale * (feats @ prot_m.t())  # [N, K]
+        preds = logits.argmax(dim=1)  # [N]
+        # Per-class accuracy for this template
+        corr = (preds == labels_i64).to(feats.dtype)
+        sums_k = torch.zeros(K, dtype=feats.dtype, device=feats.device)
+        sums_k.index_add_(0, labels_i64, corr)
+        scores[:, m] = sums_k / counts_k
+
+    # Transform scores per method
+    if method == 'top3':
+        avg_over_classes = scores.mean(dim=0)  # [M]
+        top_k = min(3, M)
+        _, top_idx = torch.topk(avg_over_classes, k=top_k, largest=True)
+        keep = torch.zeros(M, dtype=scores.dtype, device=scores.device)
+        keep[top_idx] = 1.0
+        scores = scores * keep.view(1, -1)
+        # Fallback uniform over selected if row sums to zero
+        row_sum = scores.sum(dim=1, keepdim=True)
+        zero_rows = row_sum.squeeze(1) <= 1e-12
+        if bool(zero_rows.any()):
+            num_sel = float(top_k)
+            uniform_sel = (keep / num_sel).view(1, -1).expand(int(zero_rows.sum().item()), -1)
+            scores[zero_rows] = uniform_sel
+    elif method == 'minmax':
+        s = scores.clone()
+        s_min = s.min(dim=1, keepdim=True).values
+        s_max = s.max(dim=1, keepdim=True).values
+        rng = (s_max - s_min)
+        flat = rng.le(1e-12)
+        s = torch.where(flat, torch.full_like(s, 1.0 / float(M)), (s - s_min) / rng.clamp_min(1e-12))
+        scores = s
+    # else: val_weighted uses raw scores
+
+    # Convert to weights via softmax over log-scores
+    logits_w = torch.log(scores.clamp_min(1e-12)) / max(temperature, 1e-6)
+    weights = torch.softmax(logits_w, dim=1)  # [K, M]
+
+    return weights.to(dtype=E.dtype, device=E.device)
+
 
 
 class CustomCLIP(nn.Module):
@@ -164,14 +205,12 @@ class CustomCLIP(nn.Module):
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
         
-        # Get text features and setup GP if needed
-        base_text_features, self.text_embeddings_all = _get_base_text_features(config, classnames, clip_model, self.text_encoder)
-        
-        # Register base text features (frozen zero-shot prototypes)
-        self.register_buffer("base_text_features", base_text_features)
+        # Get text features
+        self.templates = _get_templates(config)
+        self.text_embeddings = _get_text_embeddings(self.templates, classnames, clip_model, self.text_encoder)
 
         # Learnable visual projection W (full-rank, bias-free), initialized to identity
-        dim = int(base_text_features.shape[-1])
+        dim = int(self.text_embeddings.shape[-1])
         self.visual_proj = nn.Linear(dim, dim, bias=False)
         with torch.no_grad():
             eye = torch.eye(dim)
@@ -180,7 +219,7 @@ class CustomCLIP(nn.Module):
         try:
             target_device = next(self.image_encoder.parameters()).device
         except StopIteration:
-            target_device = base_text_features.device
+            target_device = self.text_embeddings.device
         self.visual_proj.to(device=target_device, dtype=self.dtype)
 
         # Create GP weighter if needed
@@ -188,33 +227,33 @@ class CustomCLIP(nn.Module):
         self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
         if getattr(config.adapter, 'use_gp', False):
             self.gp_weighter = GaussianProcessTemplateWeighter(
-                text_embeddings=self.text_embeddings_all,
+                text_embeddings=self.text_embeddings,
                 cfg=config,
             )
     
-    def forward_prototypes(self, num_samples: int = 1):
+    def get_prototypes(self, num_samples: int = 1):
         """Get class prototypes; if GP is enabled, average over num_samples.
 
-        When GP is disabled, use the zero-shot base text features (no trainable
-        linear probe over class prototypes).
+        When GP is disabled, use the zero-shot base text features.
         """
         target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
             # Prefer deterministic posterior-mean prototypes when not sampling
             if num_samples <= 1:
-                current_prototypes = self.gp_weighter.prototypes_from_posterior_mean()
+                prototypes = self.gp_weighter.prototypes_from_posterior_mean()
             else:
                 proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
-                current_prototypes = proto_s.mean(dim=0)
+                prototypes = proto_s.mean(dim=0)
+        else:
+            if isinstance(getattr(self, 'template_weights', None), torch.Tensor):
+                prototypes = torch.einsum("km,kmd->kd", cast(torch.Tensor, self.template_weights), self.text_embeddings)
+            else:
+                # Fallback to uniform mean if weights not initialized yet
+                prototypes = self.text_embeddings.mean(dim=1)
 
-            if current_prototypes.device != target_device:
-                current_prototypes = current_prototypes.to(target_device)
-            return current_prototypes
-        # Baseline when GP is disabled: use zero-shot base text features (frozen)
-        base = cast(torch.Tensor, self.base_text_features)
-        if base.device != target_device:
-            base = base.to(target_device)
-        return base
+        if prototypes.device != target_device:
+            prototypes = prototypes.to(target_device)
+        return prototypes
     
     def forward_features(self, features: torch.Tensor) -> torch.Tensor:
         """Compute logits from precomputed visual features (CLAP-style forward_lp).
@@ -223,7 +262,7 @@ class CustomCLIP(nn.Module):
         normalizes them, and returns the scaled cosine similarities.
         """
         num_samples = self.gp_num_mc_samples
-        prototypes = self.forward_prototypes(num_samples=num_samples)
+        prototypes = self.get_prototypes(num_samples=num_samples)
         
         # Ensure same dtype/device
         if features.dtype != prototypes.dtype:
@@ -342,7 +381,7 @@ class Trainer(BaseTrainer):
         projected_features = features
         
         # Get prototypes (for diagnostics only)
-        prototypes = model.forward_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
+        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
             with torch.no_grad():
@@ -381,7 +420,7 @@ class Trainer(BaseTrainer):
             test_projected = test_features
             # Quick test metric: use the same unified path
             num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
-            test_prototypes = model.forward_prototypes(num_samples=num_samples)
+            test_prototypes = model.get_prototypes(num_samples=num_samples)
             if test_projected.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
             test_logits = model.forward_features(test_projected)
@@ -583,67 +622,30 @@ class Trainer(BaseTrainer):
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
 
-        # One-step GP initialization (optional)
+        # Initialize template weights once from N-shot features
         try:
-            if getattr(self.config.adapter, 'use_gp', False) and getattr(self.model, 'gp_weighter', None) is not None:
-                if bool(getattr(self.config.adapter, 'gp_reg_prefit', False)):
-                    method = str(getattr(self.config.adapter, 'gp_init_method', 'val_weighted')).lower()
-                    # Build per-class per-template weights from N-shot training features
-                    model = cast(CustomCLIP, self.model)
-                    text_emb = cast(torch.Tensor, model.text_embeddings_all).to(torch.float32)
-                    K, M, D = int(text_emb.shape[0]), int(text_emb.shape[1]), int(text_emb.shape[2])
-                    feats = self.features_train.to(self.device)
-                    feats = feats.to(dtype=self.model.visual_proj.weight.dtype, device=self.model.visual_proj.weight.device)
-                    feats_proj = self.model.visual_proj(feats)
-                    feats_norm = F.normalize(feats_proj, p=2, dim=-1)
-                    scale = self.model.logit_scale.exp().to(dtype=feats_norm.dtype)
-                    labels = self.labels_train.to(device=feats_norm.device)
-                    labels_i64 = labels.to(torch.int64)
-                    class_counts = torch.bincount(labels_i64, minlength=K).to(feats_norm.dtype).clamp_min(1)
-                    weights_raw = torch.zeros(K, M, dtype=feats_norm.dtype, device=feats_norm.device)
-                    for m in range(M):
-                        prot_m = text_emb[:, m, :].to(device=feats_norm.device, dtype=feats_norm.dtype)
-                        prot_m = F.normalize(prot_m, p=2, dim=-1)
-                        logits_m = scale * (feats_norm @ prot_m.t())
-                        probs_m = torch.softmax(logits_m, dim=-1)
-                        true_probs = probs_m[torch.arange(probs_m.size(0), device=probs_m.device), labels_i64]
-                        sums_per_class = torch.zeros(K, device=feats_norm.device, dtype=feats_norm.dtype)
-                        sums_per_class.index_add_(0, labels_i64, true_probs)
-                        weights_raw[:, m] += sums_per_class
-                    weights_raw = (weights_raw / class_counts.view(-1, 1)).clamp_min(0.0)
-                    if method == 'top3':
-                        avg_over_classes_raw = weights_raw.mean(dim=0)
-                        top_k = min(3, M)
-                        _, top_idx = torch.topk(avg_over_classes_raw, k=top_k, largest=True)
-                        keep_mask = torch.zeros(M, dtype=weights_raw.dtype, device=weights_raw.device)
-                        keep_mask[top_idx] = 1.0
-                        weights_masked = weights_raw * keep_mask.view(1, -1)
-                        denom = weights_masked.sum(dim=1, keepdim=True)
-                        zero_rows = denom.squeeze(1) <= 1e-12
-                        if zero_rows.any():
-                            num_sel = float(top_k)
-                            uniform_sel = (keep_mask / num_sel).view(1, -1).expand(zero_rows.sum(), -1)
-                            weights_masked[zero_rows] = uniform_sel
-                            denom = weights_masked.sum(dim=1, keepdim=True)
-                        weights_km = weights_masked / denom.clamp_min(1e-12)
-                    elif method == 'minmax':
-                        w = weights_raw.clone()
-                        w_min = w.min(dim=1, keepdim=True).values
-                        w_max = w.max(dim=1, keepdim=True).values
-                        range_ = (w_max - w_min)
-                        mask_zero = range_.le(1e-12)
-                        w = torch.where(mask_zero, torch.full_like(w, 1.0 / float(M)), (w - w_min) / range_.clamp_min(1e-12))
-                        weights_km = w / w.sum(dim=1, keepdim=True).clamp_min(1e-12)
-                    else:
-                        weights_km = weights_raw / weights_raw.sum(dim=1, keepdim=True).clamp_min(1e-12)
-                    # Initialize GP with these weights
-                    try:
-                        self.model.gp_weighter.initialize_from_weights(weights_km)
-                        print("[GP] One-step initialization applied to GP weights.")
-                    except Exception:
-                        pass
+            model = cast(CustomCLIP, self.model)
+            feats = self.features_train.to(self.device)
+            feats = feats.to(dtype=model.dtype)
+            # Compute raw CLIP features (before visual_proj when scoring templates)
+            weights_km = _get_template_weights(
+                self.config,
+                text_embeddings=model.text_embeddings,
+                features=feats,
+                labels=self.labels_train.to(self.device),
+                logit_scale=model.logit_scale.exp(),
+            )
+            print(f"Weights: {weights_km.mean()}, {weights_km.std()}")
+            model.template_weights = weights_km.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+            # If GP enabled, initialize from same weights
+            if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
+                try:
+                    model.gp_weighter.initialize_from_weights(weights_km)
+                    print("[GP] One-step initialization applied to GP weights.")
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"[WARN] One-step GP init skipped due to error: {e}")
+            print(f"[WARN] Template weight init skipped: {e}")
 
         # Run the actual training using the base class training loop
         self.before_train()
