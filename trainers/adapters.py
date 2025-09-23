@@ -103,13 +103,7 @@ def _get_text_embeddings(templates, classnames, clip_model, text_encoder=None):
 
 
 @torch.no_grad()
-def _get_template_weights(
-    config,
-    text_embeddings: torch.Tensor,
-    features: torch.Tensor | None,
-    labels: torch.Tensor | None,
-    logit_scale: torch.Tensor | float,
-) -> torch.Tensor:
+def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None, logit_scale: torch.Tensor | float) -> torch.Tensor:
     """Compute per-class template weights of shape [K, M] (rows sum to 1).
 
     Methods (config.adapter.template_init_method):
@@ -188,7 +182,6 @@ def _get_template_weights(
     weights = torch.softmax(logits_w, dim=1)  # [K, M]
 
     return weights.to(dtype=E.dtype, device=E.device)
-
 
 
 class CustomCLIP(nn.Module):
@@ -522,6 +515,7 @@ class Trainer(BaseTrainer):
                     except Exception:
                         pass
             except Exception:
+                print("Error in GP ELBO")
                 pass
 
         # Identity regularizer on visual projection W
@@ -931,7 +925,7 @@ class Trainer(BaseTrainer):
         """
         features = self.features_train.detach().cpu().to(torch.float32)  # [N, D]
         labels = self.labels_train.detach().cpu().to(torch.int64)        # [N]
-        text_emb = cast(torch.Tensor, self.model.text_embeddings_all).detach().cpu().to(torch.float32)  # [K, M, D]
+        text_emb = cast(torch.Tensor, self.model.text_embeddings).detach().cpu().to(torch.float32)  # [K, M, D]
 
         K, M, D = int(text_emb.shape[0]), int(text_emb.shape[1]), int(text_emb.shape[2])
         N = int(features.shape[0])
