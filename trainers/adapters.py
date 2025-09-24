@@ -202,6 +202,16 @@ class CustomCLIP(nn.Module):
         self.templates = _get_templates(config)
         self.text_embeddings = _get_text_embeddings(self.templates, classnames, clip_model, self.text_encoder)
 
+        # Optionally make template weights trainable for baseline
+        use_gp = bool(getattr(config.adapter, 'use_gp', False))
+        train_tw = bool(getattr(config.adapter, 'train_template_weights', False))
+        if (not use_gp) and train_tw:
+            K = int(self.text_embeddings.shape[0])
+            M = int(self.text_embeddings.shape[1])
+            if M > 0:
+                init = torch.full((K, M), 1.0 / float(M), dtype=self.text_embeddings.dtype, device=self.text_embeddings.device)
+                self.template_weights = nn.Parameter(init, requires_grad=True)
+
         # Learnable visual projection W (full-rank, bias-free), initialized to identity
         dim = int(self.text_embeddings.shape[-1])
         self.visual_proj = nn.Linear(dim, dim, bias=False)
@@ -218,7 +228,7 @@ class CustomCLIP(nn.Module):
         # Create GP weighter if needed
         self.gp_weighter = None
         self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
-        if getattr(config.adapter, 'use_gp', False):
+        if use_gp:
             self.gp_weighter = GaussianProcessTemplateWeighter(
                 text_embeddings=self.text_embeddings,
                 cfg=config,
@@ -322,7 +332,8 @@ class Trainer(BaseTrainer):
 
         # Setup parameter groups: train only visual_proj and GP (if enabled)
         for name, param in self.model.named_parameters():
-            if "visual_proj" in name or "gp_weighter" in name:
+            allow_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'train_template_weights', False))
+            if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -354,6 +365,10 @@ class Trainer(BaseTrainer):
             # Single parameter group for baseline
             baseline_params = []
             baseline_params.extend(list(self.model.visual_proj.parameters()))
+            # Optionally add trainable template weights
+            if hasattr(self.model, 'template_weights') and isinstance(self.model.template_weights, torch.nn.Parameter):
+                if self.model.template_weights.requires_grad:
+                    baseline_params.append(self.model.template_weights)
             
             # Use utils optimization functions
             self.optim = build_optimizer(baseline_params, config.optim)
@@ -621,23 +636,29 @@ class Trainer(BaseTrainer):
             model = cast(CustomCLIP, self.model)
             feats = self.features_train.to(self.device)
             feats = feats.to(dtype=model.dtype)
-            # Compute raw CLIP features (before visual_proj when scoring templates)
-            weights_km = _get_template_weights(
+            template_weights = _get_template_weights(
                 self.config,
                 text_embeddings=model.text_embeddings,
                 features=feats,
                 labels=self.labels_train.to(self.device),
                 logit_scale=model.logit_scale.exp(),
             )
-            print(f"Weights: {weights_km.mean()}, {weights_km.std()}")
-            model.template_weights = weights_km.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+            mean_vals = template_weights.mean(dim=0).tolist()
+            std_vals = template_weights.std(dim=0).tolist()
+            print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+            print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+
+            # If template weights are a trainable parameter, copy data; otherwise assign tensor
+            if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
+                with torch.no_grad():
+                    model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
+            else:
+                model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+            
             # If GP enabled, initialize from same weights
             if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
-                try:
-                    model.gp_weighter.initialize_from_weights(weights_km)
-                    print("[GP] One-step initialization applied to GP weights.")
-                except Exception:
-                    pass
+                model.gp_weighter.initialize_from_weights(template_weights)
+                print("[GP] One-step initialization applied to GP weights.")
         except Exception as e:
             print(f"[WARN] Template weight init skipped: {e}")
 
@@ -648,6 +669,10 @@ class Trainer(BaseTrainer):
             self.run_epoch()
             self.after_epoch()
         self.after_train()
+        mean_vals = self.model.template_weights.mean(dim=0).tolist()
+        std_vals = self.model.template_weights.std(dim=0).tolist()
+        print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+        print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
         print(f"Training completed in {time.time() - start_time:.2f} seconds")
 
         # After training completes, compute final test metrics and write metrics.json

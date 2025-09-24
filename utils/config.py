@@ -18,6 +18,7 @@ class AdapterConfig:
     num_templates: int = 1  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
+    train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -259,6 +260,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--gp-lr", type=float, default=None, help="GP learning rate")
     parser.add_argument("--gp-beta", type=float, default=None, help="GP KL weight")
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
+    parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     
     # Environment arguments
     parser.add_argument("--output-dir", type=str, default=None,
@@ -332,6 +334,8 @@ def parse_args_to_config() -> Config:
         config.adapter.gp_beta = args.gp_beta
     if args.num_templates is not None:
         config.adapter.num_templates = args.num_templates
+    if args.train_template_weights:
+        config.adapter.train_template_weights = True
     if args.output_dir is not None:
         config.output_dir = args.output_dir
     if args.seed is not None:
