@@ -10,10 +10,8 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
     """
 
     def __init__(self, text_embeddings: torch.Tensor, cfg: Any, **kwargs) -> None:
-        # Keep original dtype/device for later but run GP in fp32 for numerical stability (GPyTorch is primarily tested in fp32).
-        self.orig_dtype = text_embeddings.dtype
         self.orig_device = text_embeddings.device
-        text_embeddings_fp32 = text_embeddings.to(dtype=torch.float32)
+        text_embeddings_fp32 = text_embeddings
         
         self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
         
@@ -57,7 +55,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             text_norm = F.normalize(text_embeddings_fp32, p=2, dim=-1)   # [K,M,D]
             class_mean_norm = F.normalize(class_mean, p=2, dim=-1)       # [K,1,D]
             mean_init = (text_norm * class_mean_norm).sum(-1)            # [K,M]
-        self.mean_module.mean_param.data = mean_init.to(dtype=torch.float32)
+        self.mean_module.mean_param.data = mean_init
 
         kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
         if kernel_type == "rbf":
@@ -103,7 +101,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         temperature: float
             Temperature to scale the initialization logits; >1 makes them softer.
         """
-        w = weights_km.to(device=self._templates.device, dtype=torch.float32)
+        w = weights_km.to(device=self._templates.device)
         w = torch.clamp(w, min=1e-12)
         f_init = torch.log(w) / max(float(temperature), 1e-6)  # [K, M]
         try:
@@ -133,7 +131,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         """
         proto_s = self.sample_prototypes(num_samples=1).squeeze(0)  # [K,D]
         kl = self.variational_strategy.kl_divergence().sum()
-        return proto_s.to(dtype=self.orig_dtype, device=self.orig_device), kl
+        return proto_s.to(device=self.orig_device), kl
     
     def sample_prototypes(self, num_samples: int) -> torch.Tensor:
         """
@@ -148,16 +146,15 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             *K* the number of classes and *D* the embedding dimension.
         """
         # Distribution over latent function values at template inputs
-        qf = self(self._templates.to(torch.float32))
+        qf = self(self._templates)
         # Stochastic sampling of latent function values
         f_samples = qf.rsample(torch.Size([num_samples]))  # [S,K,M]
         # Map function values to convex weights per class/template
         w = torch.softmax(f_samples, dim=-1)  # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
-        prototypes = torch.einsum("skm,kmd->skd", w, self._templates.float())
-        templates_tensor = cast(torch.Tensor, self._templates)
-        return prototypes.to(templates_tensor)
+        prototypes = torch.einsum("skm,kmd->skd", w, self._templates)
+        return prototypes
 
     @torch.no_grad()
     def prototypes_from_posterior_mean(self) -> torch.Tensor:
@@ -170,12 +167,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             self.likelihood.eval()
         except Exception:
             pass
-        f_dist = self(self._templates.to(torch.float32))
+        f_dist = self(self._templates)
         f_mean = f_dist.mean  # [K,M]
         w = torch.softmax(f_mean, dim=-1)  # [K,M]
-        prototypes = torch.einsum("km,kmd->kd", w, self._templates.float())  # [K,D]
-        templates_tensor = cast(torch.Tensor, self._templates)
-        return prototypes.to(templates_tensor)
+        prototypes = torch.einsum("km,kmd->kd", w, self._templates)  # [K,D]
+        return prototypes
 
 
 class PerTemplateMean(gpytorch.means.Mean):

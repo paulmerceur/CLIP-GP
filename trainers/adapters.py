@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import gpytorch  # used for ELBO in joint GP training
-from torch.amp.grad_scaler import GradScaler    
+    
 import numpy as np
 import math
 import json
@@ -35,14 +35,13 @@ class TextEncoder(nn.Module):
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
+        x = prompts + self.positional_embedding
         x = x.permute(1, 0, 2) # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2) # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = self.ln_final(x)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
@@ -64,7 +63,7 @@ def load_clip(config, device):
         state_dict = torch.load(model_path)
 
     model = clip.build_model(state_dict)
-    return model.to(device)
+    return model.to(device, dtype=torch.float32)
 
 
 def _get_templates(config):
@@ -92,7 +91,7 @@ def _get_text_embeddings(templates, classnames, clip_model, text_encoder=None):
         for name in classnames:
             tok = clip.tokenize([t.format(name) for t in templates]).to(device)
             if text_encoder is not None:
-                e = clip_model.token_embedding(tok).type(clip_model.dtype)
+                e = clip_model.token_embedding(tok)
                 emb = text_encoder(e, tok)
             else:
                 emb = clip_model.encode_text(tok)
@@ -131,11 +130,11 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
         return torch.full((K, M), 1.0 / float(M), device=E.device, dtype=E.dtype)
 
     # Build per-class per-template accuracy matrix S[k, m]
-    feats = features.to(device=E.device, dtype=torch.float32)
+    feats = features.to(device=E.device)
     feats = F.normalize(feats, p=2, dim=-1)  # CLIP ZS features
     labels_i64 = labels.to(device=feats.device, dtype=torch.int64)
 
-    E_float = E.to(dtype=torch.float32, device=feats.device)
+    E_float = E.to(device=feats.device)
     scale = logit_scale if isinstance(logit_scale, torch.Tensor) else torch.tensor(float(logit_scale), device=feats.device)
     scale = scale.to(dtype=feats.dtype)
 
@@ -193,7 +192,6 @@ class CustomCLIP(nn.Module):
         # Store CLIP components
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
-        self.dtype = clip_model.dtype
         
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
@@ -223,7 +221,8 @@ class CustomCLIP(nn.Module):
             target_device = next(self.image_encoder.parameters()).device
         except StopIteration:
             target_device = self.text_embeddings.device
-        self.visual_proj.to(device=target_device, dtype=self.dtype)
+        # Keep trainable projection on the target device
+        self.visual_proj.to(device=target_device)
 
         # Create GP weighter if needed
         self.gp_weighter = None
@@ -284,7 +283,6 @@ class CustomCLIP(nn.Module):
         projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-        features_norm = features_norm.to(prototypes_norm.dtype)
         scale = self.logit_scale.exp().to(features_norm.dtype)
         return scale * (features_norm @ prototypes_norm.t())
 
@@ -295,7 +293,7 @@ class CustomCLIP(nn.Module):
         - Compute logits via forward_features (normalization + prototypes)
         - Optionally return both logits and features
         """
-        features = self.image_encoder(image.type(self.dtype))
+        features = self.image_encoder(image)
         logits = self.forward_features(features)
         if return_features:
             return logits, features
@@ -309,22 +307,12 @@ class Trainer(BaseTrainer):
     def __init__(self, config, dataset_manager):
         super().__init__(config, dataset_manager)
 
-    def check_cfg(self, config) -> None:
-        assert config.adapter.prec in ["fp16", "fp32", "amp"]
-
     def build_model(self):
         config = self.config
         classnames = self.dm.dataset.classnames
 
         print(f"Loading CLIP (backbone: {config.model.backbone_name})")
         clip_model = load_clip(config, self.device)
-
-        # Precision handling:
-        # - CLIP's build_model already applies selective fp16 via convert_weights.
-        # - For fp32 or amp we upcast to float, but we avoid generic .half() to
-        #   preserve LN/buffer dtypes expected by CLIP.
-        if config.adapter.prec == "fp32" or config.adapter.prec == "amp":
-            clip_model.float()
 
         print("Building custom CLIP")
         self.model = CustomCLIP(config, classnames, clip_model)
@@ -374,14 +362,14 @@ class Trainer(BaseTrainer):
             self.optim = build_optimizer(baseline_params, config.optim)
             self.sched = build_lr_scheduler(self.optim, config.optim)
             
-        self.scaler = GradScaler() if config.adapter.prec == "amp" else None
+        self.scaler = None
 
     def forward_backward(self, batch):
         """Forward pass and backward pass with loss computation."""
         model = cast(CustomCLIP, self.model)
         features, labels = batch
         # Convert to tensors and move to device
-        features = torch.tensor(features, dtype=torch.float32).to(self.device)
+        features = torch.tensor(features).to(self.device)
         if not torch.is_tensor(labels):
             labels = torch.tensor(labels).to(self.device)
         else:
@@ -508,12 +496,10 @@ class Trainer(BaseTrainer):
                     except Exception:
                         self._gp_targets = None
                 if getattr(self, '_gp_targets', None) is not None:
-                    x = gp_weighter._templates.to(dtype=torch.float32, device=gp_weighter._templates.device)
+                    x = gp_weighter._templates.to(device=gp_weighter._templates.device)
                     y = cast(torch.Tensor, self._gp_targets)
                     if y.device != x.device:
                         y = y.to(x.device)
-                    if y.dtype != torch.float32:
-                        y = y.to(torch.float32)
                     mll = gpytorch.mlls.VariationalELBO(
                         gp_weighter.likelihood,
                         gp_weighter,
@@ -562,28 +548,13 @@ class Trainer(BaseTrainer):
     def _backward_and_update(self, loss):
         """Backward pass and optimizer step."""
         self.optim.zero_grad()
-        if self.scaler:
-            self.scaler.scale(loss).backward()
-            # Unscale to get true gradients for logging
-            try:
-                self.scaler.unscale_(self.optim)
-            except Exception:
-                pass
-            # Capture gradient norms (debug)
-            try:
-                self._capture_grad_norms()
-            except Exception:
-                pass
-            self.scaler.step(self.optim)
-            self.scaler.update()
-        else:
-            loss.backward()
-            # Capture gradient norms (debug)
-            try:
-                self._capture_grad_norms()
-            except Exception:
-                pass
-            self.optim.step()
+        loss.backward()
+        # Capture gradient norms (debug)
+        try:
+            self._capture_grad_norms()
+        except Exception:
+            pass
+        self.optim.step()
 
     def _capture_grad_norms(self):
         """Compute and store gradient norms for base vs GP params for diagnostics."""
@@ -948,16 +919,16 @@ class Trainer(BaseTrainer):
         Computes targets from train features and text embeddings in fp32 on CPU.
         Returns a tensor of shape [K, M].
         """
-        features = self.features_train.detach().cpu().to(torch.float32)  # [N, D]
+        features = self.features_train.detach().cpu()  # [N, D]
         labels = self.labels_train.detach().cpu().to(torch.int64)        # [N]
-        text_emb = cast(torch.Tensor, self.model.text_embeddings).detach().cpu().to(torch.float32)  # [K, M, D]
+        text_emb = cast(torch.Tensor, self.model.text_embeddings).detach().cpu()  # [K, M, D]
 
         K, M, D = int(text_emb.shape[0]), int(text_emb.shape[1]), int(text_emb.shape[2])
         N = int(features.shape[0])
 
         # Apply current projection W if present
         try:
-            W = cast(torch.nn.Linear, self.model.visual_proj).weight.detach().cpu().to(torch.float32)  # [D, D]
+            W = cast(torch.nn.Linear, self.model.visual_proj).weight.detach().cpu()  # [D, D]
             feats_proj = features @ W.t()
         except Exception:
             feats_proj = features

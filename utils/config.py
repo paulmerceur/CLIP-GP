@@ -14,7 +14,6 @@ from pathlib import Path
 class AdapterConfig:
     """Adapter-specific configuration"""
     # Basic adapter settings
-    prec: str = "fp16"  # Precision: "fp16", "fp32", "amp"
     num_templates: int = 1  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
