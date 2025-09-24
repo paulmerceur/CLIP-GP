@@ -4,12 +4,14 @@ import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.data import DataLoader
 import gpytorch  # used for ELBO in joint GP training
     
 import numpy as np
 import math
 import json
 from pathlib import Path
+import copy
 
 from utils.trainer import BaseTrainer
 from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece
@@ -17,6 +19,8 @@ from utils.config import _config_to_dict
  
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
+from utils.dataset_base import build_dataset, TorchDatasetWrapper
+from utils.transforms import build_transform
 
 from clip import clip
 from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
@@ -125,6 +129,40 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
     M = int(E.shape[1])
     if M == 0:
         return torch.empty(K, 0, device=E.device, dtype=E.dtype)
+
+    # Optionally override features/labels by extracting features on the FULL train set
+    if bool(getattr(config.adapter, 'prefit_on_full_set', False)):
+        try:
+            cfg_full = copy.deepcopy(config)
+            # Setting shots to 0 skips few-shot sub-sampling in dataset builders
+            cfg_full.dataset.num_shots = 0
+            ds_full = build_dataset(cfg_full)
+            tfm = build_transform(cfg_full, is_train=True)
+            dl = DataLoader(
+                TorchDatasetWrapper(ds_full.train_x, transform=tfm, is_train=False),
+                batch_size=int(getattr(cfg_full.dataloader, 'batch_size_train', 128)),
+                shuffle=False,
+                num_workers=int(getattr(cfg_full.dataloader, 'num_workers', 8)),
+                drop_last=False,
+                pin_memory=False,
+            )
+            # Build a CLIP model to compute raw visual features
+            clip_model_tmp = load_clip(cfg_full, E.device)
+            clip_model_tmp.eval()
+            feats_list = []
+            labels_list = []
+            with torch.no_grad():
+                for batch in dl:
+                    imgs = batch["img"].to(E.device)
+                    lbs = batch["label"]
+                    f = clip_model_tmp.visual(imgs)
+                    feats_list.append(f.cpu())
+                    labels_list.append(lbs.cpu())
+            features = torch.cat(feats_list, dim=0).to(device=E.device)
+            labels = torch.cat(labels_list, dim=0).to(device=E.device)
+            print(f"[INFO] Prefit on full set: {len(features)} samples used.")
+        except Exception as e:
+            print(f"[WARN] prefit_on_full_set failed ({e}); falling back to provided few-shot features.")
 
     if method == 'uniform' or features is None or labels is None:
         return torch.full((K, M), 1.0 / float(M), device=E.device, dtype=E.dtype)
@@ -606,7 +644,6 @@ class Trainer(BaseTrainer):
         try:
             model = cast(CustomCLIP, self.model)
             feats = self.features_train.to(self.device)
-            feats = feats.to(dtype=model.dtype)
             template_weights = _get_template_weights(
                 self.config,
                 text_embeddings=model.text_embeddings,
@@ -822,7 +859,6 @@ class Trainer(BaseTrainer):
 
     def extract_features(self, partition="train", reps=1, transforms=None):
         """Extract features from specified data partition."""
-        import copy
         print("Extracting features from: " + partition)
         self.set_model_mode("eval")
 
