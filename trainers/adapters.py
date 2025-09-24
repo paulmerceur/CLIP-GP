@@ -218,7 +218,7 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
     logits_w = torch.log(scores.clamp_min(1e-12)) / max(temperature, 1e-6)
     weights = torch.softmax(logits_w, dim=1)  # [K, M]
 
-    return weights.to(dtype=E.dtype, device=E.device)
+    return weights.to(device=E.device)
 
 
 class CustomCLIP(nn.Module):
@@ -304,16 +304,11 @@ class CustomCLIP(nn.Module):
         num_samples = self.gp_num_mc_samples
         prototypes = self.get_prototypes(num_samples=num_samples)
         
-        # Ensure same dtype/device
-        if features.dtype != prototypes.dtype:
-            prototypes = prototypes.to(dtype=features.dtype)
         if features.device != prototypes.device:
             prototypes = prototypes.to(device=features.device)
 
         # Ensure features match projection dtype/device before matmul
         proj_weight = self.visual_proj.weight
-        if features.dtype != proj_weight.dtype:
-            features = features.to(dtype=proj_weight.dtype)
         if features.device != proj_weight.device:
             features = features.to(device=proj_weight.device)
         
@@ -321,7 +316,7 @@ class CustomCLIP(nn.Module):
         projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-        scale = self.logit_scale.exp().to(features_norm.dtype)
+        scale = self.logit_scale.exp()
         return scale * (features_norm @ prototypes_norm.t())
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
@@ -499,7 +494,7 @@ class Trainer(BaseTrainer):
                 f = f.to(dtype=target_dtype)
             projected = model.visual_proj(f)
             features_norm = F.normalize(projected, p=2, dim=-1)
-            scale = model.logit_scale.exp().to(dtype=features_norm.dtype)
+            scale = model.logit_scale.exp()
 
             ce_vals = []
             for s in range(num_samples):
@@ -534,7 +529,7 @@ class Trainer(BaseTrainer):
                     except Exception:
                         self._gp_targets = None
                 if getattr(self, '_gp_targets', None) is not None:
-                    x = gp_weighter._templates.to(device=gp_weighter._templates.device)
+                    x = gp_weighter._templates
                     y = cast(torch.Tensor, self._gp_targets)
                     if y.device != x.device:
                         y = y.to(x.device)

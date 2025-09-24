@@ -61,8 +61,10 @@ def group_by_dataset_shots_config(runs: List[Dict[str, Any]]):
 def print_summary(grouped):
     for ds, shots_map in grouped.items():
         print(f"\n=== Dataset: {ds} ===")
-        print(f"{'Config':<40} {'Shots':>5} {'Seeds':>5} | {'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7} | {'AECE µ':>7} {'AECE σ':>7}")
-        print("-" * 96)
+        # Determine the max config label length for column width
+        max_cfg_len = max((len(cfg) for cfg_map in shots_map.values() for cfg in cfg_map), default=6)
+        print(f"{'Config':<{max_cfg_len}} {'Shots':>5} {'Seeds':>5} | {'Acc µ':>7} {'Acc σ':>7} | {'ECE µ':>7} {'ECE σ':>7} | {'AECE µ':>7} {'AECE σ':>7}")
+        print("-" * (max_cfg_len + 66))
         rows = []
         for shots, cfg_map in sorted(shots_map.items()):
             for cfg, rs in sorted(cfg_map.items()):
@@ -79,7 +81,7 @@ def print_summary(grouped):
                 rows.append((cfg, shots, n, acc_mean, acc_std, ece_mean, ece_std, aece_mean, aece_std))
         rows.sort(key=lambda x: (x[1], x[0]))
         for cfg, shots, n, acc_m, acc_s, ece_m, ece_s, aece_m, aece_s in rows:
-            print(f"{cfg:<40} {shots:>5d} {n:>5d} | {acc_m:7.2f} {acc_s:7.2f} | {ece_m:7.3f} {ece_s:7.3f} | {aece_m:7.3f} {aece_s:7.3f}")
+            print(f"{cfg:<{max_cfg_len}} {shots:>5d} {n:>5d} | {acc_m:7.2f} {acc_s:7.2f} | {ece_m:7.3f} {ece_s:7.3f} | {aece_m:7.3f} {aece_s:7.3f}")
 
 
 def make_plots(grouped, exp_name: str):
