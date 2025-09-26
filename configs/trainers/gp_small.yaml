@@ -1,11 +1,12 @@
-name: gp_small2
+name: gp_viscond_learnable_cls_sparsemax_propagate
 BASE_CONFIG: configs/trainers/default.yaml
 # datasets: str or list
-datasets: caltech101
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, ucf101, stanford_cars]
+# datasets: [stanford_cars]
+# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
 
 # Seeds and shots
-seeds: [1]
+seeds: [1, 2, 3, 4, 5]
 shots: [1, 4, 8, 16]
 
 # Optional dataset root override (falls back to defaults in utils.config)
@@ -17,7 +18,9 @@ output_root: output
 # Grid of hyperparameters (keys follow existing config override notation)
 # You can set singletons here as lists of one value.
 grid:
-  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, top3, minmax]
+  # TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, top3, minmax]
+  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted]
+  TRAINER.ADAPTER.GP_USE_ELBO: [false]
 
 # Output directory template; placeholders available:
 # {experiment}, {sweep} (alias), {dataset}, {shots}, {seed}, {sig}
@@ -29,7 +32,9 @@ TRAINER:
     # GP-specific overrides beyond default baseline
     USE_GP: True
     GP_KERNEL_TYPE: rbf
-    GP_NUM_MC_SAMPLES: 10
-    GP_LR: 0.01
+    GP_NUM_MC_SAMPLES: 30
+    GP_LR: 0.001
     GP_BETA: 0.001
+    GP_PCA_DIMS: null  # dim or null
+    GP_LEARN_INDUCING: False
 

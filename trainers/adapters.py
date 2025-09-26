@@ -4,6 +4,7 @@ import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from entmax import sparsemax
 import gpytorch  # used for ELBO in joint GP training
 from torch.amp.grad_scaler import GradScaler    
 import numpy as np
@@ -150,6 +151,118 @@ class LinearAdapter(nn.Module):
         return self.prototypes
 
 
+# class CustomCLIP(nn.Module):
+#     """Custom CLIP model with adapter and optional GP weighting."""
+    
+#     def __init__(self, config, classnames, clip_model):
+#         super().__init__()
+#         self.config = config
+#         # Store CLIP components
+#         self.image_encoder = clip_model.visual
+#         self.logit_scale = clip_model.logit_scale
+#         self.dtype = clip_model.dtype
+        
+#         # Create TextEncoder for proper text encoding
+#         self.text_encoder = TextEncoder(clip_model)
+        
+#         # Get text features and setup GP if needed
+#         base_text_features, self.text_embeddings_all = _get_base_text_features(config, classnames, clip_model, self.text_encoder)
+        
+#         # Register base text features (frozen zero-shot prototypes)
+#         self.register_buffer("base_text_features", base_text_features)
+
+#         # Learnable visual projection W (full-rank, bias-free), initialized to identity
+#         dim = int(base_text_features.shape[-1])
+#         self.visual_proj = nn.Linear(dim, dim, bias=False)
+#         with torch.no_grad():
+#             eye = torch.eye(dim)
+#             self.visual_proj.weight.copy_(eye)
+#         # Align projection layer dtype/device with CLIP modules
+#         try:
+#             target_device = next(self.image_encoder.parameters()).device
+#         except StopIteration:
+#             target_device = base_text_features.device
+#         self.visual_proj.to(device=target_device, dtype=self.dtype)
+
+#         # Create GP weighter if needed
+#         self.gp_weighter = None
+#         self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
+#         if getattr(config.adapter, 'use_gp', False):
+#             self.gp_weighter = GaussianProcessTemplateWeighter(
+#                 text_embeddings=self.text_embeddings_all,
+#                 cfg=config,
+#             )
+    
+#     def forward_prototypes(self, num_samples: int = 1):
+#         """Get class prototypes; if GP is enabled, average over num_samples.
+
+#         When GP is disabled, use the zero-shot base text features (no trainable
+#         linear probe over class prototypes).
+#         """
+#         target_device = next(self.parameters()).device
+#         if self.gp_weighter is not None:
+#             # Prefer deterministic posterior-mean prototypes when not sampling
+#             if num_samples <= 1:
+#                 current_prototypes = self.gp_weighter.prototypes_from_posterior_mean()
+#             else:
+#                 proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+#                 # print(f"Shape of proto_s: {proto_s.shape}")
+#                 current_prototypes = proto_s.mean(dim=0)
+#                 # print(f"Shape of current_prototypes: {current_prototypes.shape}")
+
+#             if current_prototypes.device != target_device:
+#                 current_prototypes = current_prototypes.to(target_device)
+#             return current_prototypes
+#         # Baseline when GP is disabled: use zero-shot base text features (frozen)
+#         base = cast(torch.Tensor, self.base_text_features)
+#         if base.device != target_device:
+#             base = base.to(target_device)
+#         return base
+    
+#     def forward_features(self, features: torch.Tensor) -> torch.Tensor:
+#         """Compute logits from precomputed visual features (CLAP-style forward_lp).
+
+#         This normalizes features, obtains (possibly GP-sampled) prototypes,
+#         normalizes them, and returns the scaled cosine similarities.
+#         """
+#         num_samples = self.gp_num_mc_samples
+#         prototypes = self.forward_prototypes(num_samples=num_samples)
+        
+#         # Ensure same dtype/device
+#         if features.dtype != prototypes.dtype:
+#             prototypes = prototypes.to(dtype=features.dtype)
+#         if features.device != prototypes.device:
+#             prototypes = prototypes.to(device=features.device)
+
+#         # Ensure features match projection dtype/device before matmul
+#         proj_weight = self.visual_proj.weight
+#         if features.dtype != proj_weight.dtype:
+#             features = features.to(dtype=proj_weight.dtype)
+#         if features.device != proj_weight.device:
+#             features = features.to(device=proj_weight.device)
+        
+#         # Apply learnable visual projection W before normalization
+#         projected = self.visual_proj(features)
+#         features_norm = F.normalize(projected, p=2, dim=-1)
+#         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
+#         features_norm = features_norm.to(prototypes_norm.dtype)
+#         scale = self.logit_scale.exp().to(features_norm.dtype)
+#         return scale * (features_norm @ prototypes_norm.t())
+
+#     def forward(self, image: torch.Tensor, return_features: bool = False):
+#         """CLAP-like forward.
+
+#         - Extract image features
+#         - Compute logits via forward_features (normalization + prototypes)
+#         - Optionally return both logits and features
+#         """
+#         features = self.image_encoder(image.type(self.dtype))
+#         logits = self.forward_features(features)
+#         if return_features:
+#             return logits, features
+#         return logits
+
+
 class CustomCLIP(nn.Module):
     """Custom CLIP model with adapter and optional GP weighting."""
     
@@ -191,21 +304,25 @@ class CustomCLIP(nn.Module):
                 text_embeddings=self.text_embeddings_all,
                 cfg=config,
             )
-    
-    def forward_prototypes(self, num_samples: int = 1):
+
+    def forward_prototypes(self, num_samples: int = 1, visual_embeddings: torch.Tensor = None):
         """Get class prototypes; if GP is enabled, average over num_samples.
 
         When GP is disabled, use the zero-shot base text features (no trainable
         linear probe over class prototypes).
         """
+        # print(f"Visual embeddings shape in forward_prototypes: {visual_embeddings.shape}")
         target_device = next(self.parameters()).device
         if self.gp_weighter is not None:
             # Prefer deterministic posterior-mean prototypes when not sampling
             if num_samples <= 1:
                 current_prototypes = self.gp_weighter.prototypes_from_posterior_mean()
             else:
-                proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
-                current_prototypes = proto_s.mean(dim=0)
+                # print(num_samples)
+                # print(f'Shape of visual_embeddings: {visual_embeddings.shape}')
+                proto_s = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
+                # current_prototypes = proto_s.mean(dim=0)
+                current_prototypes = proto_s
 
             if current_prototypes.device != target_device:
                 current_prototypes = current_prototypes.to(target_device)
@@ -222,8 +339,10 @@ class CustomCLIP(nn.Module):
         This normalizes features, obtains (possibly GP-sampled) prototypes,
         normalizes them, and returns the scaled cosine similarities.
         """
+        # Apply learnable visual projection W before normalization
+        projected = self.visual_proj(features)
         num_samples = self.gp_num_mc_samples
-        prototypes = self.forward_prototypes(num_samples=num_samples)
+        prototypes = self.forward_prototypes(num_samples=num_samples, visual_embeddings=projected)
         
         # Ensure same dtype/device
         if features.dtype != prototypes.dtype:
@@ -238,13 +357,12 @@ class CustomCLIP(nn.Module):
         if features.device != proj_weight.device:
             features = features.to(device=proj_weight.device)
         
-        # Apply learnable visual projection W before normalization
-        projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         features_norm = features_norm.to(prototypes_norm.dtype)
         scale = self.logit_scale.exp().to(features_norm.dtype)
-        return scale * (features_norm @ prototypes_norm.t())
+        # return scale * (features_norm @ prototypes_norm.t())
+        return scale * torch.einsum("bd,skd->bks", features_norm, prototypes_norm).mean(dim=-1)
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
         """CLAP-like forward.
@@ -258,6 +376,7 @@ class CustomCLIP(nn.Module):
         if return_features:
             return logits, features
         return logits
+
 
 
 @TRAINER_REGISTRY.register("Trainer")
@@ -345,8 +464,10 @@ class Trainer(BaseTrainer):
             labels = labels.detach().clone().to(self.device)
         projected_features = features
         
+        proj_features = self.model.visual_proj(projected_features.to(self.model.visual_proj.weight.dtype))
         # Get prototypes (for diagnostics only)
-        prototypes = model.forward_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
+        prototypes = model.forward_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1),
+                                               visual_embeddings=proj_features)
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
             with torch.no_grad():
@@ -385,7 +506,8 @@ class Trainer(BaseTrainer):
             test_projected = test_features
             # Quick test metric: use the same unified path
             num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
-            test_prototypes = model.forward_prototypes(num_samples=num_samples)
+            test_proj = self.model.visual_proj(test_projected.to(self.model.visual_proj.weight.dtype))
+            test_prototypes = model.forward_prototypes(num_samples=num_samples, visual_embeddings=test_proj)
             if test_projected.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
             test_logits = model.forward_features(test_projected)
@@ -412,7 +534,8 @@ class Trainer(BaseTrainer):
 
         if use_gp and num_samples > 1 and gp_weighter is not None:
             # Sample S prototype sets [S,K,D] in fp32 for stability
-            protos = gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+            proj_features = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype))
+            protos = gp_weighter.sample_prototypes(num_samples, visual_embeddings=proj_features)  # [S,K,D]
             # Ensure device/dtype match
             proj_weight = model.visual_proj.weight
             target_device = proj_weight.device
@@ -512,6 +635,43 @@ class Trainer(BaseTrainer):
             }
         except Exception:
             pass
+
+        # --- learnable-token regularizer ---
+        if use_gp and gp_weighter is not None:
+            # proj visuals
+            proj = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype)).detach()
+            labels_i64 = labels.to(torch.int64)
+            
+            K = int(self.model.base_text_features.shape[0])
+            D = proj.shape[-1]
+            device = proj.device
+            dtype = proj.dtype
+
+            cls_sum = torch.zeros(K, D, dtype=proj.dtype, device=proj.device) # [K,D]
+            cls_count = torch.zeros(K, 1, dtype=proj.dtype, device=proj.device) # [K,1]
+            cls_sum.index_add_(0, labels_i64, proj)  # [K,D]
+            one = torch.ones(labels_i64.size(0), 1, device=proj.device, dtype=proj.dtype)
+            cls_count.index_add_(0, labels_i64, one)
+
+            # classes present in the batch
+            present = (cls_count > 0).squeeze(1) # [K]
+            if present.any():
+                cls_mean = torch.zeros_like(cls_sum)
+                cls_mean[present] = cls_sum[present] / cls_count[present].clamp_min(1.0) # [K,D]
+
+                Z = gp_weighter.variational_strategy.inducing_points # [K, M+1, D]
+                token = Z[:, -1, :] # [K,D]
+                
+                lam = float(getattr(self.config.adapter, "learn_token_lambda", 1e-3))
+                reg = lam * (token[present] - cls_mean[present]).pow(2).mean()
+                total_loss = total_loss + reg
+                try:
+                    self._dbg_loss_components["learn_token_reg"] = float(reg.detach().item())
+                except Exception:
+                    pass
+        # -----------------------------------
+
+
 
         return total_loss
 

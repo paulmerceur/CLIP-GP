@@ -29,6 +29,8 @@ class AdapterConfig:
     gp_reg_prefit: bool = True  # If True, perform one-step template weight initialization
     gp_init_method: str = "val_weighted"  # One of: "val_weighted", "top3", "minmax"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
+    gp_pca_dims: int = 128  # Reduce template embeddings to this dim with PCA for GP
+    gp_learn_inducing: bool = True  # If True, learn inducing points during training (prototypes)
     
 
 @dataclass
@@ -44,7 +46,7 @@ class DatasetConfig:
     """Dataset configuration"""
     name: str = "Caltech101"  # Dataset name
     root: str = "/mnt/features/VDATA"
-    num_shots: int = 1  # Number of shots for few-shot learning
+    num_shots: int = 4  # Number of shots for few-shot learning
     subsample_classes: str = "all"  # "all", "base", or "new"
     source_domains: Optional[List[str]] = None  # Source domains for DA/DG
     target_domains: Optional[List[str]] = None  # Target domains for DA/DG

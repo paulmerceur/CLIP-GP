@@ -17,3 +17,7 @@ logs/
 metrics/
 results/
 *plots/
+
+
+*.ipynb
+*.ipynb*

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clip_gp"
+version = "0.1.0"
+description = "CLIP with GP prior over templates"
+authors = [{ name = "Your Name" }]
+dependencies = [
+    "torch",
+    "gpytorch",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]

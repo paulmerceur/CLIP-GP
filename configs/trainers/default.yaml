@@ -13,9 +13,9 @@ INPUT:
   TRANSFORMS: ["random_resized_crop", "random_flip", "normalize"]
 
 OPTIM:
-  NAME: "sgd"
+  NAME: "adamw"
   LR: 0.01
-  MAX_EPOCH: 300
+  MAX_EPOCH: 200
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
@@ -30,7 +30,7 @@ TRAINER:
   ADAPTER:
     INIT: ZS
     CONSTRAINT: none
-    PREC: fp16
+    PREC: fp32
     NUM_TEMPLATES: 7
     L2_LAMBDA: 0.1
 
