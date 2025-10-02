@@ -354,6 +354,10 @@ class Trainer(BaseTrainer):
         # Setup parameter groups: train only visual_proj and GP (if enabled)
         for name, param in self.model.named_parameters():
             allow_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'train_template_weights', False))
+            # Freeze visual projection if requested
+            if bool(getattr(config.adapter, 'freeze_visual_proj', False)) and ("visual_proj" in name):
+                param.requires_grad = False
+                continue
             if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)):
                 param.requires_grad = True
             else:
@@ -385,7 +389,8 @@ class Trainer(BaseTrainer):
         else:
             # Single parameter group for baseline
             baseline_params = []
-            baseline_params.extend(list(self.model.visual_proj.parameters()))
+            # Respect freezing of visual projection
+            baseline_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
             # Optionally add trainable template weights
             if hasattr(self.model, 'template_weights') and isinstance(self.model.template_weights, torch.nn.Parameter):
                 if self.model.template_weights.requires_grad:

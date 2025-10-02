@@ -19,6 +19,7 @@ class AdapterConfig:
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     prefit_on_full_set: bool = False  # If True, prefit template weights using FULL training set
+    freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -262,6 +263,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
+    parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
     
     # Environment arguments
     parser.add_argument("--output-dir", type=str, default=None,
@@ -339,6 +341,8 @@ def parse_args_to_config() -> Config:
         config.adapter.train_template_weights = True
     if args.prefit_on_full_set:
         config.adapter.prefit_on_full_set = True
+    if args.freeze_visual_proj:
+        config.adapter.freeze_visual_proj = True
     if args.output_dir is not None:
         config.output_dir = args.output_dir
     if args.seed is not None:
