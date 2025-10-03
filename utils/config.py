@@ -28,7 +28,12 @@ class AdapterConfig:
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
-    
+
+    # Prompt-learning (CoOp / CoCoOp)
+    prompt_mode: str = "none"  # one of: "none", "coop", "cocoop"
+    n_ctx: int = 16            # number of learnable context tokens
+    ctx_init: str = ""         # optional initialization phrase (overrides n_ctx)
+
 
 @dataclass
 class ModelConfig:
@@ -265,6 +270,11 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
     
+    # CoOp / CoCoOp
+    parser.add_argument("--prompt-mode", type=str, default=None, choices=["none", "coop", "cocoop"], help="Prompt learning mode")
+    parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
+    parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
+    
     # Environment arguments
     parser.add_argument("--output-dir", type=str, default=None,
                        help="Output directory")
@@ -343,6 +353,12 @@ def parse_args_to_config() -> Config:
         config.adapter.prefit_on_full_set = True
     if args.freeze_visual_proj:
         config.adapter.freeze_visual_proj = True
+    if args.prompt_mode is not None:
+        config.adapter.prompt_mode = args.prompt_mode
+    if args.n_ctx is not None:
+        config.adapter.n_ctx = args.n_ctx
+    if args.ctx_init is not None:
+        config.adapter.ctx_init = args.ctx_init
     if args.output_dir is not None:
         config.output_dir = args.output_dir
     if args.seed is not None:

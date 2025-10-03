@@ -105,6 +105,138 @@ def _get_text_embeddings(templates, classnames, clip_model, text_encoder=None):
     return text_embeds
 
 
+class PromptLearnerCoOp(nn.Module):
+    """Minimal CoOp prompt learner: learn shared context tokens and build prompts.
+
+    - ctx: (n_ctx, ctx_dim)
+    - token_prefix: (K, 1, ctx_dim)
+    - token_suffix: (K, *, ctx_dim)
+    - tokenized_prompts: (K, n_tokens)
+    """
+    def __init__(self, config, classnames, clip_model):
+        super().__init__()
+        device = next(clip_model.parameters()).device
+        dtype = next(clip_model.parameters()).dtype
+
+        n_ctx = int(getattr(config.adapter, 'n_ctx', 16))
+        ctx_init = str(getattr(config.adapter, 'ctx_init', '') or '')
+        ctx_dim = int(clip_model.ln_final.weight.shape[0])
+
+        # Create class prompts with placeholder context tokens
+        prompt_prefix = ctx_init.replace('_', ' ') if len(ctx_init) > 0 else ' '.join(['X'] * n_ctx)
+        prompts = [f"{prompt_prefix} {name}." for name in classnames]
+        tokenized_prompts = clip.tokenize(prompts).to(device)
+        self._token_embedding = clip_model.token_embedding
+        with torch.no_grad():
+            embedding = self._token_embedding(tokenized_prompts)
+
+        # Determine n_ctx from ctx_init if provided
+        if len(ctx_init) > 0:
+            n_ctx = int(embedding.shape[1] - 1 - (embedding.shape[1] - 1 - n_ctx)) if n_ctx > 0 else int(ctx_init.count(' ') + 1)
+            # Use actual slice from the init phrase
+            ctx_vectors = embedding[0, 1:1 + n_ctx, :].detach().clone()
+        else:
+            ctx_vectors = torch.empty(n_ctx, ctx_dim, device=device, dtype=dtype)
+            nn.init.normal_(ctx_vectors, std=0.02)
+
+        self.ctx = nn.Parameter(ctx_vectors)
+        self.register_buffer('token_prefix', embedding[:, :1, :])
+        self.register_buffer('token_suffix', embedding[:, 1 + n_ctx:, :])
+        self.register_buffer('tokenized_prompts', tokenized_prompts)
+        self.n_ctx = n_ctx
+        self.num_classes = len(classnames)
+
+    def build_prompts(self) -> tuple[torch.Tensor, torch.Tensor]:
+        K = int(self.num_classes)
+        ctx = self.ctx.unsqueeze(0).expand(K, -1, -1)
+        prompts = torch.cat([self.token_prefix, ctx, self.token_suffix], dim=1)
+        return prompts, self.tokenized_prompts
+
+    def get_text_features(self, text_encoder):
+        tokens = self.tokenized_prompts
+        K = tokens.shape[0]
+        ctx = self.ctx.unsqueeze(0).expand(K, -1, -1)
+        prompts = self._token_embedding(tokens)
+        prompts[:, 1:1 + self.n_ctx, :] = ctx
+        return text_encoder(prompts, tokens)
+
+
+class PromptLearnerCoCoOp(nn.Module):
+    """Minimal CoCoOp prompt learner: shared ctx shifted by meta-net per image.
+
+    meta_net: vis_dim -> vis_dim/16 -> ctx_dim
+    """
+    def __init__(self, config, classnames, clip_model):
+        super().__init__()
+        device = next(clip_model.parameters()).device
+        dtype = next(clip_model.parameters()).dtype
+
+        n_ctx = int(getattr(config.adapter, 'n_ctx', 16))
+        ctx_init = str(getattr(config.adapter, 'ctx_init', '') or '')
+        ctx_dim = int(clip_model.ln_final.weight.shape[0])
+        vis_dim = int(clip_model.visual.output_dim)
+
+        prompt_prefix = ctx_init.replace('_', ' ') if len(ctx_init) > 0 else ' '.join(['X'] * n_ctx)
+        prompts = [f"{prompt_prefix} {name}." for name in classnames]
+        tokenized_prompts = clip.tokenize(prompts).to(device)
+        self._token_embedding = clip_model.token_embedding
+        with torch.no_grad():
+            embedding = self._token_embedding(tokenized_prompts)
+
+        if len(ctx_init) > 0:
+            n_ctx = int(ctx_init.count(' ') + 1)
+            ctx_vectors = embedding[0, 1:1 + n_ctx, :].detach().clone()
+        else:
+            ctx_vectors = torch.empty(n_ctx, ctx_dim, device=device, dtype=dtype)
+            nn.init.normal_(ctx_vectors, std=0.02)
+
+        self.ctx = nn.Parameter(ctx_vectors)
+        self.meta_net = nn.Sequential(
+            nn.Linear(vis_dim, max(1, vis_dim // 16)),
+            nn.ReLU(inplace=True),
+            nn.Linear(max(1, vis_dim // 16), ctx_dim),
+        )
+
+        self.register_buffer('token_prefix', embedding[:, :1, :])
+        self.register_buffer('token_suffix', embedding[:, 1 + n_ctx:, :])
+        self.register_buffer('tokenized_prompts', tokenized_prompts)
+        self.n_ctx = n_ctx
+        self.num_classes = len(classnames)
+
+    def build_prompts(self, image_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build per-sample prompts.
+
+        image_features: (N, D)
+        Returns:
+          prompts: (N, K, n_tokens, ctx_dim)
+          tokenized_prompts: (K, n_tokens)
+        """
+        N = int(image_features.shape[0])
+        K = int(self.num_classes)
+        # Shift context per image
+        bias = self.meta_net(image_features).unsqueeze(1)  # (N,1,ctx_dim)
+        ctx = self.ctx.unsqueeze(0)  # (1,n_ctx,ctx_dim)
+        ctx_shifted = ctx + bias  # (N,n_ctx,ctx_dim)
+
+        # Build prompts per image for all classes
+        prompts_list = []
+        for i in range(N):
+            ctx_i = ctx_shifted[i].unsqueeze(0).expand(K, -1, -1)
+            pts_i = torch.cat([self.token_prefix, ctx_i, self.token_suffix], dim=1)
+            prompts_list.append(pts_i)
+        prompts = torch.stack(prompts_list, dim=0)
+        return prompts, self.tokenized_prompts
+    
+    def get_text_features(self, text_encoder):
+        tokens = self.tokenized_prompts
+        K = tokens.shape[0]
+        ctx = self.ctx.unsqueeze(0).expand(K, -1, -1)
+        prompts = self._token_embedding(tokens)
+        prompts[:, 1:1 + self.n_ctx, :] = ctx
+        return text_encoder(prompts, tokens)
+
+
+
 @torch.no_grad()
 def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None, logit_scale: torch.Tensor | float) -> torch.Tensor:
     """Compute per-class template weights of shape [K, M] (rows sum to 1).
@@ -234,9 +366,19 @@ class CustomCLIP(nn.Module):
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
         
-        # Get text features
+        # Prompt-learning mode
+        self.prompt_mode = str(getattr(config.adapter, 'prompt_mode', 'none') or 'none').lower()
+
+        # Get text features for baseline/GP; prompt modes compute on the fly
         self.templates = _get_templates(config)
         self.text_embeddings = _get_text_embeddings(self.templates, classnames, clip_model, self.text_encoder)
+
+        # Initialize prompt learners when requested
+        self.prompt_learner = None
+        if self.prompt_mode == 'coop':
+            self.prompt_learner = PromptLearnerCoOp(config, classnames, clip_model)
+        elif self.prompt_mode == 'cocoop':
+            self.prompt_learner = PromptLearnerCoCoOp(config, classnames, clip_model)
 
         # Optionally make template weights trainable for baseline
         use_gp = bool(getattr(config.adapter, 'use_gp', False))
@@ -271,7 +413,7 @@ class CustomCLIP(nn.Module):
                 cfg=config,
             )
     
-    def get_prototypes(self, num_samples: int = 1):
+    def get_prototypes(self, num_samples: int = 1, visual_embeddings: torch.Tensor = None):
         """Get class prototypes; if GP is enabled, average over num_samples.
 
         When GP is disabled, use the zero-shot base text features.
@@ -282,10 +424,12 @@ class CustomCLIP(nn.Module):
             if num_samples <= 1:
                 prototypes = self.gp_weighter.prototypes_from_posterior_mean()
             else:
-                proto_s = self.gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
-                prototypes = proto_s.mean(dim=0)
+                proto_s = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
+                prototypes = proto_s
         else:
-            if isinstance(getattr(self, 'template_weights', None), torch.Tensor):
+            if self.prompt_mode in ["coop", "cocoop"]:
+                prototypes = self.prompt_learner.get_text_features(self.text_encoder)
+            elif isinstance(getattr(self, 'template_weights', None), torch.Tensor):
                 prototypes = torch.einsum("km,kmd->kd", cast(torch.Tensor, self.template_weights), self.text_embeddings)
             else:
                 # Fallback to uniform mean if weights not initialized yet
@@ -301,23 +445,48 @@ class CustomCLIP(nn.Module):
         This normalizes features, obtains (possibly GP-sampled) prototypes,
         normalizes them, and returns the scaled cosine similarities.
         """
-        num_samples = self.gp_num_mc_samples
-        prototypes = self.get_prototypes(num_samples=num_samples)
-        
-        if features.device != prototypes.device:
-            prototypes = prototypes.to(device=features.device)
-
-        # Ensure features match projection dtype/device before matmul
+        # Ensure features match projection dtype/device before any op
         proj_weight = self.visual_proj.weight
         if features.device != proj_weight.device:
             features = features.to(device=proj_weight.device)
-        
-        # Apply learnable visual projection W before normalization
         projected = self.visual_proj(features)
         features_norm = F.normalize(projected, p=2, dim=-1)
-        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         scale = self.logit_scale.exp()
-        return scale * (features_norm @ prototypes_norm.t())
+
+        # CoCoOp: build per-sample prompts and compute logits per sample
+        if self.prompt_mode == 'cocoop' and self.prompt_learner is not None:
+            with torch.no_grad():
+                img_for_meta = F.normalize(projected, p=2, dim=-1)
+            prompts_b, tokenized = self.prompt_learner.build_prompts(img_for_meta)
+            logits_list = []
+            for i in range(features_norm.shape[0]):
+                pts_i = prompts_b[i]
+                text_i = self.text_encoder(pts_i, tokenized)
+                text_i = F.normalize(text_i, p=2, dim=-1)
+                logit_i = scale * (features_norm[i] @ text_i.t())
+                logits_list.append(logit_i)
+            return torch.stack(logits_list, dim=0)
+
+        # CoOp: compute shared text features on the fly
+        if self.prompt_mode == 'coop' and self.prompt_learner is not None:
+            prompts, tokenized = self.prompt_learner.build_prompts()
+            text_feats = self.text_encoder(prompts, tokenized)
+            prototypes = text_feats
+        else:
+            # For baseline or GP: only sample multiple times when GP is enabled
+            num_samples = self.gp_num_mc_samples
+            prototypes = self.get_prototypes(num_samples=num_samples, visual_embeddings=projected)
+        
+        if prototypes.device != features_norm.device:
+            prototypes = prototypes.to(device=features_norm.device)
+        prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
+        
+        # For GP with num_samples > 1
+        if prototypes.dim() == 3:
+            logits_s = scale * torch.einsum("bd,skd->bsk", features_norm, prototypes_norm)
+            return logits_s.mean(dim=1)
+        else:
+            return scale * (features_norm @ prototypes.t())
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
         """CLAP-like forward.
@@ -351,20 +520,33 @@ class Trainer(BaseTrainer):
         self.model = CustomCLIP(config, classnames, clip_model)
         self.model.to(self.device)
 
-        # Setup parameter groups: train only visual_proj and GP (if enabled)
-        for name, param in self.model.named_parameters():
-            allow_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'train_template_weights', False))
-            # Freeze visual projection if requested
-            if bool(getattr(config.adapter, 'freeze_visual_proj', False)) and ("visual_proj" in name):
-                param.requires_grad = False
-                continue
-            if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        # Setup parameter groups
+        prompt_mode = str(getattr(config.adapter, 'prompt_mode', 'none') or 'none').lower()
+        if prompt_mode in ("coop", "cocoop"):
+            # Only prompt learner is trainable; freeze everything else
+            for name, param in self.model.named_parameters():
+                if "prompt_learner" in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+        else:
+            # Train only visual_proj and GP (if enabled); template weights optionally
+            for name, param in self.model.named_parameters():
+                allow_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'train_template_weights', False))
+                if bool(getattr(config.adapter, 'freeze_visual_proj', False)) and ("visual_proj" in name):
+                    param.requires_grad = False
+                    continue
+                if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
 
-        # Setup optimizer with different learning rates for GP
-        if config.adapter.use_gp and self.model.gp_weighter is not None:
+        # Setup optimizer
+        if prompt_mode in ("coop", "cocoop"):
+            prompt_params = [p for n, p in self.model.named_parameters() if p.requires_grad]
+            self.optim = build_optimizer(prompt_params, config.optim)
+            self.sched = build_lr_scheduler(self.optim, config.optim)
+        elif config.adapter.use_gp and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
             base_params = []
             base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
@@ -415,7 +597,8 @@ class Trainer(BaseTrainer):
         projected_features = features
         
         # Get prototypes (for diagnostics only)
-        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1))
+        proj_features = self.model.visual_proj(projected_features.to(self.model.visual_proj.weight.dtype))
+        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1), visual_embeddings=proj_features)
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
             with torch.no_grad():
@@ -454,7 +637,8 @@ class Trainer(BaseTrainer):
             test_projected = test_features
             # Quick test metric: use the same unified path
             num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
-            test_prototypes = model.get_prototypes(num_samples=num_samples)
+            test_proj = self.model.visual_proj(test_features.to(self.model.visual_proj.weight.dtype))
+            test_prototypes = model.get_prototypes(num_samples=num_samples, visual_embeddings=test_proj)
             if test_projected.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
             test_logits = model.forward_features(test_projected)
@@ -481,7 +665,8 @@ class Trainer(BaseTrainer):
 
         if use_gp and num_samples > 1 and gp_weighter is not None:
             # Sample S prototype sets [S,K,D] in fp32 for stability
-            protos = gp_weighter.sample_prototypes(num_samples)  # [S,K,D]
+            proj_features = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype))
+            protos = gp_weighter.sample_prototypes(num_samples, visual_embeddings=proj_features)  # [S,K,D]
             # Ensure device/dtype match
             proj_weight = model.visual_proj.weight
             target_device = proj_weight.device
@@ -560,16 +745,53 @@ class Trainer(BaseTrainer):
         # Identity regularizer on visual projection W
         try:
             W = model.visual_proj.weight
-            eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
-            l2_reg = (W - eye).pow(2).sum()
-            l2_lambda = self.config.adapter.l2_lambda
-            # Scale by number of shots
-            shots = self.config.dataset.num_shots
-            l2_reg = l2_reg * l2_lambda / shots
-            total_loss += l2_reg
+            if W.requires_grad:
+                eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
+                l2_reg = (W - eye).pow(2).sum()
+                l2_lambda = self.config.adapter.l2_lambda
+                shots = self.config.dataset.num_shots
+                l2_reg = l2_reg * l2_lambda / shots
+                total_loss += l2_reg
+            else:
+                l2_reg = None
         except Exception:
             print("Error in l2 regularization")
             l2_reg = None
+
+        # --- learnable-token regularizer ---
+        if use_gp and gp_weighter is not None:
+            # proj visuals
+            proj = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype)).detach()
+            labels_i64 = labels.to(torch.int64)
+            
+            K = int(self.model.text_embeddings.shape[0])
+            D = proj.shape[-1]
+            device = proj.device
+            dtype = proj.dtype
+
+            cls_sum = torch.zeros(K, D, dtype=proj.dtype, device=proj.device) # [K,D]
+            cls_count = torch.zeros(K, 1, dtype=proj.dtype, device=proj.device) # [K,1]
+            cls_sum.index_add_(0, labels_i64, proj)  # [K,D]
+            one = torch.ones(labels_i64.size(0), 1, device=proj.device, dtype=proj.dtype)
+            cls_count.index_add_(0, labels_i64, one)
+
+            # classes present in the batch
+            present = (cls_count > 0).squeeze(1) # [K]
+            if present.any():
+                cls_mean = torch.zeros_like(cls_sum)
+                cls_mean[present] = cls_sum[present] / cls_count[present].clamp_min(1.0) # [K,D]
+
+                Z = gp_weighter.variational_strategy.inducing_points # [K, M+1, D]
+                token = Z[:, -1, :] # [K,D]
+                
+                lam = float(getattr(self.config.adapter, "learn_token_lambda", 1e-3))
+                reg = lam * (token[present] - cls_mean[present]).pow(2).mean()
+                total_loss = total_loss + reg
+                try:
+                    self._dbg_loss_components["learn_token_reg"] = float(reg.detach().item())
+                except Exception:
+                    pass
+        # -----------------------------------
 
         # Debug components
         try:
@@ -640,35 +862,36 @@ class Trainer(BaseTrainer):
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
 
-        # Initialize template weights once from N-shot features
-        try:
-            model = cast(CustomCLIP, self.model)
-            feats = self.features_train.to(self.device)
-            template_weights = _get_template_weights(
-                self.config,
-                text_embeddings=model.text_embeddings,
-                features=feats,
-                labels=self.labels_train.to(self.device),
-                logit_scale=model.logit_scale.exp(),
-            )
-            mean_vals = template_weights.mean(dim=0).tolist()
-            std_vals = template_weights.std(dim=0).tolist()
-            print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
-            print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+        # Initialize template weights once from N-shot features (skip for prompt modes)
+        if str(getattr(self.config.adapter, 'prompt_mode', 'none')).lower() == 'none':
+            try:
+                model = cast(CustomCLIP, self.model)
+                feats = self.features_train.to(self.device)
+                template_weights = _get_template_weights(
+                    self.config,
+                    text_embeddings=model.text_embeddings,
+                    features=feats,
+                    labels=self.labels_train.to(self.device),
+                    logit_scale=model.logit_scale.exp(),
+                )
+                mean_vals = template_weights.mean(dim=0).tolist()
+                std_vals = template_weights.std(dim=0).tolist()
+                print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
 
-            # If template weights are a trainable parameter, copy data; otherwise assign tensor
-            if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
-                with torch.no_grad():
-                    model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
-            else:
-                model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
-            
-            # If GP enabled, initialize from same weights
-            if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
-                model.gp_weighter.initialize_from_weights(template_weights)
-                print("[GP] One-step initialization applied to GP weights.")
-        except Exception as e:
-            print(f"[WARN] Template weight init skipped: {e}")
+                # If template weights are a trainable parameter, copy data; otherwise assign tensor
+                if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
+                    with torch.no_grad():
+                        model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
+                else:
+                    model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+                
+                # If GP enabled, initialize from same weights
+                if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
+                    model.gp_weighter.initialize_from_weights(template_weights)
+                    print("[GP] One-step initialization applied to GP weights.")
+            except Exception as e:
+                print(f"[WARN] Template weight init skipped: {e}")
 
         # Run the actual training using the base class training loop
         self.before_train()
@@ -677,10 +900,14 @@ class Trainer(BaseTrainer):
             self.run_epoch()
             self.after_epoch()
         self.after_train()
-        mean_vals = self.model.template_weights.mean(dim=0).tolist()
-        std_vals = self.model.template_weights.std(dim=0).tolist()
-        print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
-        print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+        # Print template weights stats if available
+        try:
+            mean_vals = self.model.template_weights.mean(dim=0).tolist()
+            std_vals = self.model.template_weights.std(dim=0).tolist()
+            print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+            print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+        except Exception:
+            pass
         print(f"Training completed in {time.time() - start_time:.2f} seconds")
 
         # After training completes, compute final test metrics and write metrics.json
