@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import gpytorch
+from entmax import sparsemax
 from typing import Any, Optional, cast
 
 
@@ -11,9 +12,14 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
     def __init__(self, text_embeddings: torch.Tensor, cfg: Any, **kwargs) -> None:
         self.orig_device = text_embeddings.device
-        text_embeddings_fp32 = text_embeddings
-        
-        self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
+
+        # self.num_classes, self.num_templates, self.dim = text_embeddings_fp32.shape
+        self.num_classes, self.num_templates, self.dim = text_embeddings.shape
+
+        # Remove these if don't work
+        K, M, D = self.num_classes, self.num_templates, self.dim
+        with torch.no_grad():
+            cls_mean = text_embeddings.mean(dim=1, keepdim=True)  # [K,1,D]
         
         # Handle both old cfg format and new config format
         def get_config_value(key, default):
@@ -30,37 +36,47 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
         # Use the template encodings as inducing points.
-        inducing_inputs = text_embeddings_fp32.detach().clone().view(
-            self.num_classes, self.num_templates, self.dim
-        )
+        inducing_inputs = text_embeddings.detach().clone().view(self.num_classes, self.num_templates, self.dim)
+        inducing_inputs = torch.cat([inducing_inputs, cls_mean], dim=1)  # [K, M+1, D]
 
-        variational_dist = gpytorch.variational.CholeskyVariationalDistribution(
-            num_inducing_points=self.num_templates,
-            batch_shape=batch_shape,
-        )
+        variational_dist = gpytorch.variational.CholeskyVariationalDistribution(num_inducing_points=self.num_templates+1,batch_shape=batch_shape,)
 
-        variational_strategy = gpytorch.variational.VariationalStrategy(
-            self,
-            inducing_inputs,
-            variational_dist,
-            learn_inducing_locations=False,
-        )
+        variational_strategy = gpytorch.variational.VariationalStrategy(self, inducing_inputs, variational_dist, learn_inducing_locations=True)
 
         super().__init__(variational_strategy)
 
+        # Zero grads on first M inducing
+        mask = torch.zeros(K, M+1, D, device=inducing_inputs.device)
+        mask[:, M:, :] = 1.0
+        self.register_buffer("_ind_mask", mask)
+        def _freeze_templates_hook(grad):
+            return grad * self._ind_mask
+        
+        self.variational_strategy.inducing_points.register_hook(_freeze_templates_hook)
+
         # Initialise the per-template mean
-        self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
+        #self.mean_module = PerTemplateMean(self.num_classes, self.num_templates)
         with torch.no_grad():
-            class_mean = text_embeddings_fp32.mean(dim=1, keepdim=True)  # [K,1,D]
-            text_norm = F.normalize(text_embeddings_fp32, p=2, dim=-1)   # [K,M,D]
+            class_mean = text_embeddings.mean(dim=1, keepdim=True)  # [K,1,D]
+            text_norm = F.normalize(text_embeddings, p=2, dim=-1)   # [K,M,D]
             class_mean_norm = F.normalize(class_mean, p=2, dim=-1)       # [K,1,D]
             mean_init = (text_norm * class_mean_norm).sum(-1)            # [K,M]
-        self.mean_module.mean_param.data = mean_init
+        #self.mean_module.mean_param.data = mean_init
+
+        tau = float(getattr(cfg.adapter, 'gp_prior_temp', 1.0) or 1.)  # optional temp
+        with torch.no_grad():
+            # mean_init is cosine(template, class_center)  [K, M]
+            prior_logits = mean_init / max(tau, 1e-6)                 # [K, M]
+            w0 = torch.softmax(prior_logits, dim=-1).clamp_min(1e-12) # zero-shot template prior
+            f0 = torch.log(w0)                                        # logits space for GP
+
+            # self.mean_module.mean_param.copy_(f0.to(torch.float32))
+        self.mean_module = ResidualMeanWithBias(f0_logits=f0.to(torch.float32))
 
         kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
         if kernel_type == "rbf":
             with torch.no_grad():
-                flat_emb = F.normalize(text_embeddings_fp32.reshape(-1, self.dim), p=2, dim=-1)  # [(K*M), D]
+                flat_emb = F.normalize(text_embeddings.reshape(-1, self.dim), p=2, dim=-1)  # [(K*M), D]
                 pdist = torch.cdist(flat_emb, flat_emb)
                 # Exclude the zero diagonal before taking the median
                 ls_cfg = pdist[pdist > 0].median().item()
@@ -82,13 +98,14 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=batch_shape)
 
         # Break symmetry: initialise variational mean with small noise
-        with torch.no_grad():
-            vm = self.variational_strategy._variational_distribution.variational_mean
-            vm.normal_(mean=0.0, std=0.1)
+        # with torch.no_grad():
+        #     vm = self.variational_strategy._variational_distribution.variational_mean
+        #     vm.normal_(mean=0.0, std=0.1)
 
         # Register the (fixed) template embeddings for downstream use.
         self._templates: torch.Tensor
         self.register_buffer("_templates", text_embeddings.detach())
+        self.register_buffer("_cls_mean_init", cls_mean)
 
     @torch.no_grad()
     def initialize_from_weights(self, weights_km: torch.Tensor, temperature: float = 1.0) -> None:
@@ -130,14 +147,12 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         Return class prototypes and KL term for a single stochastic sample.
         """
         proto_s = self.sample_prototypes(num_samples=1).squeeze(0)  # [K,D]
-        kl = self.variational_strategy.kl_divergence().sum()
+        kl = self.variational_strategy.kl_divergence().sum() + self.reg
         return proto_s.to(device=self.orig_device), kl
     
-    def sample_prototypes(self, num_samples: int) -> torch.Tensor:
+    def sample_prototypes(self, num_samples: int, visual_embeddings: torch.Tensor = None) -> torch.Tensor:
         """
         Draw *num_samples* sets of template-weighted class prototypes.
-        
-        Always uses stochastic sampling for maximum stochasticity.
 
         Returns
         -------
@@ -145,12 +160,25 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             A tensor of shape ``[S, K, D]`` where *S* is ``num_samples``,
             *K* the number of classes and *D* the embedding dimension.
         """
+        # Use visual embeddings as context -> [B, D] where for training B=K classes and testing B=batch size != K
+        N_templates = self._templates.shape[1]
+        if visual_embeddings.shape[0] == self.num_classes:
+            visual_embeddings = visual_embeddings.unsqueeze(1)
+            gp_input = torch.cat([self._templates, visual_embeddings], dim=1)  # [K, M+1, D]
+        else:
+            # Test time: no extra context
+            # visual_mean = visual_embeddings.mean(dim=0, keepdim=True)  # [1, 1, D]
+            # visual_mean = visual_mean.expand(self.num_classes, -1, -1)  # [K, 1, D]
+            # gp_input = torch.cat([self._templates_reduced, visual_mean], dim=1)  # [K, M+1, D]
+            # print(f"Shape of gp_input at test time: {gp_input.shape}")
+            gp_input = self._templates  # [K, M, D]
+        
         # Distribution over latent function values at template inputs
-        qf = self(self._templates)
+        qf = self(gp_input)
         # Stochastic sampling of latent function values
-        f_samples = qf.rsample(torch.Size([num_samples]))  # [S,K,M]
+        f_samples = qf.rsample(torch.Size([num_samples]))[:, :, :N_templates]  # [S,K,M]
         # Map function values to convex weights per class/template
-        w = torch.softmax(f_samples, dim=-1)  # [S,K,M]
+        w = sparsemax(f_samples, dim=-1)  # [S,K,M]
 
         # Compute prototypes in fp32 then cast back to CLIP precision
         prototypes = torch.einsum("skm,kmd->skd", w, self._templates)
@@ -172,6 +200,33 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         w = torch.softmax(f_mean, dim=-1)  # [K,M]
         prototypes = torch.einsum("km,kmd->kd", w, self._templates)  # [K,D]
         return prototypes
+
+
+class ResidualMeanWithBias(gpytorch.means.Mean):
+    def __init__(self, f0_logits: torch.Tensor):  # [K,M] frozen prior (log w0)
+        super().__init__()
+        K, M = f0_logits.shape
+        self.register_buffer('f0', f0_logits.clone())       # frozen prior
+        self.cls_bias = torch.nn.Parameter(torch.zeros(K, 1))
+        self.tmp_bias = torch.nn.Parameter(torch.zeros(1, M))
+
+    def forward(self, x):
+        K, M = self.f0.shape
+        N = x.size(-2)
+        base = self.f0 + self.cls_bias + self.tmp_bias       # [K,M]
+        if N == M:
+            return base
+        extra = N - M
+        tail = (self.cls_bias + self.tmp_bias.mean(dim=1, keepdim=True)).expand(K, extra)
+        return torch.cat([base, tail], dim=1)                # [K,N]
+
+
+class LinearFeatMean(gpytorch.means.Mean):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.beta = torch.nn.Parameter(torch.zeros(in_dim))
+    def forward(self, feats):  # feats = φ(x)
+        return feats @ self.beta
 
 
 class PerTemplateMean(gpytorch.means.Mean):
