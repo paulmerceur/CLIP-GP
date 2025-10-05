@@ -366,18 +366,18 @@ class CustomCLIP(nn.Module):
         # Create TextEncoder for proper text encoding
         self.text_encoder = TextEncoder(clip_model)
         
-        # Prompt-learning mode
-        self.prompt_mode = str(getattr(config.adapter, 'prompt_mode', 'none') or 'none').lower()
+        # Benchmark method
+        self.benchmark_method = str(getattr(config.adapter, 'benchmark_method', 'none') or 'none').lower()
 
         # Get text features for baseline/GP; prompt modes compute on the fly
         self.templates = _get_templates(config)
         self.text_embeddings = _get_text_embeddings(self.templates, classnames, clip_model, self.text_encoder)
 
-        # Initialize prompt learners when requested
+        # Initialize prompt learners for CoOp / CoCoOp
         self.prompt_learner = None
-        if self.prompt_mode == 'coop':
+        if self.benchmark_method == 'coop':
             self.prompt_learner = PromptLearnerCoOp(config, classnames, clip_model)
-        elif self.prompt_mode == 'cocoop':
+        elif self.benchmark_method == 'cocoop':
             self.prompt_learner = PromptLearnerCoCoOp(config, classnames, clip_model)
 
         # Optionally make template weights trainable for baseline
@@ -412,6 +412,55 @@ class CustomCLIP(nn.Module):
                 text_embeddings=self.text_embeddings,
                 cfg=config,
             )
+
+        # Tip-Adapter (TipA) cache and hyperparameters
+        self.tipa_cache_keys = None # [N, D]
+        self.tipa_cache_vals = None # [N, K]
+        self.tipa_alpha = 20.0
+        self.tipa_beta = 2.0
+
+    @torch.no_grad()
+    def init_tipa_cache(self, features: torch.Tensor, labels: torch.Tensor, num_classes: int) -> None:
+        """Initialize Tip-Adapter cache from few-shot train features.
+
+        Args:
+          features: [N, D] CLIP visual features (pre-projection expected by pipeline)
+          labels: [N] class indices
+          num_classes: K
+        """
+        # Ensure device/dtype alignment with projection
+        proj_weight = self.visual_proj.weight
+        f = features
+        if f.device != proj_weight.device:
+            f = f.to(device=proj_weight.device)
+        if f.dtype != proj_weight.dtype:
+            f = f.to(dtype=proj_weight.dtype)
+
+        # Project and normalize to build cache keys
+        projected = self.visual_proj(f)
+        keys = F.normalize(projected, p=2, dim=-1)  # [N, D]
+
+        # One-hot cache values
+        K = int(num_classes)
+        labels_i64 = labels.to(device=keys.device, dtype=torch.int64)
+        values = torch.zeros(labels_i64.shape[0], K, device=keys.device, dtype=keys.dtype)
+        values.scatter_(1, labels_i64.view(-1, 1), 1.0)
+
+        # Store
+        self.tipa_cache_keys = keys
+        self.tipa_cache_vals = values
+
+        # Diagnostics: print cache size and expected shots×classes for leakage sanity check
+        try:
+            shots = int(getattr(self.config.dataset, 'num_shots', 0))
+        except Exception:
+            shots = 0
+        expected = shots * K if shots > 0 else None
+        N = int(labels_i64.shape[0])
+        present = torch.bincount(labels_i64, minlength=K)
+        num_present = int((present > 0).sum().item())
+        exp_str = str(expected) if expected is not None else 'n/a'
+        print(f"[TipA] cache initialized: N={N}, K={K}, expected_shotsxclasses={exp_str}, classes_present={num_present}/{K}")
     
     def get_prototypes(self, num_samples: int = 1, visual_embeddings: torch.Tensor = None):
         """Get class prototypes; if GP is enabled, average over num_samples.
@@ -427,7 +476,7 @@ class CustomCLIP(nn.Module):
                 proto_s = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
                 prototypes = proto_s
         else:
-            if self.prompt_mode in ["coop", "cocoop"]:
+            if self.benchmark_method in ["coop", "cocoop"]:
                 prototypes = self.prompt_learner.get_text_features(self.text_encoder)
             elif isinstance(getattr(self, 'template_weights', None), torch.Tensor):
                 prototypes = torch.einsum("km,kmd->kd", cast(torch.Tensor, self.template_weights), self.text_embeddings)
@@ -454,7 +503,7 @@ class CustomCLIP(nn.Module):
         scale = self.logit_scale.exp()
 
         # CoCoOp: build per-sample prompts and compute logits per sample
-        if self.prompt_mode == 'cocoop' and self.prompt_learner is not None:
+        if self.benchmark_method == 'cocoop' and self.prompt_learner is not None:
             with torch.no_grad():
                 img_for_meta = F.normalize(projected, p=2, dim=-1)
             prompts_b, tokenized = self.prompt_learner.build_prompts(img_for_meta)
@@ -468,7 +517,7 @@ class CustomCLIP(nn.Module):
             return torch.stack(logits_list, dim=0)
 
         # CoOp: compute shared text features on the fly
-        if self.prompt_mode == 'coop' and self.prompt_learner is not None:
+        if self.benchmark_method == 'coop' and self.prompt_learner is not None:
             prompts, tokenized = self.prompt_learner.build_prompts()
             text_feats = self.text_encoder(prompts, tokenized)
             prototypes = text_feats
@@ -480,13 +529,35 @@ class CustomCLIP(nn.Module):
         if prototypes.device != features_norm.device:
             prototypes = prototypes.to(device=features_norm.device)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-        
-        # For GP with num_samples > 1
+
+        # Base logits (zero-shot / CoOp / GP-average)
         if prototypes.dim() == 3:
             logits_s = scale * torch.einsum("bd,skd->bsk", features_norm, prototypes_norm)
-            return logits_s.mean(dim=1)
+            base_logits = logits_s.mean(dim=1)
         else:
-            return scale * (features_norm @ prototypes.t())
+            base_logits = scale * (features_norm @ prototypes_norm.t())
+
+        # Tip-Adapter augmentation (if cache available)
+        if self.benchmark_method == 'tipa' and (self.tipa_cache_keys is not None) and (self.tipa_cache_vals is not None):
+            keys = self.tipa_cache_keys
+            vals = self.tipa_cache_vals
+            if keys.device != features_norm.device:
+                keys = keys.to(device=features_norm.device)
+            if keys.dtype != features_norm.dtype:
+                keys = keys.to(dtype=features_norm.dtype)
+            if vals.device != features_norm.device:
+                vals = vals.to(device=features_norm.device)
+            if vals.dtype != features_norm.dtype:
+                vals = vals.to(dtype=features_norm.dtype)
+
+            # Cosine similarity to cache keys → soft assignment over training samples
+            sim = features_norm @ keys.t()  # [B, N]
+            weights = torch.softmax(self.tipa_alpha * sim, dim=1)  # [B, N]
+            cache_logits = weights @ vals  # [B, K]
+            logits = base_logits + self.tipa_beta * cache_logits
+            return logits
+
+        return base_logits
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
         """CLAP-like forward.
@@ -521,8 +592,8 @@ class Trainer(BaseTrainer):
         self.model.to(self.device)
 
         # Setup parameter groups
-        prompt_mode = str(getattr(config.adapter, 'prompt_mode', 'none') or 'none').lower()
-        if prompt_mode in ("coop", "cocoop"):
+        benchmark_method = str(getattr(config.adapter, 'benchmark_method', 'none') or 'none').lower()
+        if benchmark_method in ("coop", "cocoop"):
             # Only prompt learner is trainable; freeze everything else
             for name, param in self.model.named_parameters():
                 if "prompt_learner" in name:
@@ -542,32 +613,39 @@ class Trainer(BaseTrainer):
                     param.requires_grad = False
 
         # Setup optimizer
-        if prompt_mode in ("coop", "cocoop"):
+        if benchmark_method in ("coop", "cocoop"):
             prompt_params = [p for n, p in self.model.named_parameters() if p.requires_grad]
-            self.optim = build_optimizer(prompt_params, config.optim)
-            self.sched = build_lr_scheduler(self.optim, config.optim)
+            if len(prompt_params) == 0:
+                self.optim = None
+                self.sched = None
+            else:
+                self.optim = build_optimizer(prompt_params, config.optim)
+                self.sched = build_lr_scheduler(self.optim, config.optim)
         elif config.adapter.use_gp and self.model.gp_weighter is not None:
             # Two parameter groups: base params and GP params
             base_params = []
             base_params.extend([p for p in self.model.visual_proj.parameters() if p.requires_grad])
             gp_params = [p for p in self.model.gp_weighter.parameters() if p.requires_grad]
+            if (len(base_params) + len(gp_params)) == 0:
+                self.optim = None
+                self.sched = None
+            else:
+                param_groups = [
+                    {
+                        'params': base_params,
+                        'lr': float(config.optim.lr),
+                        'weight_decay': float(config.optim.weight_decay)
+                    },
+                    {
+                        'params': gp_params,
+                        'lr': float(config.adapter.gp_lr),
+                        'weight_decay': 0.0
+                    },
+                ]
 
-            param_groups = [
-                {
-                    'params': base_params,
-                    'lr': float(config.optim.lr),
-                    'weight_decay': float(config.optim.weight_decay)
-                },
-                {
-                    'params': gp_params,
-                    'lr': float(config.adapter.gp_lr),
-                    'weight_decay': 0.0
-                },
-            ]
-
-            # Use generic builder (supports sgd/adam/adamw with param groups)
-            self.optim = build_optimizer_from_param_groups(param_groups, config.optim)
-            self.sched = build_lr_scheduler(self.optim, config.optim)
+                # Use generic builder (supports sgd/adam/adamw with param groups)
+                self.optim = build_optimizer_from_param_groups(param_groups, config.optim)
+                self.sched = build_lr_scheduler(self.optim, config.optim)
         else:
             # Single parameter group for baseline
             baseline_params = []
@@ -578,9 +656,13 @@ class Trainer(BaseTrainer):
                 if self.model.template_weights.requires_grad:
                     baseline_params.append(self.model.template_weights)
             
-            # Use utils optimization functions
-            self.optim = build_optimizer(baseline_params, config.optim)
-            self.sched = build_lr_scheduler(self.optim, config.optim)
+            # Use utils optimization functions if there are params
+            if len(baseline_params) == 0:
+                self.optim = None
+                self.sched = None
+            else:
+                self.optim = build_optimizer(baseline_params, config.optim)
+                self.sched = build_lr_scheduler(self.optim, config.optim)
             
         self.scaler = None
 
@@ -807,6 +889,8 @@ class Trainer(BaseTrainer):
 
     def _backward_and_update(self, loss):
         """Backward pass and optimizer step."""
+        if getattr(self, 'optim', None) is None:
+            return
         self.optim.zero_grad()
         loss.backward()
         # Capture gradient norms (debug)
@@ -862,8 +946,18 @@ class Trainer(BaseTrainer):
         # Feature extraction on training set
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
 
+        # Tip-Adapter: initialize cache before training
+        if str(getattr(self.config.adapter, 'benchmark_method', 'none')).lower() == 'tipa':
+            try:
+                model = cast(CustomCLIP, self.model)
+                num_classes = len(self.dm.dataset.classnames)
+                model.init_tipa_cache(self.features_train.to(self.device), self.labels_train.to(self.device), num_classes=num_classes)
+            except Exception as e:
+                print(f"[WARN] TipA init/eval failed: {e}")
+            # Continue to training loop
+
         # Initialize template weights once from N-shot features (skip for prompt modes)
-        if str(getattr(self.config.adapter, 'prompt_mode', 'none')).lower() == 'none':
+        if str(getattr(self.config.adapter, 'benchmark_method', 'none')).lower() == 'none':
             try:
                 model = cast(CustomCLIP, self.model)
                 feats = self.features_train.to(self.device)

@@ -1,8 +1,8 @@
-name: CoOp
+name: TipA
 BASE_CONFIG: configs/trainers/default.yaml
 
 #datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, eurosat, ucf101]
+datasets: [caltech101, ucf101, eurosat]
 
 # Seeds and shots
 seeds: [1, 2, 3]
@@ -14,19 +14,22 @@ root: /mnt/features/VDATA/
 # Where to store results for this experiment
 output_root: output
 
-# Grid of hyperparameters (keys follow existing config override notation)
-grid:
-  {}
 # Output directory template
-template: "{experiment}/{dataset}/coop_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/tipa_{shots}shots_{sig}/seed{seed}"
+
+grid:
+  OPTIM.LR: [0.01, 0.001]
 
 TRAINER:
+  DATALOADER:
+    TRAIN_X:
+      BATCH_SIZE: 32
+    TEST:
+      BATCH_SIZE: 32
   ADAPTER:
+    BENCHMARK_METHOD: tipa
     USE_GP: False
+    TRAIN_TEMPLATE_WEIGHTS: False
     FREEZE_VISUAL_PROJ: True
-    BENCHMARK_METHOD: coop
-    N_CTX: 16
-    # Optional seed phrase, uncomment to try
-    # CTX_INIT: "a photo of a"
 
 
