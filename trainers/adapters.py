@@ -122,19 +122,38 @@ class PromptLearnerCoOp(nn.Module):
         ctx_init = str(getattr(config.adapter, 'ctx_init', '') or '')
         ctx_dim = int(clip_model.ln_final.weight.shape[0])
 
-        # Create class prompts with placeholder context tokens
-        prompt_prefix = ctx_init.replace('_', ' ') if len(ctx_init) > 0 else ' '.join(['X'] * n_ctx)
-        prompts = [f"{prompt_prefix} {name}." for name in classnames]
+        # If ctx_init provided, infer n_ctx from its tokenization
+        emb_init = None
+        if len(ctx_init) > 0:
+            ctx_init_clean = ctx_init.replace('_', ' ').strip()
+            tok_init = clip.tokenize(ctx_init_clean).to(device)
+            with torch.no_grad():
+                emb_init = clip_model.token_embedding(tok_init).squeeze(0)
+            eot_pos = int(tok_init.argmax(dim=-1).item())
+            n_ctx = max(1, eot_pos - 1)  # exclude SOS
+
+        # Always reserve exactly n_ctx slots using placeholders
+        placeholders = ' '.join(['X'] * n_ctx)
+        prompts = [f"{placeholders} {name}." for name in classnames]
         tokenized_prompts = clip.tokenize(prompts).to(device)
         self._token_embedding = clip_model.token_embedding
         with torch.no_grad():
             embedding = self._token_embedding(tokenized_prompts)
 
-        # Determine n_ctx from ctx_init if provided
-        if len(ctx_init) > 0:
-            n_ctx = int(embedding.shape[1] - 1 - (embedding.shape[1] - 1 - n_ctx)) if n_ctx > 0 else int(ctx_init.count(' ') + 1)
-            # Use actual slice from the init phrase
-            ctx_vectors = embedding[0, 1:1 + n_ctx, :].detach().clone()
+        # Initialize learnable context from init phrase or random
+        if emb_init is not None:
+            # Slice out init phrase tokens (excluding SOS/EOT) and tile/crop to n_ctx
+            phrase = emb_init[1:eot_pos]
+            if phrase.shape[0] < n_ctx:
+                reps = []
+                need = n_ctx
+                while need > 0:
+                    take = min(phrase.shape[0], need)
+                    reps.append(phrase[:take])
+                    need -= take
+                ctx_vectors = torch.cat(reps, dim=0)
+            else:
+                ctx_vectors = phrase[:n_ctx].clone()
         else:
             ctx_vectors = torch.empty(n_ctx, ctx_dim, device=device, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
