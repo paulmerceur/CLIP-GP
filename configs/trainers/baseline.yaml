@@ -1,10 +1,10 @@
-name: gp_prefit
+name: baseline
 BASE_CONFIG: configs/trainers/default.yaml
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, ucf101, eurosat]
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, ucf101, eurosat]
 
-seeds: [1, 2, 3]
-shots: [1, 4, 8, 16]
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16, 32]
 
 root: /mnt/features/VDATA/
 

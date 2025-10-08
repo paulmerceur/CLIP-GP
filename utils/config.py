@@ -28,6 +28,7 @@ class AdapterConfig:
     gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
+    learn_token_lambda: float = 1e-2  # Weight for l2 regularization on visual learnable token inside the gp
 
     benchmark_method: str = "none"  # one of: "none", "coop", "cocoop"
 
@@ -238,7 +239,7 @@ def parse_args_to_config() -> Config:
     parser = argparse.ArgumentParser(description="CLIP-GP Training")
     
     # Dataset arguments
-    parser.add_argument("--root", type=str, default=None, 
+    parser.add_argument("--root", type=str, default="/mnt/features/VDATA", 
                        help="Path to dataset root")
     parser.add_argument("--dataset", type=str, default=None,
                        choices=["Caltech101", "OxfordPets", "OxfordFlowers", "FGVCAircraft", 

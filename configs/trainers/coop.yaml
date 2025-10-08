@@ -1,12 +1,13 @@
 name: CoOp
 BASE_CONFIG: configs/trainers/default.yaml
 
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, eurosat, ucf101]
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, ucf101, eurosat]
 
 # Seeds and shots
-seeds: [1, 2, 3]
-shots: [1, 2, 4, 8, 16]
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16, 32]
+
 
 # Optional dataset root override (falls back to defaults in utils.config)
 root: /mnt/features/VDATA/
@@ -23,7 +24,7 @@ template: "{experiment}/{dataset}/coop_{shots}shots_{sig}/seed{seed}"
 TRAINER:
   ADAPTER:
     USE_GP: False
-    FREEZE_VISUAL_PROJ: True
+    FREEZE_VISUAL_PROJ: False
     BENCHMARK_METHOD: coop
     N_CTX: 16
     # Optional seed phrase, uncomment to try
