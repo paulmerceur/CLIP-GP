@@ -206,7 +206,7 @@ def assign_devices(trials: List[Trial], devices: List[str]) -> None:
         t.extra_env["CUDA_VISIBLE_DEVICES"] = str(dev)
 
 
-def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, verbose: bool = False) -> List[Dict[str, Any]]:
+def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, verbose: bool = False, skip_logged: bool = True) -> List[Dict[str, Any]]:
     """Run trials enforcing even per-GPU concurrency (jobs per GPU), printing concise progress.
 
     Child stdout/stderr are suppressed; logs are still written inside each trial's output dir.
@@ -217,6 +217,13 @@ def run_trials(trials: List[Trial], devices: List[str], jobs_per_gpu: int, verbo
 
     task_q: "queue.Queue[Trial]" = queue.Queue()
     for t in trials:
+        # Skip trials that already have a log.txt in their output dir
+        if skip_logged:
+            out_dir = t.format_outdir()
+            log_path = out_dir / "log.txt"
+            if log_path.exists():
+                print(f"[SKIP] Existing log found, skipping: dataset={t.dataset} shots={t.shots} seed={t.seed} sig={t.signature()}")
+                continue
         task_q.put(t)
 
     lock = threading.Lock()
@@ -281,6 +288,7 @@ def main():
     ap.add_argument("--jobs-per-gpu", type=int, default=1, help="Concurrent jobs per GPU (default 1)")
     ap.add_argument("--experiment-name", default=None, help="Optional experiment name (defaults to YAML filename or 'name' field)")
     ap.add_argument("--verbose", action="store_true", help="If set, stream child process output to the terminal")
+    ap.add_argument("--no-skip-logged", action="store_true", help="Do not skip trials with existing log.txt")
     args = ap.parse_args()
 
     timer_start = time.time()
@@ -300,7 +308,13 @@ def main():
     devices_list = meta.get("devices", [])
     assign_devices(trials, devices_list)
 
-    results = run_trials(trials, devices=devices_list, jobs_per_gpu=max(1, args.jobs_per_gpu), verbose=bool(args.verbose))
+    results = run_trials(
+        trials,
+        devices=devices_list,
+        jobs_per_gpu=max(1, args.jobs_per_gpu),
+        verbose=bool(args.verbose),
+        skip_logged=not bool(args.no_skip_logged),
+    )
     exp_name = meta.get("experiment_name", "experiment")
     print(f"Experiment complete: {exp_name} -> {(trials[0].output_root / exp_name) if trials else (Path('output') / exp_name)}")
     timer_end = time.time()
