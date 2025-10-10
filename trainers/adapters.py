@@ -425,7 +425,8 @@ class CustomCLIP(nn.Module):
 
         # Create GP weighter if needed
         self.gp_weighter = None
-        self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
+        self.gp_num_mc_samples_train = int(getattr(config.adapter, 'gp_num_mc_samples_train', 1) or 1)
+        self.gp_num_mc_samples_test = int(getattr(config.adapter, 'gp_num_mc_samples_test', 1) or 1)
         if use_gp:
             self.gp_weighter = GaussianProcessTemplateWeighter(
                 text_embeddings=self.text_embeddings,
@@ -541,8 +542,8 @@ class CustomCLIP(nn.Module):
             text_feats = self.text_encoder(prompts, tokenized)
             prototypes = text_feats
         else:
-            # For baseline or GP: only sample multiple times when GP is enabled
-            num_samples = self.gp_num_mc_samples
+            # For baseline or GP: use train/test MC counts based on module mode
+            num_samples = self.gp_num_mc_samples_train if self.training else self.gp_num_mc_samples_test
             prototypes = self.get_prototypes(num_samples=num_samples, visual_embeddings=projected)
         
         if prototypes.device != features_norm.device:
@@ -699,7 +700,7 @@ class Trainer(BaseTrainer):
         
         # Get prototypes (for diagnostics only)
         proj_features = self.model.visual_proj(projected_features.to(self.model.visual_proj.weight.dtype))
-        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1), visual_embeddings=proj_features)
+        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples_train', 1) or 1), visual_embeddings=proj_features)
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
             with torch.no_grad():
@@ -719,7 +720,7 @@ class Trainer(BaseTrainer):
             prototypes = prototypes.to(device=projected_features.device)
         
         # Compute loss with Monte Carlo expectation over GP prototypes (if enabled)
-        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples_train', 1) or 1)
         loss = self.compute_loss(projected_features, labels, num_samples=num_samples)
 
         # Compute logits via the model's centralized path for metrics
@@ -737,7 +738,7 @@ class Trainer(BaseTrainer):
             # Test features are CLIP visual features
             test_projected = test_features
             # Quick test metric: use the same unified path
-            num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
+            num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples_test', 1) or 1)
             test_proj = self.model.visual_proj(test_features.to(self.model.visual_proj.weight.dtype))
             test_prototypes = model.get_prototypes(num_samples=num_samples, visual_embeddings=test_proj)
             if test_projected.dtype != test_prototypes.dtype:

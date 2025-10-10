@@ -23,17 +23,18 @@ class AdapterConfig:
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
-    gp_lr: float = 0.1  # Learning rate for GP parameters
+    gp_lr: float = 0.01  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
-    gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
+    gp_num_mc_samples_train: int = 10  # Number of Monte Carlo samples for training
+    gp_num_mc_samples_test: int = 10  # Number of Monte Carlo samples for testing
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
 
-    benchmark_method: str = "none"  # one of: "none", "coop", "cocoop"
+    benchmark_method: str = "none"  # one of: "none", "coop", "cocoop", "tipa"
 
     # Prompt-learning (CoOp / CoCoOp)
-    n_ctx: int = 16            # number of learnable context tokens
-    ctx_init: str = ""         # optional initialization phrase (overrides n_ctx)
+    n_ctx: int = 16 # number of learnable context tokens
+    ctx_init: str = "" # optional initialization phrase (overrides n_ctx)
 
 
 @dataclass
@@ -267,12 +268,15 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--gp-lr", type=float, default=None, help="GP learning rate")
     parser.add_argument("--gp-beta", type=float, default=None, help="GP KL weight")
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
+    parser.add_argument("--gp-num-mc-samples-train", type=int, default=None, help="Number of Monte Carlo samples for training")
+    parser.add_argument("--gp-num-mc-samples-test", type=int, default=None, help="Number of Monte Carlo samples for testing")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
     
-    # CoOp / CoCoOp
     parser.add_argument("--benchmark-method", type=str, default=None, choices=["none", "coop", "cocoop", "tipa"], help="Benchmark method")
+    
+    # CoOp / CoCoOp
     parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
     parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
     
@@ -348,6 +352,10 @@ def parse_args_to_config() -> Config:
         config.adapter.gp_beta = args.gp_beta
     if args.num_templates is not None:
         config.adapter.num_templates = args.num_templates
+    if args.gp_num_mc_samples_train is not None:
+        config.adapter.gp_num_mc_samples_train = args.gp_num_mc_samples_train
+    if args.gp_num_mc_samples_test is not None:
+        config.adapter.gp_num_mc_samples_test = args.gp_num_mc_samples_test
     if args.train_template_weights:
         config.adapter.train_template_weights = True
     if args.prefit_on_full_set:
