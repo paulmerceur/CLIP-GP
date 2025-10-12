@@ -354,6 +354,11 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
     return weights.to(device=E.device)
 
 
+
+
+
+
+
 class CustomCLIP(nn.Module):
     """Custom CLIP model with adapter and optional GP weighting."""
     
@@ -407,7 +412,8 @@ class CustomCLIP(nn.Module):
 
         # Create GP weighter if needed
         self.gp_weighter = None
-        self.gp_num_mc_samples = int(getattr(config.adapter, 'gp_num_mc_samples', 1) or 1)
+        self.gp_num_mc_samples_train = int(getattr(config.adapter, 'gp_num_mc_samples_train', 1) or 1)
+        self.gp_num_mc_samples_eval = int(getattr(config.adapter, 'gp_num_mc_samples_eval', 1) or 1)
         if use_gp:
             self.gp_weighter = GaussianProcessTemplateWeighter(
                 text_embeddings=self.text_embeddings,
@@ -489,7 +495,7 @@ class CustomCLIP(nn.Module):
             prototypes = prototypes.to(target_device)
         return prototypes
     
-    def forward_features(self, features: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, features: torch.Tensor, num_samples: int | None = None) -> torch.Tensor:
         """Compute logits from precomputed visual features (CLAP-style forward_lp).
 
         This normalizes features, obtains (possibly GP-sampled) prototypes,
@@ -524,7 +530,12 @@ class CustomCLIP(nn.Module):
             prototypes = text_feats
         else:
             # For baseline or GP: only sample multiple times when GP is enabled
-            num_samples = self.gp_num_mc_samples
+            if num_samples is None: 
+                num_samples = self.gp_num_mc_samples_train if self.training else self.gp_num_mc_samples_eval
+            # --- DEBUG ---
+            # print(f"[DEBUG] forward_features | mode={'train' if self.training else 'eval'} | num_samples={num_samples}")
+            # -------------
+
             prototypes = self.get_prototypes(num_samples=num_samples, visual_embeddings=projected)
         
         if prototypes.device != features_norm.device:
@@ -572,6 +583,14 @@ class CustomCLIP(nn.Module):
         if return_features:
             return logits, features
         return logits
+
+
+
+
+
+
+
+
 
 
 @TRAINER_REGISTRY.register("Trainer")
@@ -640,7 +659,7 @@ class Trainer(BaseTrainer):
                     {
                         'params': gp_params,
                         'lr': float(config.adapter.gp_lr),
-                        'weight_decay': 0.0
+                        'weight_decay': float(config.optim.weight_decay)
                     },
                 ]
 
@@ -679,9 +698,14 @@ class Trainer(BaseTrainer):
             labels = labels.detach().clone().to(self.device)
         projected_features = features
         
+        # Samples
+        is_train = self.model.training
+        num_samples = int(getattr(self.config.adapter,
+                                'gp_num_mc_samples_train' if is_train else 'gp_num_mc_samples_eval', 1) or 1)
+        
         # Get prototypes (for diagnostics only)
         proj_features = self.model.visual_proj(projected_features.to(self.model.visual_proj.weight.dtype))
-        prototypes = model.get_prototypes(num_samples=int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1), visual_embeddings=proj_features)
+        prototypes = model.get_prototypes(num_samples=num_samples, visual_embeddings=proj_features)
         # Track prototype norm stats (useful to spot collapse/explosions)
         try:
             with torch.no_grad():
@@ -701,11 +725,10 @@ class Trainer(BaseTrainer):
             prototypes = prototypes.to(device=projected_features.device)
         
         # Compute loss with Monte Carlo expectation over GP prototypes (if enabled)
-        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
         loss = self.compute_loss(projected_features, labels, num_samples=num_samples)
 
         # Compute logits via the model's centralized path for metrics
-        logits = model.forward_features(projected_features)
+        logits = model.forward_features(projected_features, num_samples=num_samples)
 
         # Backward pass
         self._backward_and_update(loss)
@@ -714,18 +737,21 @@ class Trainer(BaseTrainer):
         with torch.no_grad():
             # Training accuracy
             acc_train = compute_accuracy(logits, labels)[0]
+            was_training = self.model.training
+            self.model.eval()
+            num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples_eval', 1) or 1)
             # Test accuracy (using stored test features)
             test_features = self.features_test.to(self.device)
             # Test features are CLIP visual features
             test_projected = test_features
             # Quick test metric: use the same unified path
-            num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples', 1) or 1)
             test_proj = self.model.visual_proj(test_features.to(self.model.visual_proj.weight.dtype))
             test_prototypes = model.get_prototypes(num_samples=num_samples, visual_embeddings=test_proj)
             if test_projected.dtype != test_prototypes.dtype:
                 test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
             test_logits = model.forward_features(test_projected)
             acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0]
+            self.model.train(was_training)
         return {
             "loss": loss.item(),
             "acc_train": acc_train,
@@ -1225,8 +1251,12 @@ class Trainer(BaseTrainer):
     def _compute_final_metrics(self) -> dict:
         """Compute final test metrics using stored test features and current model."""
         model = cast(CustomCLIP, self.model)
+        was_training = model.training
+        model.eval()
+
+        num_samples = int(getattr(self.config.adapter, 'gp_num_mc_samples_eval', 1) or 1)
         test_features = self.features_test.to(self.device)
-        test_logits = model.forward_features(test_features)
+        test_logits = model.forward_features(test_features, num_samples=num_samples)
         labels = self.labels_test.to(self.device)
         acc = compute_accuracy(test_logits, labels)[0]
         try:

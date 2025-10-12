@@ -24,14 +24,17 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # Handle both old cfg format and new config format
         def get_config_value(key, default):
             # New config format - convert key to lowercase format
-            if key == 'GP_NUM_MC_SAMPLES':
-                return getattr(cfg.adapter, 'gp_num_mc_samples', default)
+            if key == 'GP_NUM_MC_SAMPLES_TRAIN':
+                return getattr(cfg.adapter, 'gp_num_mc_samples_train', default)
+            elif key == 'GP_NUM_MC_SAMPLES_EVAL':
+                return getattr(cfg.adapter, 'gp_num_mc_samples_eval', default)
             elif key == 'GP_KERNEL_TYPE':
                 return getattr(cfg.adapter, 'gp_kernel_type', default)
             else:
                 return default
-        
-        self.num_mc_samples = get_config_value('GP_NUM_MC_SAMPLES', 5)
+
+        self.num_mc_samples_train = get_config_value('GP_NUM_MC_SAMPLES_TRAIN', 5)
+        self.num_mc_samples_eval = get_config_value('GP_NUM_MC_SAMPLES_EVAL', 80)
 
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 

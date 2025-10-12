@@ -25,10 +25,11 @@ class AdapterConfig:
     use_gp: bool = False  # Whether to use GP weighting for templates
     gp_lr: float = 0.1  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
-    gp_num_mc_samples: int = 10  # Number of Monte Carlo samples
+    gp_num_mc_samples_train: int = 20  # Number of Monte Carlo samples
+    gp_num_mc_samples_eval: int = 80  # Number of Monte Carlo samples during evaluation
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
-    learn_token_lambda: float = 1e-2  # Weight for l2 regularization on visual learnable token inside the gp
+    learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
 
     benchmark_method: str = "none"  # one of: "none", "coop", "cocoop"
 
