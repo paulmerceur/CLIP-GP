@@ -20,18 +20,6 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         K, M, D = self.num_classes, self.num_templates, self.dim
         with torch.no_grad():
             cls_mean = text_embeddings.mean(dim=1, keepdim=True)  # [K,1,D]
-        
-        # Handle both old cfg format and new config format
-        def get_config_value(key, default):
-            # New config format - convert key to lowercase format
-            if key == 'GP_NUM_MC_SAMPLES':
-                return getattr(cfg.adapter, 'gp_num_mc_samples', default)
-            elif key == 'GP_KERNEL_TYPE':
-                return getattr(cfg.adapter, 'gp_kernel_type', default)
-            else:
-                return default
-        
-        self.num_mc_samples = get_config_value('GP_NUM_MC_SAMPLES', 5)
 
         batch_shape = torch.Size([self.num_classes])  # one GP per class
 
@@ -73,7 +61,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             # self.mean_module.mean_param.copy_(f0.to(torch.float32))
         self.mean_module = ResidualMeanWithBias(f0_logits=f0.to(torch.float32))
 
-        kernel_type = get_config_value('GP_KERNEL_TYPE', 'rbf').lower()
+        kernel_type = getattr(cfg.adapter, 'gp_kernel_type', 'rbf').lower()
         if kernel_type == "rbf":
             with torch.no_grad():
                 flat_emb = F.normalize(text_embeddings.reshape(-1, self.dim), p=2, dim=-1)  # [(K*M), D]

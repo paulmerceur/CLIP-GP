@@ -736,6 +736,7 @@ class Trainer(BaseTrainer):
         
         # Compute accuracies for logging
         with torch.no_grad():
+            self.model.eval()
             # Training accuracy
             acc_train = compute_accuracy(logits, labels)[0]
             # Test accuracy (using stored test features)
@@ -750,6 +751,7 @@ class Trainer(BaseTrainer):
                 test_prototypes = test_prototypes.to(dtype=test_projected.dtype)
             test_logits = model.forward_features(test_projected)
             acc_test = compute_accuracy(test_logits, self.labels_test.to(self.device))[0]
+            self.model.train()
         return {
             "loss": loss.item(),
             "acc_train": acc_train,

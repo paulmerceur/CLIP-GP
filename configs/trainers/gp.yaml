@@ -17,7 +17,7 @@ template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  {}
+  TRAINER.ADAPTER.GP_LR: [0.1, 0.01, 0.001, 0.0001]
 
 TRAINER_NAME: Adapter
 
@@ -31,4 +31,4 @@ TRAINER:
     GP_KERNEL_TYPE: rbf
     GP_LR: 0.01
     GP_BETA: 0.001
-    GP_USE_ELBO: False
+    GP_USE_ELBO: True

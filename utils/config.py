@@ -29,6 +29,7 @@ class AdapterConfig:
     gp_num_mc_samples_test: int = 10  # Number of Monte Carlo samples for testing
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
+    learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
 
     benchmark_method: str = "none"  # one of: "none", "coop", "cocoop", "tipa"
 
@@ -272,6 +273,13 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--optimizer", type=str, default=None, 
                        choices=["sgd", "adam", "adamw"], help="Optimizer")
     
+    # Adapter arguments
+    parser.add_argument("--l2-lambda", type=float, default=None, help="L2 regularization weight")
+    parser.add_argument("--template-init-method", type=str, default=None, help="Template initialization method")
+    parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
+    parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
+    parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
+
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
     parser.add_argument("--gp-lr", type=float, default=None, help="GP learning rate")
@@ -279,9 +287,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--gp-num-mc-samples-train", type=int, default=None, help="Number of Monte Carlo samples for training")
     parser.add_argument("--gp-num-mc-samples-test", type=int, default=None, help="Number of Monte Carlo samples for testing")
-    parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
-    parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
-    parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
+    parser.add_argument("--learn-token-lambda", type=float, default=None, help="Weight for l2 regularization on visual learnable token inside the gp")
     
     parser.add_argument("--benchmark-method", type=str, default=None, choices=["none", "coop", "cocoop", "tipa"], help="Benchmark method")
     
@@ -365,6 +371,8 @@ def parse_args_to_config() -> Config:
         config.adapter.gp_num_mc_samples_train = args.gp_num_mc_samples_train
     if args.gp_num_mc_samples_test is not None:
         config.adapter.gp_num_mc_samples_test = args.gp_num_mc_samples_test
+    if args.learn_token_lambda is not None:
+        config.adapter.learn_token_lambda = args.learn_token_lambda
     if args.train_template_weights:
         config.adapter.train_template_weights = True
     if args.prefit_on_full_set:

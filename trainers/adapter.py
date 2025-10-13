@@ -8,13 +8,10 @@ from torch.utils.data import DataLoader
 import gpytorch
 import numpy as np
 import math
-import json
-from pathlib import Path
 import copy
 
 from utils.trainer import BaseTrainer
-from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece
-from utils.config import _config_to_dict
+from utils.metrics import compute_accuracy, AverageMeter
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 from utils.dataset_base import build_dataset, TorchDatasetWrapper
@@ -51,12 +48,12 @@ class TextEncoder(nn.Module):
 def load_clip(config, device):
     backbone_name = config.model.backbone_name
     url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
+    model_ = clip._download(url)
     try:
-        jit_model = torch.jit.load(model_path).eval()
+        jit_model = torch.jit.load(model_).eval()
         state_dict = jit_model.state_dict()
     except RuntimeError:
-        state_dict = torch.load(model_path)
+        state_dict = torch.load(model_)
     model = clip.build_model(state_dict)
     return model.to(device, dtype=torch.float32)
 
@@ -289,7 +286,7 @@ class Trainer(BaseTrainer):
                     {
                         'params': gp_params,
                         'lr': float(config.adapter.gp_lr),
-                        'weight_decay': 0.0
+                        'weight_decay': float(config.optim.weight_decay)
                     },
                 ]
                 self.optim = build_optimizer_from_param_groups(param_groups, config.optim)
