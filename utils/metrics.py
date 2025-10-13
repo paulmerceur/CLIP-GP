@@ -58,13 +58,13 @@ def compute_macro_f1(logits: torch.Tensor, labels: torch.Tensor) -> float:
 
 def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -> float:
     """
-    Expected Calibration Error (ECE).
+    Expected Calibration Error (ECE), returned as a percentage (0-100).
     Args:
         logits: [N, C] model outputs (unnormalized)
         labels: [N] true labels
         n_bins: number of bins
     Returns:
-        ECE value (float, 0-1)
+        ECE value (float, 0-100)
     """
     import torch.nn.functional as F
     device = logits.device
@@ -80,21 +80,21 @@ def compute_ece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) ->
             accuracy_in_bin = acc[in_bin].mean()
             avg_conf_in_bin = conf[in_bin].mean()
             ece += torch.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
-    return ece.item()
+    return float(ece.item() * 100)
 
 
 def compute_aece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -> float:
     """
-    Adaptive Expected Calibration Error (AECE).
+    Adaptive Expected Calibration Error (AECE), returned as a percentage (0-100).
     Bins are formed by equal-frequency quantiles of confidence (i.e., each bin
-    contains approximately the same number of samples). Returns a value in [0, 1].
+    contains approximately the same number of samples). Returns a value in [0, 100].
 
     Args:
         logits: [N, C] model outputs (unnormalized)
         labels: [N] true labels
         n_bins: number of adaptive bins
     Returns:
-        AECE value (float, 0-1)
+        AECE value (float, 0-100)
     """
     import torch.nn.functional as F
     if logits.numel() == 0:
@@ -132,7 +132,7 @@ def compute_aece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -
         accuracy_in_bin = bin_acc.mean()
         aece += torch.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
 
-    return float(aece.item())
+    return float(aece.item() * 100)
 
 
 class AverageMeter:

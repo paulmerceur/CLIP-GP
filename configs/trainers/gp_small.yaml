@@ -1,35 +1,34 @@
-name: gp_small
+name: test
 BASE_CONFIG: configs/trainers/default.yaml
-# datasets: str or list
-datasets: caltech101
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
-# Seeds and shots
-seeds: [1]
-shots: [1, 4, 8, 16]
-
-# Optional dataset root override (falls back to defaults in utils.config)
+# Dataset root
 root: /mnt/features/VDATA/
 
-# Where to store results for this experiment
-output_root: output
+# Datasets
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, eurosat, ucf101]
 
-# Grid of hyperparameters (keys follow existing config override notation)
-# You can set singletons here as lists of one value.
-grid:
-  TRAINER.ADAPTER.TEMPLATE_INIT_METHOD: [uniform, val_weighted, top3, minmax]
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16]
 
-# Output directory template; placeholders available:
-# {experiment}, {sweep} (alias), {dataset}, {shots}, {seed}, {sig}
-# {sig} is a compact signature of all grid parameters.
+# Output directory template
 template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
+grid:
+  {}
+
+TRAINER_NAME: Adapter
 
 TRAINER:
   ADAPTER:
+    FREEZE_VISUAL_PROJ: False
+    NUM_TEMPLATES: 7
+    TEMPLATE_INIT_METHOD: val_weighted
     # GP-specific overrides beyond default baseline
     USE_GP: True
     GP_KERNEL_TYPE: rbf
-    GP_NUM_MC_SAMPLES: 10
     GP_LR: 0.01
     GP_BETA: 0.001
-
+    GP_USE_ELBO: False

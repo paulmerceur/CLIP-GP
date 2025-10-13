@@ -32,8 +32,8 @@ import datasets.imagenet_r
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# Import trainer to register it
-import trainers.adapters
+# Import trainers package to register all adapter trainers
+import trainers
 
 
 def print_args(config):

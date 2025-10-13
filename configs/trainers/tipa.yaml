@@ -1,24 +1,25 @@
-name: TipA
+name: test
 BASE_CONFIG: configs/trainers/default.yaml
 
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, ucf101, eurosat]
-
-# Seeds and shots
-seeds: [1, 2, 3]
-shots: [1, 2, 4, 8, 16]
-
-# Optional dataset root override (falls back to defaults in utils.config)
+# Dataset root
 root: /mnt/features/VDATA/
 
-# Where to store results for this experiment
-output_root: output
+# Datasets
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, eurosat, ucf101]
+
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16]
 
 # Output directory template
 template: "{experiment}/{dataset}/tipa_{shots}shots_{sig}/seed{seed}"
 
+# Hyperparameters grid
 grid:
-  OPTIM.LR: [0.01, 0.001]
+  {}
+
+TRAINER_NAME: AdapterTipAF
 
 TRAINER:
   DATALOADER:
@@ -31,5 +32,11 @@ TRAINER:
     USE_GP: False
     TRAIN_TEMPLATE_WEIGHTS: False
     FREEZE_VISUAL_PROJ: True
+    # Tip-Adapter-F defaults (paper-aligned)
+    TIPAF_INIT_ALPHA: 20.0
+    TIPAF_INIT_BETA: 2.0
+    TIPAF_LR: 0.001
+    TIPAF_TRAIN_EPOCH: 20
+    TIPAF_EPS: 0.0001
 
 

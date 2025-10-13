@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union
 import numpy as np
 from tqdm import tqdm
+import json
 
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
 
@@ -199,9 +200,10 @@ class BaseTrainer:
             self.start_epoch = self.load_model(self.config.resume)
         
         # Initialize TensorBoard
-        writer_dir = Path(self.output_dir) / "tensorboard"
-        writer_dir.mkdir(parents=True, exist_ok=True)
-        self.init_writer(str(writer_dir))
+        if getattr(self.config.train, 'enable_tensorboard', True):
+            writer_dir = Path(self.output_dir) / "tensorboard"
+            writer_dir.mkdir(parents=True, exist_ok=True)
+            self.init_writer(str(writer_dir))
         
         # Record start time
         self.time_start = time.time()
@@ -241,7 +243,7 @@ class BaseTrainer:
         )
         
         # Save checkpoint if needed
-        if meet_checkpoint_freq or last_epoch:
+        if (meet_checkpoint_freq or last_epoch) and getattr(self.config.train, 'enable_adapter_checkpoints', True):
             self.save_model(self.epoch, self.output_dir)
         
         # Update learning rate
@@ -320,6 +322,78 @@ class BaseTrainer:
             self.write_scalar(tag, v, self.epoch)
         
         return accuracy
+
+    @torch.no_grad()
+    def _compute_final_metrics(self) -> Dict[str, float]:
+        """Compute final test metrics in a unified way for metrics.json."""
+        self.set_model_mode("eval")
+        data_loader = self.test_loader
+        all_outputs = []
+        all_labels = []
+        for batch_idx, batch in enumerate(data_loader):
+            input_data, labels = self.parse_batch_test(batch)
+            outputs = self.model_inference(input_data)
+            all_outputs.append(outputs.cpu())
+            all_labels.append(labels.cpu())
+        all_outputs = torch.cat(all_outputs, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        acc = compute_accuracy(all_outputs, all_labels)[0]
+        try:
+            ece_val = compute_ece(all_outputs, all_labels)
+        except Exception:
+            ece_val = float('nan')
+        try:
+            aece_val = compute_aece(all_outputs, all_labels)
+        except Exception:
+            aece_val = float('nan')
+        return {
+            "top1_acc": float(acc),
+            "ece": float(ece_val),
+            "aece": float(aece_val),
+        }
+
+    def _write_run_summary_json(self, metrics: Dict[str, float], start_time: float) -> None:
+        """Write a JSON summary for this run under output_dir/metrics.json."""
+        out_dir = Path(self.output_dir)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        # Infer method for clarity
+        try:
+            tname = getattr(self.config, 'trainer_name', '')
+            if tname == 'AdapterTipAF':
+                method = 'tipaf'
+            elif tname == 'AdapterCoOp':
+                method = 'coop'
+            elif tname == 'AdapterCoCoOp':
+                method = 'cocoop'
+            else:
+                method = 'gp' if bool(getattr(self.config.adapter, 'use_gp', False)) else 'baseline'
+        except Exception:
+            method = 'baseline'
+        # Prepare payload
+        payload = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "dataset": self.config.dataset.name,
+            "shots": int(self.config.dataset.num_shots),
+            "seed": int(self.config.seed),
+            "method": method,
+            "backbone": self.config.model.backbone_name,
+            "metrics": metrics,
+            "config": self._config_to_dict_for_json(),
+            "output_dir": str(out_dir),
+            "train_time_s": float(max(0.0, time.time() - start_time)),
+        }
+        with (out_dir / "metrics.json").open("w") as f:
+            json.dump(payload, f, indent=2)
+
+    def _config_to_dict_for_json(self) -> dict:
+        try:
+            from utils.config import _config_to_dict
+            return _config_to_dict(self.config)
+        except Exception:
+            return {}
     
     def train(self):
         """Main training loop"""

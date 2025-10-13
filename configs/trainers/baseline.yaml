@@ -1,19 +1,27 @@
-name: gp_prefit
+name: test
 BASE_CONFIG: configs/trainers/default.yaml
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, ucf101, eurosat]
 
-seeds: [1, 2, 3]
-shots: [1, 4, 8, 16]
-
+# Dataset root
 root: /mnt/features/VDATA/
 
-# No grid by default; add overrides here if needed
+# Datasets
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, eurosat, ucf101]
+
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16]
+
+# Output directory template
+template: "{experiment}/{dataset}/baseline_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
 grid: {}
 
-template: "{experiment}/{dataset}/baseline_{shots}shots_{sig}/seed{seed}"
+TRAINER_NAME: Adapter
 
 TRAINER:
   ADAPTER:
     USE_GP: False
+    FREEZE_VISUAL_PROJ: False
 

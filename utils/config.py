@@ -36,6 +36,13 @@ class AdapterConfig:
     n_ctx: int = 16 # number of learnable context tokens
     ctx_init: str = "" # optional initialization phrase (overrides n_ctx)
 
+    # Tip-Adapter-F defaults (paper-aligned)
+    tipaf_init_alpha: float = 20.0
+    tipaf_init_beta: float = 2.0
+    tipaf_lr: float = 1e-3
+    tipaf_train_epoch: int = 20
+    tipaf_eps: float = 1e-4
+
 
 @dataclass
 class ModelConfig:
@@ -96,13 +103,15 @@ class TrainConfig:
     print_freq: int = 5  # Print frequency
     eval_freq: int = 1  # Evaluation frequency
     checkpoint_freq: int = 0  # Checkpoint saving frequency (0 = disabled)
+    enable_tensorboard: bool = False  # Create tensorboard subfolder and write scalars
+    enable_adapter_checkpoints: bool = False  # Save adapter checkpoints to subfolder
 
 
 @dataclass
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Trainer"
+    trainer_name: str = "Adapter"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)

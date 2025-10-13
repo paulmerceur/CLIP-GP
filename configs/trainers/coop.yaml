@@ -1,24 +1,30 @@
-name: CoOp
+name: test
 BASE_CONFIG: configs/trainers/default.yaml
 
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
 #datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots
-seeds: [1, 2, 3]
+seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16]
 
-# Optional dataset root override (falls back to defaults in utils.config)
-root: /mnt/features/VDATA/
-
-# Where to store results for this experiment
-output_root: output
+# Output directory template
+template: "{experiment}/{dataset}/coop_{shots}shots_{sig}/seed{seed}"
 
 # Grid of hyperparameters (keys follow existing config override notation)
 grid:
   {}
-# Output directory template
-template: "{experiment}/{dataset}/coop_{shots}shots_{sig}/seed{seed}"
+
+TRAINER_NAME: AdapterCoOp
+
+OPTIM:
+  NAME: sgd
+  LR: 0.002
+  MAX_EPOCH: 100
 
 TRAINER:
   ADAPTER:

@@ -1,5 +1,10 @@
-name: gp_prefit
+name: test
 BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
 # Single dataset or a list via "datasets"
 datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
 
@@ -7,23 +12,21 @@ datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf10
 seeds: [1, 2, 3]
 shots: [1, 4, 8, 16]
 
-# Optional dataset root override
-root: /mnt/features/VDATA/
+# Output directory template
+template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
 
 # Grid: enable GP joint training for prefit schedule
 grid:
-  TRAINER.ADAPTER.GP_INIT_METHOD: [val_weighted, minmax]
-  TRAINER.ADAPTER.GP_USE_ELBO: [true, false]
+  {}
 
-
-# Output layout
-template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
+TRAINER_NAME: Adapter
 
 TRAINER:
   ADAPTER:
     USE_GP: True
     GP_KERNEL_TYPE: rbf
-    GP_NUM_MC_SAMPLES: 10
+    GP_NUM_MC_SAMPLES_TRAIN: 10
+    GP_NUM_MC_SAMPLES_TEST: 10
     GP_LR: 0.01
     GP_BETA: 0.001
 

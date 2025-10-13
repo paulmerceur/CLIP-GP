@@ -32,3 +32,6 @@ TRAINER:
     NUM_TEMPLATES: 7
     L2_LAMBDA: 0.1
 
+# Default trainer selection
+TRAINER_NAME: Adapter
+
