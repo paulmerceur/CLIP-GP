@@ -354,9 +354,9 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
     return weights.to(device=E.device)
 
 
-
-
-
+######################################### 
+############### CustomCLIP ##############
+#########################################
 
 
 class CustomCLIP(nn.Module):
@@ -541,11 +541,22 @@ class CustomCLIP(nn.Module):
         if prototypes.device != features_norm.device:
             prototypes = prototypes.to(device=features_norm.device)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
-
+        
+        alpha = 1e-2
+        eps = 1e-12
         # Base logits (zero-shot / CoOp / GP-average)
         if prototypes.dim() == 3:
             logits_s = scale * torch.einsum("bd,skd->bsk", features_norm, prototypes_norm)
             base_logits = logits_s.mean(dim=1)
+            if not self.training:
+                var_k = logits_s.std(dim=1, unbiased=False)
+
+                var_k_std = (var_k - var_k.mean(1, keepdim=True)) / (var_k.std(1, keepdim=True) + eps)
+                var_k_std = torch.clamp(var_k_std, min=0.)
+                tau = 1. + alpha * var_k_std
+
+                mean_logits = base_logits / tau
+                return mean_logits
         else:
             base_logits = scale * (features_norm @ prototypes_norm.t())
 
@@ -585,12 +596,9 @@ class CustomCLIP(nn.Module):
         return logits
 
 
-
-
-
-
-
-
+######################################### 
+############### Trainer #################
+#########################################
 
 
 @TRAINER_REGISTRY.register("Trainer")
