@@ -427,6 +427,8 @@ class BaseTrainer:
             tname = getattr(self.config, 'trainer_name', '')
             if tname == 'Adapter-TipA-F':
                 method = 'tipaf'
+            elif tname == 'Adapter-TipA':
+                method = 'tipa'
             elif tname == 'Adapter-CoOp':
                 method = 'coop'
             elif tname == 'Adapter-CoCoOp':

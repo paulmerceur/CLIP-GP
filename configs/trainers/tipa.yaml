@@ -1,0 +1,31 @@
+name: test
+BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
+# datasets: [caltech101, oxford_pets, oxford_flowers, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, eurosat, ucf101]
+
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16]
+
+# Output directory template
+template: "{experiment}/{dataset}/tipa_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
+grid:
+  {}
+
+TRAINER_NAME: Adapter-TipA
+
+TRAINER:
+  ADAPTER:
+    # Tip-Adapter-F defaults
+    TIPAF_INIT_ALPHA: 20.0
+    TIPAF_INIT_BETA: 2.0
+    TIPAF_EPS: 0.0001
+
+
