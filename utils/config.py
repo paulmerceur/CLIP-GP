@@ -31,17 +31,14 @@ class AdapterConfig:
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
 
-    benchmark_method: str = "none"  # one of: "none", "coop", "cocoop", "tipa"
-
     # Prompt-learning (CoOp / CoCoOp)
     n_ctx: int = 16 # number of learnable context tokens
     ctx_init: str = "" # optional initialization phrase (overrides n_ctx)
+    csc: bool = False  # Class-Specific Context when no ctx_init is provided
 
     # Tip-Adapter-F defaults (paper-aligned)
     tipaf_init_alpha: float = 20.0
     tipaf_init_beta: float = 2.0
-    tipaf_lr: float = 1e-3
-    tipaf_train_epoch: int = 20
     tipaf_eps: float = 1e-4
 
 
@@ -112,7 +109,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-CoCoOp", "Adapter-TipA", "Adapter-TipA-F"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -289,11 +286,10 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--gp-num-mc-samples-test", type=int, default=None, help="Number of Monte Carlo samples for testing")
     parser.add_argument("--learn-token-lambda", type=float, default=None, help="Weight for l2 regularization on visual learnable token inside the gp")
     
-    parser.add_argument("--benchmark-method", type=str, default=None, choices=["none", "coop", "cocoop", "tipa"], help="Benchmark method")
-    
     # CoOp / CoCoOp
     parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
     parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
+    parser.add_argument("--csc", action="store_true", help="Use class-specific context for prompt learning")
     
     # Environment arguments
     parser.add_argument("--output-dir", type=str, default=None,
@@ -379,12 +375,12 @@ def parse_args_to_config() -> Config:
         config.adapter.prefit_on_full_set = True
     if args.freeze_visual_proj:
         config.adapter.freeze_visual_proj = True
-    if args.benchmark_method is not None:
-        config.adapter.benchmark_method = args.benchmark_method
     if args.n_ctx is not None:
         config.adapter.n_ctx = args.n_ctx
     if args.ctx_init is not None:
         config.adapter.ctx_init = args.ctx_init
+    if args.csc:
+        config.adapter.csc = True
     if args.output_dir is not None:
         config.output_dir = args.output_dir
     if args.seed is not None:

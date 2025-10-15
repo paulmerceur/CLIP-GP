@@ -9,12 +9,75 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Optional
 import numpy as np
 from tqdm import tqdm
 import json
 
+from clip import clip
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
+
+
+class TextEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.transformer = clip_model.transformer
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
+
+    def forward(self, prompts, tokenized_prompts):
+        x = prompts + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x).type(self.dtype)
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        return x
+
+
+def load_clip(config, device):
+    backbone_name = config.model.backbone_name
+    url = clip._MODELS[backbone_name]
+    model_path = clip._download(url)
+    try:
+        jit_model = torch.jit.load(model_path).eval()
+        state_dict = jit_model.state_dict()
+    except RuntimeError:
+        state_dict = torch.load(model_path)
+    model = clip.build_model(state_dict)
+    return model.to(device, dtype=torch.float32)
+
+
+def _get_templates(config):
+    templates = ["a photo of a {}."]
+    try:
+        from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
+        if config.adapter.num_templates > 1:
+            templates += IMAGENET_TEMPLATES_SELECT[: config.adapter.num_templates - 1]
+        if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
+            templates += IMAGENET_TEMPLATES[: config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
+    except Exception:
+        pass
+    return templates
+
+
+@torch.no_grad()
+def _get_clip_weights(classnames, clip_model, templates):
+    device = next(clip_model.parameters()).device
+    dtype = next(clip_model.parameters()).dtype
+    zeroshot_weights = []
+    for classname in classnames:
+        texts = [t.format(classname) for t in templates]
+        texts = clip.tokenize(texts).to(device)
+        class_embeddings = clip_model.encode_text(texts)
+        class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+        class_embedding = class_embeddings.mean(dim=0)
+        class_embedding = class_embedding / class_embedding.norm()
+        zeroshot_weights.append(class_embedding)
+    zeroshot_weights = torch.stack(zeroshot_weights, dim=1)
+    return zeroshot_weights.to(dtype=dtype)
 
 
 class BaseTrainer:
@@ -362,11 +425,11 @@ class BaseTrainer:
         # Infer method for clarity
         try:
             tname = getattr(self.config, 'trainer_name', '')
-            if tname == 'AdapterTipAF':
+            if tname == 'Adapter-TipA-F':
                 method = 'tipaf'
-            elif tname == 'AdapterCoOp':
+            elif tname == 'Adapter-CoOp':
                 method = 'coop'
-            elif tname == 'AdapterCoCoOp':
+            elif tname == 'Adapter-CoCoOp':
                 method = 'cocoop'
             else:
                 method = 'gp' if bool(getattr(self.config.adapter, 'use_gp', False)) else 'baseline'

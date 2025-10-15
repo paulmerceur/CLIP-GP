@@ -1,79 +1,14 @@
-from typing import cast
 import time
 import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from utils.trainer import BaseTrainer
+from clip import clip
+from utils.trainer import BaseTrainer, TextEncoder, load_clip, _get_templates, _get_clip_weights
 from utils.metrics import compute_accuracy, AverageMeter
 from utils.optimization import build_optimizer, build_lr_scheduler
 from utils.trainer_registry import TRAINER_REGISTRY
-from utils.config import _config_to_dict
-from utils.metrics import compute_ece, compute_aece
-import json
-import datetime
-from pathlib import Path
-
-from clip import clip
-
-
-def _get_templates(config):
-    templates = ["a photo of a {}."]
-    from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
-    if config.adapter.num_templates > 1:
-        templates += IMAGENET_TEMPLATES_SELECT[:config.adapter.num_templates - 1]
-    if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
-        templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
-    return templates
-
-
-@torch.no_grad()
-def _get_clip_weights(classnames, clip_model, templates):
-    device = next(clip_model.parameters()).device
-    zeroshot_weights = []
-    for classname in classnames:
-        texts = [t.format(classname) for t in templates]
-        texts = clip.tokenize(texts).to(device)
-        class_embeddings = clip_model.encode_text(texts)
-        class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-        class_embedding = class_embeddings.mean(dim=0)
-        class_embedding = class_embedding / class_embedding.norm()
-        zeroshot_weights.append(class_embedding)
-    zeroshot_weights = torch.stack(zeroshot_weights, dim=1)
-    return zeroshot_weights
-
-
-class TextEncoder(nn.Module):
-    def __init__(self, clip_model):
-        super().__init__()
-        self.transformer = clip_model.transformer
-        self.positional_embedding = clip_model.positional_embedding
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
-
-    def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)
-        x = self.ln_final(x).type(self.dtype)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        return x
-
-
-def load_clip(config, device):
-    backbone_name = config.model.backbone_name
-    url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
-    try:
-        jit_model = torch.jit.load(model_path).eval()
-        state_dict = jit_model.state_dict()
-    except RuntimeError:
-        state_dict = torch.load(model_path)
-    model = clip.build_model(state_dict)
-    return model.to(device, dtype=torch.float32)
 
 
 class PromptLearnerCoOp(nn.Module):
@@ -83,6 +18,7 @@ class PromptLearnerCoOp(nn.Module):
         dtype = next(clip_model.parameters()).dtype
         n_ctx = int(getattr(config.adapter, 'n_ctx', 16))
         ctx_init = str(getattr(config.adapter, 'ctx_init', '') or '')
+        use_csc = bool(getattr(config.adapter, 'csc', False))
         ctx_dim = int(clip_model.ln_final.weight.shape[0])
         if len(ctx_init) > 0:
             ctx_init_clean = ctx_init.replace('_', ' ').strip()
@@ -94,7 +30,12 @@ class PromptLearnerCoOp(nn.Module):
             ctx_vectors = embedding[1:1 + n_ctx, :].detach().clone()
             prompt_prefix = ctx_init_clean
         else:
-            ctx_vectors = torch.empty(n_ctx, ctx_dim, device=device, dtype=dtype)
+            if use_csc:
+                # Class-specific contexts: one set of n_ctx tokens per class
+                ctx_vectors = torch.empty(len(classnames), n_ctx, ctx_dim, device=device, dtype=dtype)
+            else:
+                # Generic context shared across classes
+                ctx_vectors = torch.empty(n_ctx, ctx_dim, device=device, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = ' '.join(['X'] * n_ctx)
         classnames = [name for name in classnames]
@@ -112,7 +53,12 @@ class PromptLearnerCoOp(nn.Module):
 
     def build_prompts(self) -> tuple[torch.Tensor, torch.Tensor]:
         K = int(self.num_classes)
-        ctx = self.ctx.unsqueeze(0).expand(K, -1, -1)
+        if self.ctx.dim() == 2:
+            # Generic context shared by all classes
+            ctx = self.ctx.unsqueeze(0).expand(K, -1, -1)
+        else:
+            # Class-specific contexts already have per-class dimension
+            ctx = self.ctx
         prompts = torch.cat([self.token_prefix, ctx, self.token_suffix], dim=1)
         return prompts, self.tokenized_prompts
 
@@ -137,7 +83,7 @@ class CustomCLIP(nn.Module):
         return logits
 
 
-@TRAINER_REGISTRY.register("AdapterCoOp")
+@TRAINER_REGISTRY.register("Adapter-CoOp")
 class Trainer(BaseTrainer):
     def __init__(self, config, dataset_manager):
         super().__init__(config, dataset_manager)

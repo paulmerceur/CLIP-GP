@@ -1,52 +1,14 @@
-from typing import cast
 import time
 import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from utils.trainer import BaseTrainer
+from clip import clip
+from utils.trainer import BaseTrainer, TextEncoder, load_clip
 from utils.metrics import compute_accuracy, AverageMeter
 from utils.optimization import build_optimizer, build_lr_scheduler
 from utils.trainer_registry import TRAINER_REGISTRY
-from utils.config import _config_to_dict
-from utils.metrics import compute_ece, compute_aece
-import json
-import datetime
-from pathlib import Path
-
-from clip import clip
-
-
-class TextEncoder(nn.Module):
-    def __init__(self, clip_model):
-        super().__init__()
-        self.transformer = clip_model.transformer
-        self.positional_embedding = clip_model.positional_embedding
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
-
-    def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding
-        x = x.permute(1, 0, 2)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)
-        x = self.ln_final(x)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        return x
-
-
-def load_clip(config, device):
-    backbone_name = config.model.backbone_name
-    url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
-    try:
-        jit_model = torch.jit.load(model_path).eval()
-        state_dict = jit_model.state_dict()
-    except RuntimeError:
-        state_dict = torch.load(model_path)
-    model = clip.build_model(state_dict)
-    return model.to(device, dtype=torch.float32)
 
 
 class PromptLearnerCoCoOp(nn.Module):
@@ -120,7 +82,7 @@ class CustomCLIP(nn.Module):
         return torch.stack(logits_list, dim=0)
 
 
-@TRAINER_REGISTRY.register("AdapterCoCoOp")
+@TRAINER_REGISTRY.register("Adapter-CoCoOp")
 class Trainer(BaseTrainer):
     def __init__(self, config, dataset_manager):
         super().__init__(config, dataset_manager)

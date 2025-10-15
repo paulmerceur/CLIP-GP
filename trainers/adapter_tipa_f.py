@@ -1,60 +1,12 @@
-from typing import List, Tuple, Optional
+from typing import Tuple, Optional
 import time
-import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from utils.trainer import BaseTrainer
+from utils.trainer import BaseTrainer, load_clip, _get_templates, _get_clip_weights
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
 from utils.trainer_registry import TRAINER_REGISTRY
-from utils.config import _config_to_dict
-
-import json
-import datetime
-from pathlib import Path
-
-from clip import clip
-from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
-
-
-def load_clip(config, device):
-    backbone_name = config.model.backbone_name
-    url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
-    try:
-        jit_model = torch.jit.load(model_path).eval()
-        state_dict = jit_model.state_dict()
-    except RuntimeError:
-        state_dict = torch.load(model_path)
-    model = clip.build_model(state_dict)
-    return model.to(device, dtype=torch.float32)
-
-
-def _get_templates(config):
-    templates = ["a photo of a {}."]
-    if config.adapter.num_templates > 1:
-        templates += IMAGENET_TEMPLATES_SELECT[:config.adapter.num_templates - 1]
-    if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
-        templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
-    return templates
-
-
-@torch.no_grad()
-def _get_clip_weights(classnames: List[str], clip_model, templates: List[str]) -> torch.Tensor:
-    device = next(clip_model.parameters()).device
-    dtype = next(clip_model.parameters()).dtype
-    zeroshot_weights = []
-    for classname in classnames:
-        texts = [t.format(classname) for t in templates]
-        texts = clip.tokenize(texts).to(device)
-        class_embeddings = clip_model.encode_text(texts)
-        class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-        class_embedding = class_embeddings.mean(dim=0)
-        class_embedding = class_embedding / class_embedding.norm()
-        zeroshot_weights.append(class_embedding)
-    zeroshot_weights = torch.stack(zeroshot_weights, dim=1)
-    return zeroshot_weights.to(dtype=dtype)
 
 
 def _preextract_features(clip_model, loader, device) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -70,7 +22,7 @@ def _preextract_features(clip_model, loader, device) -> Tuple[torch.Tensor, torc
     return torch.cat(feats, dim=0), torch.cat(labels, dim=0)
 
 
-@TRAINER_REGISTRY.register("AdapterTipAF")
+@TRAINER_REGISTRY.register("Adapter-TipA-F")
 class Trainer(BaseTrainer):
     def __init__(self, config, dataset_manager):
         super().__init__(config, dataset_manager)
@@ -127,16 +79,16 @@ class Trainer(BaseTrainer):
         self._build_cache()
         adapter = nn.Linear(self.cache_keys.shape[1], self.cache_keys.shape[0], bias=False).to(self.clip_model.dtype).to(self.device)
         adapter.weight = nn.Parameter(self.cache_keys.to(self.device))
-        lr = float(self.config.adapter.tipaf_lr)
+        lr = float(self.config.optim.lr)
         eps = float(self.config.adapter.tipaf_eps)
         optimizer = torch.optim.AdamW(adapter.parameters(), lr=lr, eps=eps)
-        total_steps = int(self.config.adapter.tipaf_train_epoch) * max(1, len(self.train_loader_x))
+        total_steps = int(self.config.optim.max_epoch) * max(1, len(self.train_loader_x))
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
         beta = float(self.config.adapter.tipaf_init_beta)
         alpha = float(self.config.adapter.tipaf_init_alpha)
         best_acc = 0.0
         best_state = None
-        for train_idx in range(int(self.config.adapter.tipaf_train_epoch)):
+        for train_idx in range(int(self.config.optim.max_epoch)):
             adapter.train()
             correct, total = 0.0, 0
             loss_list = []
@@ -162,7 +114,7 @@ class Trainer(BaseTrainer):
             if (train_idx == 0) or ((train_idx + 1) % 10 == 0):
                 acc_epoch = 100.0 * correct / max(1, total)
                 info = []
-                info += [f"epoch [{train_idx + 1}/{int(self.config.adapter.tipaf_train_epoch)}]"]
+                info += [f"epoch [{train_idx + 1}/{int(self.config.optim.max_epoch)}]"]
                 info += [f"loss {sum(loss_list)/max(1,len(loss_list)):.4f}"]
                 info += [f"acc_train {acc_epoch:.4f}"]
                 print(" ".join(info))
@@ -203,7 +155,6 @@ class Trainer(BaseTrainer):
         print(f"* error: {100 - float(acc):.1f}%")
         # ECE and AECE for log parity
         try:
-            from utils.metrics import compute_ece, compute_aece
             ece_val = compute_ece(tip_logits, test_labels.to(self.device)) * 100.0
             aece_val = compute_aece(tip_logits, test_labels.to(self.device)) * 100.0
             print(f"* ECE: {ece_val:.2f}%")
@@ -244,27 +195,3 @@ class Trainer(BaseTrainer):
             "ece": float(ece_val),
             "aece": float(aece_val),
         }
-
-    def _write_run_summary_json(self, metrics: dict, start_time: float) -> None:
-        out_dir = Path(self.config.output_dir)
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        cfg_dict = _config_to_dict(self.config)
-        payload = {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "dataset": self.config.dataset.name,
-            "shots": int(self.config.dataset.num_shots),
-            "seed": int(self.config.seed),
-            "method": "tipaf",
-            "backbone": self.config.model.backbone_name,
-            "metrics": metrics,
-            "config": cfg_dict,
-            "output_dir": str(out_dir),
-            "train_time_s": float(max(0.0, time.time() - start_time)),
-        }
-        with (out_dir / "metrics.json").open("w") as f:
-            json.dump(payload, f, indent=2)
-
-

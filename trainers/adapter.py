@@ -10,61 +10,20 @@ import numpy as np
 import math
 import copy
 
-from utils.trainer import BaseTrainer
+from clip import clip
+from utils.trainer import BaseTrainer, TextEncoder, load_clip, _get_templates
 from utils.metrics import compute_accuracy, AverageMeter
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 from utils.dataset_base import build_dataset, TorchDatasetWrapper
 from utils.transforms import build_transform
 
-from clip import clip
-from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
 from .gp_template_weigher import GaussianProcessTemplateWeighter
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
-
-
-class TextEncoder(nn.Module):
-    def __init__(self, clip_model):
-        super().__init__()
-        self.transformer = clip_model.transformer
-        self.positional_embedding = clip_model.positional_embedding
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
-
-    def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding
-        x = x.permute(1, 0, 2)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)
-        x = self.ln_final(x)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        return x
-
-
-def load_clip(config, device):
-    backbone_name = config.model.backbone_name
-    url = clip._MODELS[backbone_name]
-    model_ = clip._download(url)
-    try:
-        jit_model = torch.jit.load(model_).eval()
-        state_dict = jit_model.state_dict()
-    except RuntimeError:
-        state_dict = torch.load(model_)
-    model = clip.build_model(state_dict)
-    return model.to(device, dtype=torch.float32)
-
-
-def _get_templates(config):
-    templates = ["a photo of a {}."]
-    if config.adapter.num_templates > 1:
-        templates += IMAGENET_TEMPLATES_SELECT[:config.adapter.num_templates - 1]
-    if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
-        templates += IMAGENET_TEMPLATES[:config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
-    return templates
 
 
 @torch.no_grad()
@@ -483,27 +442,26 @@ class Trainer(BaseTrainer):
         self.labels_test, output_test, self.features_test = self.extract_features(partition="test")
         print("Zero-Shot accuracy on test: " + str(round(compute_accuracy(output_test.cuda(), self.labels_test.cuda())[0], 2)))
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
-        if str(getattr(self.config.adapter, 'benchmark_method', 'none')).lower() == 'none':
-            try:
-                model = cast(CustomCLIP, self.model)
-                feats = self.features_train.to(self.device)
-                template_weights = _get_template_weights(
-                    self.config,
-                    text_embeddings=model.text_embeddings,
-                    features=feats,
-                    labels=self.labels_train.to(self.device),
-                    logit_scale=model.logit_scale.exp(),
-                )
-                if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
-                    with torch.no_grad():
-                        model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
-                else:
-                    model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
-                if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
-                    model.gp_weighter.initialize_from_weights(template_weights)
-                    print("[GP] One-step initialization applied to GP weights.")
-            except Exception as e:
-                print(f"[WARN] Template weight init skipped: {e}")
+        try:
+            model = cast(CustomCLIP, self.model)
+            feats = self.features_train.to(self.device)
+            template_weights = _get_template_weights(
+                self.config,
+                text_embeddings=model.text_embeddings,
+                features=feats,
+                labels=self.labels_train.to(self.device),
+                logit_scale=model.logit_scale.exp(),
+            )
+            if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
+                with torch.no_grad():
+                    model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
+            else:
+                model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+            if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
+                model.gp_weighter.initialize_from_weights(template_weights)
+                print("[GP] One-step initialization applied to GP weights.")
+        except Exception as e:
+            print(f"[WARN] Template weight init skipped: {e}")
         self.before_train()
         for self.epoch in range(self.start_epoch, self.max_epoch):
             self.before_epoch()
