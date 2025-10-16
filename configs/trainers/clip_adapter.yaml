@@ -1,0 +1,34 @@
+name: benchmarks
+BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101]
+
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16]
+
+# Output directory template
+template: "{experiment}/{dataset}/clip-adapter_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
+grid:
+  {}
+
+TRAINER_NAME: Adapter-CLIP-Adapter
+
+OPTIM:
+  NAME: adam
+  LR: 0.001
+  MAX_EPOCH: 100
+
+TRAINER:
+  ADAPTER:
+    # CLIP-Adapter defaults from paper/code
+    CLIP_ADAPTER_REDUCTION: 4   # bottleneck reduction
+    CLIP_ADAPTER_RATIO: 0.2     # blend ratio
+

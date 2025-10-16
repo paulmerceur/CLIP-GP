@@ -31,6 +31,10 @@ class AdapterConfig:
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
 
+    # CLIP-Adapter specific
+    clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
+    clip_adapter_ratio: float = 0.2   # Blend ratio between adapted and original features
+
     # Prompt-learning (CoOp / CoCoOp)
     n_ctx: int = 16 # number of learnable context tokens
     ctx_init: str = "" # optional initialization phrase (overrides n_ctx)
@@ -109,7 +113,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-CoCoOp", "Adapter-TipA", "Adapter-TipA-F"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-TipA", "Adapter-TipA-F", "Adapter-CLIP-Adapter"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)

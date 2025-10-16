@@ -433,6 +433,8 @@ class BaseTrainer:
                 method = 'coop'
             elif tname == 'Adapter-CoCoOp':
                 method = 'cocoop'
+            elif tname == 'Adapter-CLIP-Adapter':
+                method = 'clip-adapter'
             else:
                 method = 'gp' if bool(getattr(self.config.adapter, 'use_gp', False)) else 'baseline'
         except Exception:
