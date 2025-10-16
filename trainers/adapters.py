@@ -478,7 +478,7 @@ class CustomCLIP(nn.Module):
         if self.gp_weighter is not None:
             # Prefer deterministic posterior-mean prototypes when not sampling
             if num_samples <= 1:
-                prototypes = self.gp_weighter.prototypes_from_posterior_mean()
+                prototypes = self.gp_weighter.sample_prototypes(1, visual_embeddings)  # [1,K,D]
             else:
                 proto_s = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
                 prototypes = proto_s
@@ -542,21 +542,10 @@ class CustomCLIP(nn.Module):
             prototypes = prototypes.to(device=features_norm.device)
         prototypes_norm = F.normalize(prototypes, p=2, dim=-1)
         
-        alpha = 1e-2
-        eps = 1e-12
         # Base logits (zero-shot / CoOp / GP-average)
         if prototypes.dim() == 3:
             logits_s = scale * torch.einsum("bd,skd->bsk", features_norm, prototypes_norm)
             base_logits = logits_s.mean(dim=1)
-            if not self.training:
-                var_k = logits_s.std(dim=1, unbiased=False)
-
-                var_k_std = (var_k - var_k.mean(1, keepdim=True)) / (var_k.std(1, keepdim=True) + eps)
-                var_k_std = torch.clamp(var_k_std, min=0.)
-                tau = 1. + alpha * var_k_std
-
-                mean_logits = base_logits / tau
-                return mean_logits
         else:
             base_logits = scale * (features_norm @ prototypes_norm.t())
 
@@ -823,42 +812,6 @@ class Trainer(BaseTrainer):
 
         total_loss = ce_loss
 
-        # Optional GP ELBO term during training (data term + KL)
-        if use_gp and gp_weighter is not None and bool(getattr(self.config.adapter, 'gp_use_elbo', True)):
-            try:
-                gp_weighter.train()
-                if hasattr(gp_weighter, 'likelihood'):
-                    gp_weighter.likelihood.train()
-                # Ensure per-template targets exist (compute once from train features)
-                if not hasattr(self, '_gp_targets') or getattr(self, '_gp_targets', None) is None:
-                    try:
-                        self._gp_targets = self._compute_gp_template_targets_prob()
-                    except Exception:
-                        self._gp_targets = None
-                if getattr(self, '_gp_targets', None) is not None:
-                    x = gp_weighter._templates
-                    y = cast(torch.Tensor, self._gp_targets)
-                    if y.device != x.device:
-                        y = y.to(x.device)
-                    mll = gpytorch.mlls.VariationalELBO(
-                        gp_weighter.likelihood,
-                        gp_weighter,
-                        num_data=int(gp_weighter.num_templates),
-                        beta=float(self.config.adapter.gp_beta),
-                    )
-                    out = gp_weighter(x)
-                    elbo_val = mll(out, y)
-                    elbo_mean = elbo_val.mean() if elbo_val.dim() > 0 else elbo_val
-                    total_loss = total_loss + (-elbo_mean)
-                    try:
-                        if hasattr(self, '_dbg_loss_components'):
-                            self._dbg_loss_components['elbo'] = float((-elbo_mean).detach().item())
-                    except Exception:
-                        pass
-            except Exception:
-                print("Error in GP ELBO")
-                pass
-
         # Identity regularizer on visual projection W
         try:
             W = model.visual_proj.weight
@@ -898,8 +851,9 @@ class Trainer(BaseTrainer):
                 cls_mean = torch.zeros_like(cls_sum)
                 cls_mean[present] = cls_sum[present] / cls_count[present].clamp_min(1.0) # [K,D]
 
-                Z = gp_weighter.variational_strategy.inducing_points # [K, M+1, D]
-                token = Z[:, -1, :] # [K,D]
+                Z = gp_weighter.variational_strategy.inducing_points # [K, M+1, d]
+                token_red = Z[:, -1, :] # [K,d]
+                token = gp_weighter._lift(token_red) # [K,D]
                 
                 lam = float(getattr(self.config.adapter, "learn_token_lambda", 1e-3))
                 reg = lam * (token[present] - cls_mean[present]).pow(2).mean()
@@ -908,6 +862,18 @@ class Trainer(BaseTrainer):
                     self._dbg_loss_components["learn_token_reg"] = float(reg.detach().item())
                 except Exception:
                     pass
+            w = gp_weighter.scores
+            
+            orth = None
+            # A_kernel = gp_weighter.A.weight
+            # orth = 1.e-2 * ((A_kernel @ A_kernel.t()) - torch.eye(A_kernel.size(0), device=A_kernel.device, dtype=A_kernel.dtype)).pow(2).sum()
+            # total_loss = total_loss + orth
+            # eps = 1e-8
+            # lam_entropy = 1.e-2
+            # H = -(w.clamp_min(eps) * w.clamp_min(eps).log()).sum(dim=-1)
+            # score_entropy_reg = -lam_entropy * H.mean()
+            # total_loss = total_loss + score_entropy_reg
+
         # -----------------------------------
 
         # Debug components
@@ -915,6 +881,9 @@ class Trainer(BaseTrainer):
             self._dbg_loss_components = {
                 "ce": float(ce_loss.detach().item()),
                 "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
+                "learn_token_reg": float(self._dbg_loss_components.get("learn_token_reg", 0.0)) if hasattr(self, '_dbg_loss_components') else 0.0,
+                "orth": float(orth.detach().item()) if orth is not None else 0.0,
+                "scores": w.mean(0)[0].detach().cpu() if (use_gp and gp_weighter is not None) else None,
                 "total": float(total_loss.detach().item()),
             }
         except Exception:
@@ -996,17 +965,14 @@ class Trainer(BaseTrainer):
             try:
                 model = cast(CustomCLIP, self.model)
                 feats = self.features_train.to(self.device)
-                template_weights = _get_template_weights(
-                    self.config,
-                    text_embeddings=model.text_embeddings,
-                    features=feats,
-                    labels=self.labels_train.to(self.device),
-                    logit_scale=model.logit_scale.exp(),
-                )
-                mean_vals = template_weights.mean(dim=0).tolist()
-                std_vals = template_weights.std(dim=0).tolist()
-                print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
-                print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+                # template_weights = _get_template_weights(self.config, text_embeddings=model.text_embeddings, features=feats, 
+                #                                          labels=self.labels_train.to(self.device), logit_scale=model.logit_scale.exp(),)
+                # mean_vals = template_weights.mean(dim=0).tolist()
+                # std_vals = template_weights.std(dim=0).tolist()
+                template_weights = self.model.gp_weighter.scores if (self.model.gp_weighter is not None) else None
+                # if template_weights is not None:                        
+                #     print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                #     print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
 
                 # If template weights are a trainable parameter, copy data; otherwise assign tensor
                 if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
@@ -1030,9 +996,10 @@ class Trainer(BaseTrainer):
             self.after_epoch()
         self.after_train()
         # Print template weights stats if available
+        print(self.model.gp_weighter.scores.shape)
         try:
-            mean_vals = self.model.template_weights.mean(dim=0).tolist()
-            std_vals = self.model.template_weights.std(dim=0).tolist()
+            mean_vals = self.model.gp_weighter.scores.mean(dim=0)[0].tolist()
+            std_vals = self.model.gp_weighter.scores.std(dim=0)[0].tolist()
             print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
             print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
         except Exception:
@@ -1123,7 +1090,11 @@ class Trainer(BaseTrainer):
                             print(
                                 f"  [DBG] loss: CE={comp.get('ce', 0):.4f} KL(raw)={comp.get('kl_raw', 0):.4f} "
                                 f"beta={comp.get('kl_beta', 0):.3f} KL*beta={comp.get('kl', 0):.4f} "
-                                f"l2_reg={comp.get('l2_reg', comp.get('l2', 0)):.4f} Total={comp.get('total', 0):.4f}"
+                                f"learn_token_reg={comp.get('learn_token_reg', 0):.4f} "
+                                f"orth={comp.get('orth', 0):.4f} "
+                                f"l2_reg={comp.get('l2_reg', comp.get('l2', 0)):.4f} "
+                                f"scores={comp.get('scores', None)} "
+                                f"Total={comp.get('total', 0):.4f}  "
                             )
                         # Prototype stats
                         if hasattr(self, "_dbg_proto_stats") and self._dbg_proto_stats is not None:
@@ -1153,7 +1124,18 @@ class Trainer(BaseTrainer):
                             if gp is not None:
                                 # Kernel hyperparameters (robust across kernel types)
                                 try:
+                                    # GP parameters
+                                    q = gp.variational_strategy._variational_distribution
+                                    q_m = q.variational_mean.detach()
+                                    L = q.chol_variational_covar
+                                    q_var = (L @ L.transpose(-1, -2)).diagonal(dim1=-2, dim2=-1)
                                     covar_module = gp.covar_module if hasattr(gp, "covar_module") else None
+                                    
+                                    q_m_min = float(q_m.min().item())
+                                    q_m_max = float(q_m.max().item())
+                                    q_var_min = float(q_var.min().item())
+                                    q_var_max = float(q_var.max().item())
+
                                     if covar_module is not None:
                                         outscale = covar_module.outputscale if hasattr(covar_module, "outputscale") else None
                                         outscale_val = float(outscale.detach().mean().item()) if outscale is not None else float('nan')
@@ -1185,15 +1167,16 @@ class Trainer(BaseTrainer):
                                     mean_norm = float('nan')
                                     mean_abs = float('nan')
                                 print(
-                                    f"  [DBG][GP] var_mean={var_mean:.6f} lengthscale={ls_val:.6f} "
-                                    f"outputscale={outscale_val:.6f} mean_param_norm={mean_norm:.4f} mean_abs={mean_abs:.4f}"
+                                    f"  [DBG][GP] lengthscale={ls_val:.6f} outputscale={outscale_val:.6f} mean_param_norm={mean_norm:.4f} mean_abs={mean_abs:.4f}"
+                                    f"\n  [DBG][GP] q_m[min={q_m_min:.4f} max={q_m_max:.4f}] q_var[min={q_var_min:.4f} max={q_var_max:.4f}]"
                                 )
                                 # Template weights for class 0 (posterior-mean softmax over templates)
                                 try:
                                     with torch.no_grad():
-                                        x_t = gp._templates.to(dtype=torch.float32, device=gp._templates.device)
-                                        f_mean = gp(x_t).mean  # [K, M]
-                                        w = torch.softmax(f_mean, dim=-1)  # [K, M]
+                                        # x_t = gp._templates_red.to(dtype=torch.float32, device=gp._templates_red.device)
+                                        # f_mean = gp(x_t).mean  # [K, M]
+                                        # w = torch.softmax(f_mean, dim=-1)  # [K, M]
+                                        w = gp.scores
                                         w0 = w[0].detach().cpu().tolist()
                                         w0_str = ", ".join(f"{v:.3f}" for v in w0)
                                         print(f"  [DBG][GP] template_weights[class=0]: [{w0_str}]")

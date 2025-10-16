@@ -1,4 +1,4 @@
-name: baseline
+name: baseline_80temp
 BASE_CONFIG: configs/trainers/default.yaml
 datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
 # datasets: [caltech101, ucf101, eurosat]

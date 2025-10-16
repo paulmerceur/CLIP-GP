@@ -14,22 +14,23 @@ from pathlib import Path
 class AdapterConfig:
     """Adapter-specific configuration"""
     # Basic adapter settings
-    num_templates: int = 1  # Number of templates to use
+    num_templates: int = 10  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
-    template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
+    template_init_method: str = "val_weighted"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     prefit_on_full_set: bool = False  # If True, prefit template weights using FULL training set
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     
     # GP-specific settings
-    use_gp: bool = False  # Whether to use GP weighting for templates
-    gp_lr: float = 0.1  # Learning rate for GP parameters
+    use_gp: bool = True  # Whether to use GP weighting for templates
+    gp_lr: float = 0.001  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
-    gp_num_mc_samples_train: int = 20  # Number of Monte Carlo samples
-    gp_num_mc_samples_eval: int = 80  # Number of Monte Carlo samples during evaluation
+    gp_num_mc_samples_train: int = 30  # Number of Monte Carlo samples
+    gp_num_mc_samples_eval: int = 30  # Number of Monte Carlo samples during evaluation
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
-    gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
-    learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
+    gp_use_elbo: bool = False  # If True, add GP ELBO (with KL) during main training
+    learn_token_lambda: float = 1.e-2  # Weight for l2 regularization on visual learnable token inside the gp
+    gp_pca_dim: int = 128  # Dimensionality for PCA reduction before GP (0 = no reduction)
 
     benchmark_method: str = "none"  # one of: "none", "coop", "cocoop"
 
@@ -79,9 +80,9 @@ class InputConfig:
 @dataclass
 class OptimConfig:
     """Optimization configuration"""
-    name: str = "sgd"  # Optimizer name: "sgd", "adam", "adamw"
+    name: str = "adamw"  # Optimizer name: "sgd", "adam", "adamw"
     lr: float = 0.01  # Base learning rate
-    max_epoch: int = 300  # Maximum number of epochs
+    max_epoch: int = 200  # Maximum number of epochs
     lr_scheduler: str = "cosine"  # LR scheduler: "cosine", "step", "constant"
     warmup_epoch: int = 1  # Warmup epochs
     warmup_type: str = "constant"  # Warmup type: "constant", "linear"

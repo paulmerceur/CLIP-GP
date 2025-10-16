@@ -1,8 +1,11 @@
-name: gp_viscond
+name: gp_viscond_7temp_LinearKernel
 BASE_CONFIG: configs/trainers/default.yaml
 # datasets: str or list
-datasets: [caltech101, ucf101, eurosat]
-# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, ucf101, eurosat]
+# datasets: [eurosat]
+datasets: [caltech101, ucf101, eurosat, oxford_pets, oxford_flowers, fgvc_aircraft, food101, stanford_cars, dtd]
+# datasets: [oxford_pets, oxford_flowers, fgvc_aircraft, food101, stanford_cars, dtd]
+
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
@@ -31,11 +34,11 @@ TRAINER:
   ADAPTER:
     # GP-specific overrides beyond default baseline
     USE_GP: True
-    GP_KERNEL_TYPE: rbf
+    GP_KERNEL_TYPE: linear
     GP_NUM_MC_SAMPLES_TRAIN: 30
-    GP_NUM_MC_SAMPLES_EVAL: 30
+    GP_NUM_MC_SAMPLES_EVAL: 300
     GP_USE_ELBO: False
-    GP_LR: 0.001
+    GP_LR: 1.e-3
     GP_BETA: 0.01
     LEARN_TOKEN_LAMBDA: 1e-2
-  
+    GP_PCA_DIM: 256
