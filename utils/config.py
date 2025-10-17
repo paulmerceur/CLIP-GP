@@ -18,19 +18,19 @@ class AdapterConfig:
     l2_lambda: float = 0.1  # L2 regularization weight
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
-    prefit_on_full_set: bool = False  # If True, prefit template weights using FULL training set
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
+    gp_kernel_type: str = "rbf"  # Kernel type: "rbf", "linear", "matern"
+    gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     gp_lr: float = 0.01  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
     gp_num_mc_samples_train: int = 10  # Number of Monte Carlo samples for training
     gp_num_mc_samples_eval: int = 10  # Number of Monte Carlo samples for testing
-    gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
-    gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
     gp_pca_dim: int = 128  # Dimensionality for PCA reduction before GP (0 = no reduction)
+    finetune_gp_on_test: bool = False  # Do not use for regular training
 
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
@@ -51,7 +51,6 @@ class AdapterConfig:
 class ModelConfig:
     """Model configuration"""
     backbone_name: str = "RN50"  # CLIP backbone: RN50, ViT-B/32, etc.
-    head_name: str = ""  # Head name (usually empty for CLIP)
     init_weights: str = ""  # Path to pretrained weights
 
 
@@ -231,8 +230,6 @@ def merge_config_dict(config: Config, config_dict: dict) -> None:
         elif key == "MODEL":
             if "BACKBONE" in value and "NAME" in value["BACKBONE"]:
                 config.model.backbone_name = value["BACKBONE"]["NAME"]
-            if "HEAD" in value and "NAME" in value["HEAD"]:
-                config.model.head_name = value["HEAD"]["NAME"]
             if "INIT_WEIGHTS" in value:
                 config.model.init_weights = value["INIT_WEIGHTS"]
         elif hasattr(config, key.lower()):
@@ -251,8 +248,7 @@ def parse_args_to_config() -> Config:
     parser = argparse.ArgumentParser(description="CLIP-GP Training")
     
     # Dataset arguments
-    parser.add_argument("--root", type=str, default=None, 
-                       help="Path to dataset root")
+    parser.add_argument("--root", type=str, default=None, help="Path to dataset root")
     parser.add_argument("--dataset", type=str, default=None,
                        choices=["Caltech101", "OxfordPets", "OxfordFlowers", "FGVCAircraft", 
                                "DescribableTextures", "EuroSAT", "StanfordCars", "Food101", 
@@ -262,71 +258,68 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--shots", type=int, default=None, help="Number of shots")
     
     # Model arguments
-    parser.add_argument("--backbone", type=str, default=None, 
-                       help="CLIP backbone name")
-    parser.add_argument("--trainer", type=str, default=None,
-                       help="Trainer name")
-    parser.add_argument("--head", type=str, default=None, help="Head name")
+    parser.add_argument("--backbone", type=str, default=None, choices=["RN50", "RN101", "RN50x4", "RN50x16", "ViT-B/32", "ViT-B/16"], help="CLIP backbone name")
+    parser.add_argument("--trainer", type=str, default=None, choices=["Adapter", "Adapter-CoOp", "Adapter-TipA", "Adapter-TipA-F", "Adapter-CLIP-Adapter"], help="Trainer name")
     
     # Training arguments
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=None, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
-    parser.add_argument("--optimizer", type=str, default=None, 
-                       choices=["sgd", "adam", "adamw"], help="Optimizer")
+    parser.add_argument("--optimizer", type=str, default=None, choices=["sgd", "adam", "adamw"], help="Optimizer")
     
     # Adapter arguments
+    parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--l2-lambda", type=float, default=None, help="L2 regularization weight")
-    parser.add_argument("--template-init-method", type=str, default=None, help="Template initialization method")
+    parser.add_argument("--template-init-method", type=str, default=None, choices=["uniform", "val_weighted", "top3", "minmax"], help="Template initialization method")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
-    parser.add_argument("--prefit-on-full-set", action="store_true", help="Prefit template weights using FULL train set")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
 
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
+    parser.add_argument("--gp-kernel-type", type=str, default=None, choices=["rbf", "linear"], help="GP kernel type")
+    parser.add_argument("--gp-use-elbo", action="store_true", help="Use GP ELBO")
     parser.add_argument("--gp-lr", type=float, default=None, help="GP learning rate")
     parser.add_argument("--gp-beta", type=float, default=None, help="GP KL weight")
-    parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--gp-num-mc-samples-train", type=int, default=None, help="Number of Monte Carlo samples for training")
     parser.add_argument("--gp-num-mc-samples-eval", type=int, default=None, help="Number of Monte Carlo samples for testing")
     parser.add_argument("--learn-token-lambda", type=float, default=None, help="Weight for l2 regularization on visual learnable token inside the gp")
     parser.add_argument("--gp-pca-dim", type=int, default=None, help="Dimensionality for PCA reduction before GP")
+    parser.add_argument("--finetune-gp-on-test", action="store_true", help="Finetune GP on test set")
 
     # CoOp / CoCoOp
     parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
     parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
     parser.add_argument("--csc", action="store_true", help="Use class-specific context for prompt learning")
+
+    # Tip-Adapter-F arguments
+    parser.add_argument("--tipaf-init-alpha", type=float, default=None, help="Initial alpha value for Tip-Adapter-F")
+    parser.add_argument("--tipaf-init-beta", type=float, default=None, help="Initial beta value for Tip-Adapter-F")
+    parser.add_argument("--tipaf-eps", type=float, default=None, help="Epsilon value for Tip-Adapter-F")
+
+    # CLIP-Adapter arguments
+    parser.add_argument("--clip-adapter-reduction", type=int, default=None, help="Bottleneck reduction ratio for adapter MLP")
+    parser.add_argument("--clip-adapter-ratio", type=float, default=None, help="Blend ratio between adapted and original features")
     
     # Environment arguments
-    parser.add_argument("--output-dir", type=str, default=None,
-                       help="Output directory")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     
     # Configuration files
-    parser.add_argument("--config-file", type=str, default="",
-                       help="Path to trainer config file")
-    parser.add_argument("--dataset-config-file", type=str, default="",
-                       help="Path to dataset config file")
+    parser.add_argument("--config-file", type=str, default="", help="Path to trainer config file")
+    parser.add_argument("--dataset-config-file", type=str, default="", help="Path to dataset config file")
     
     # Evaluation arguments
     parser.add_argument("--eval-only", action="store_true", help="Evaluation only")
-    parser.add_argument("--model-dir", type=str, default="", 
-                       help="Model directory for evaluation")
+    parser.add_argument("--model-dir", type=str, default="", help="Model directory for evaluation")
     parser.add_argument("--load-epoch", type=int, help="Epoch to load for evaluation")
     parser.add_argument("--no-train", action="store_true", help="Skip training")
     
     # Additional options
-    parser.add_argument("--source-domains", type=str, nargs="+", 
-                       help="Source domains for DA/DG")
-    parser.add_argument("--target-domains", type=str, nargs="+",
-                       help="Target domains for DA/DG")
-    parser.add_argument("--transforms", type=str, nargs="+",
-                       help="Data augmentation methods")
-    
-    # Additional config options
-    parser.add_argument("opts", default=None, nargs=argparse.REMAINDER,
-                       help="Modify config options using command-line")
+    parser.add_argument("--source-domains", type=str, nargs="+", help="Source domains for DA/DG")
+    parser.add_argument("--target-domains", type=str, nargs="+", help="Target domains for DA/DG")
+    parser.add_argument("--transforms", type=str, nargs="+", help="Data augmentation methods")
+    parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="Modify config options using command-line")
     
     args = parser.parse_args()
     
@@ -339,19 +332,21 @@ def parse_args_to_config() -> Config:
     if args.config_file:
         merge_config_from_file(config, args.config_file)
     
-    # Apply command line arguments (only if explicitly provided)
+    # Dataset arguments
     if args.root is not None:
         config.dataset.root = args.root
     if args.dataset is not None:
         config.dataset.name = args.dataset
     if args.shots is not None:
         config.dataset.num_shots = args.shots
+
+    # Model arguments
     if args.backbone is not None:
         config.model.backbone_name = args.backbone
     if args.trainer is not None:
         config.trainer_name = args.trainer
-    if args.head is not None:
-        config.model.head_name = args.head
+
+    # Optimizer arguments
     if args.lr is not None:
         config.optim.lr = args.lr
     if args.epochs is not None:
@@ -361,14 +356,30 @@ def parse_args_to_config() -> Config:
         config.dataloader.batch_size_test = args.batch_size
     if args.optimizer is not None:
         config.optim.name = args.optimizer
+
+    # Adapter arguments
+    if args.num_templates is not None:
+        config.adapter.num_templates = args.num_templates
+    if args.l2_lambda is not None:
+        config.adapter.l2_lambda = args.l2_lambda
+    if args.template_init_method is not None:
+        config.adapter.template_init_method = args.template_init_method
+    if args.train_template_weights:
+        config.adapter.train_template_weights = True
+    if args.freeze_visual_proj:
+        config.adapter.freeze_visual_proj = True
+
+    # GP arguments
     if args.use_gp:
         config.adapter.use_gp = True
+    if args.gp_kernel_type is not None:
+        config.adapter.gp_kernel_type = args.gp_kernel_type
+    if args.gp_use_elbo:
+        config.adapter.gp_use_elbo = True
     if args.gp_lr is not None:
         config.adapter.gp_lr = args.gp_lr
     if args.gp_beta is not None:
         config.adapter.gp_beta = args.gp_beta
-    if args.num_templates is not None:
-        config.adapter.num_templates = args.num_templates
     if args.gp_num_mc_samples_train is not None:
         config.adapter.gp_num_mc_samples_train = args.gp_num_mc_samples_train
     if args.gp_num_mc_samples_eval is not None:
@@ -377,24 +388,46 @@ def parse_args_to_config() -> Config:
         config.adapter.learn_token_lambda = args.learn_token_lambda
     if args.gp_pca_dim is not None:
         config.adapter.gp_pca_dim = args.gp_pca_dim
-    if args.train_template_weights:
-        config.adapter.train_template_weights = True
-    if args.prefit_on_full_set:
-        config.adapter.prefit_on_full_set = True
-    if args.freeze_visual_proj:
-        config.adapter.freeze_visual_proj = True
+    if args.finetune_gp_on_test:
+        config.adapter.finetune_gp_on_test = True
+
+    # CoOp / CoCoOp arguments
     if args.n_ctx is not None:
         config.adapter.n_ctx = args.n_ctx
     if args.ctx_init is not None:
         config.adapter.ctx_init = args.ctx_init
     if args.csc:
         config.adapter.csc = True
+
+    # Tip-Adapter-F arguments
+    if args.tipaf_init_alpha is not None:
+        config.adapter.tipaf_init_alpha = args.tipaf_init_alpha
+    if args.tipaf_init_beta is not None:
+        config.adapter.tipaf_init_beta = args.tipaf_init_beta
+    if args.tipaf_eps is not None:
+        config.adapter.tipaf_eps = args.tipaf_eps
+
+    # CLIP-Adapter arguments
+    if args.clip_adapter_reduction is not None:
+        config.adapter.clip_adapter_reduction = args.clip_adapter_reduction
+    if args.clip_adapter_ratio is not None:
+        config.adapter.clip_adapter_ratio = args.clip_adapter_ratio
+
+    # Environment arguments
     if args.output_dir is not None:
         config.output_dir = args.output_dir
     if args.seed is not None:
         config.seed = args.seed
     if args.resume is not None:
         config.resume = args.resume
+
+    # Configuration files
+    if args.config_file is not None:
+        config.config_file = args.config_file
+    if args.dataset_config_file is not None:
+        config.dataset_config_file = args.dataset_config_file
+
+    # Evaluation arguments
     if args.eval_only:
         config.eval_only = args.eval_only
     if args.model_dir:
@@ -403,6 +436,8 @@ def parse_args_to_config() -> Config:
         config.load_epoch = args.load_epoch
     if args.no_train:
         config.no_train = args.no_train
+
+    # Additional options
     if args.source_domains is not None:
         config.dataset.source_domains = args.source_domains
     if args.target_domains is not None:
