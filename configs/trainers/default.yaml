@@ -15,7 +15,7 @@ INPUT:
 OPTIM:
   NAME: "adamw"
   LR: 0.01
-  MAX_EPOCH: 100
+  MAX_EPOCH: 300
   LR_SCHEDULER: "cosine"
   WARMUP_EPOCH: 1
   WARMUP_TYPE: "constant"
@@ -30,7 +30,7 @@ TRAINER:
   ADAPTER:
     TEMPLATE_INIT_METHOD: uniform
     NUM_TEMPLATES: 7
-    L2_LAMBDA: 0.1
+    L2_LAMBDA: 0.5
 
 # Default trainer selection
 TRAINER_NAME: Adapter

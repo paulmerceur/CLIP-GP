@@ -1,11 +1,11 @@
-name: test
+name: benchmarks
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
 root: /mnt/features/VDATA/
 
 # Datasets
-# datasets: [caltech101, oxford_pets, oxford_flowers, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
 datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots

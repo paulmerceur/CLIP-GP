@@ -1,11 +1,11 @@
-name: test
+name: benchmarks
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
 root: /mnt/features/VDATA/
 
 # Datasets
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
 datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots
@@ -17,7 +17,7 @@ template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  TRAINER.ADAPTER.GP_LR: [0.1, 0.01, 0.001, 0.0001]
+  {}
 
 TRAINER_NAME: Adapter
 
@@ -28,7 +28,11 @@ TRAINER:
     TEMPLATE_INIT_METHOD: val_weighted
     # GP-specific overrides beyond default baseline
     USE_GP: True
-    GP_KERNEL_TYPE: rbf
-    GP_LR: 0.01
-    GP_BETA: 0.001
-    GP_USE_ELBO: True
+    GP_KERNEL_TYPE: linear
+    GP_NUM_MC_SAMPLES_TRAIN: 30
+    GP_NUM_MC_SAMPLES_EVAL: 300
+    GP_USE_ELBO: False
+    GP_LR: 1.e-3
+    GP_BETA: 0.01
+    LEARN_TOKEN_LAMBDA: 1e-2
+    GP_PCA_DIM: 256

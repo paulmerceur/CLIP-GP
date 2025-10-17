@@ -1,4 +1,4 @@
-name: test
+name: benchmarks
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root

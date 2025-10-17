@@ -1,4 +1,4 @@
-name: test
+name: benchmarks
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
@@ -15,24 +15,22 @@ shots: [1, 2, 4, 8, 16]
 # Output directory template
 template: "{experiment}/{dataset}/coop_{shots}shots_{sig}/seed{seed}"
 
-# Grid of hyperparameters (keys follow existing config override notation)
+# Grid of hyperparameters
 grid:
   {}
 
-TRAINER_NAME: AdapterCoOp
+TRAINER_NAME: Adapter-CoOp
 
 OPTIM:
+  # CoOp defaults
   NAME: sgd
   LR: 0.002
   MAX_EPOCH: 100
 
 TRAINER:
   ADAPTER:
-    USE_GP: False
-    FREEZE_VISUAL_PROJ: True
-    BENCHMARK_METHOD: coop
+    # CoOp defaults
     N_CTX: 16
-    # Optional seed phrase, uncomment to try
     # CTX_INIT: "a photo of a"
 
 

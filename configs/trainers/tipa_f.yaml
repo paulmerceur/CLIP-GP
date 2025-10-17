@@ -1,11 +1,11 @@
-name: test
+name: benchmarks
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
 root: /mnt/features/VDATA/
 
 # Datasets
-#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, sun397, ucf101, food101, stanford_cars, eurosat, dtd]
+#datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
 datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots
@@ -13,30 +13,25 @@ seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16]
 
 # Output directory template
-template: "{experiment}/{dataset}/tipa_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/tipa-f_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
   {}
 
-TRAINER_NAME: AdapterTipAF
+TRAINER_NAME: Adapter-TipA-F
+
+OPTIM:
+  # Tip-Adapter-F defaults
+  NAME: adamw
+  LR: 0.001
+  MAX_EPOCH: 20
 
 TRAINER:
-  DATALOADER:
-    TRAIN_X:
-      BATCH_SIZE: 32
-    TEST:
-      BATCH_SIZE: 32
   ADAPTER:
-    BENCHMARK_METHOD: tipa
-    USE_GP: False
-    TRAIN_TEMPLATE_WEIGHTS: False
-    FREEZE_VISUAL_PROJ: True
-    # Tip-Adapter-F defaults (paper-aligned)
+    # Tip-Adapter-F defaults
     TIPAF_INIT_ALPHA: 20.0
     TIPAF_INIT_BETA: 2.0
-    TIPAF_LR: 0.001
-    TIPAF_TRAIN_EPOCH: 20
     TIPAF_EPS: 0.0001
 
 

@@ -26,10 +26,11 @@ class AdapterConfig:
     gp_lr: float = 0.01  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
     gp_num_mc_samples_train: int = 10  # Number of Monte Carlo samples for training
-    gp_num_mc_samples_test: int = 10  # Number of Monte Carlo samples for testing
+    gp_num_mc_samples_eval: int = 10  # Number of Monte Carlo samples for testing
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf" or "linear"
     gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
     learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
+    gp_pca_dim: int = 128  # Dimensionality for PCA reduction before GP (0 = no reduction)
 
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
@@ -287,9 +288,10 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--gp-beta", type=float, default=None, help="GP KL weight")
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--gp-num-mc-samples-train", type=int, default=None, help="Number of Monte Carlo samples for training")
-    parser.add_argument("--gp-num-mc-samples-test", type=int, default=None, help="Number of Monte Carlo samples for testing")
+    parser.add_argument("--gp-num-mc-samples-eval", type=int, default=None, help="Number of Monte Carlo samples for testing")
     parser.add_argument("--learn-token-lambda", type=float, default=None, help="Weight for l2 regularization on visual learnable token inside the gp")
-    
+    parser.add_argument("--gp-pca-dim", type=int, default=None, help="Dimensionality for PCA reduction before GP")
+
     # CoOp / CoCoOp
     parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
     parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
@@ -369,10 +371,12 @@ def parse_args_to_config() -> Config:
         config.adapter.num_templates = args.num_templates
     if args.gp_num_mc_samples_train is not None:
         config.adapter.gp_num_mc_samples_train = args.gp_num_mc_samples_train
-    if args.gp_num_mc_samples_test is not None:
-        config.adapter.gp_num_mc_samples_test = args.gp_num_mc_samples_test
+    if args.gp_num_mc_samples_eval is not None:
+        config.adapter.gp_num_mc_samples_eval = args.gp_num_mc_samples_eval
     if args.learn_token_lambda is not None:
         config.adapter.learn_token_lambda = args.learn_token_lambda
+    if args.gp_pca_dim is not None:
+        config.adapter.gp_pca_dim = args.gp_pca_dim
     if args.train_template_weights:
         config.adapter.train_template_weights = True
     if args.prefit_on_full_set:
