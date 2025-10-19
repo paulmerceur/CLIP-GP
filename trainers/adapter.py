@@ -599,21 +599,28 @@ class Trainer(BaseTrainer):
             self.run_epoch()
             self.after_epoch()
         
-        # Optional sanity-check: fine-tune ONLY the GP on the test set
+        # Optional sanity-check: fine-tune ONLY the template weights on the test set
         try:
-            if getattr(self.config.adapter, 'finetune_gp_on_test', False):
-                self._finetune_gp_on_test()
+            if getattr(self.config.adapter, 'finetune_template_weights_on_test', False):
+                self._finetune_template_weights_on_test()
         except Exception as e:
-            print(f"[WARN] GP test-set fine-tune failed: {e}")
+            print(f"[WARN] Template weights test-set fine-tune failed: {e}")
             
         self.after_train()
         # Print template weights stats if available
         try:
-            print(self.model.gp_weighter.scores.shape)
-            mean_vals = self.model.gp_weighter.scores.mean(dim=0)[0].tolist()
-            std_vals = self.model.gp_weighter.scores.std(dim=0)[0].tolist()
-            print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
-            print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+            if getattr(self.config.adapter, 'use_gp', False):
+                print(self.model.gp_weighter.scores.shape)
+                mean_vals = self.model.gp_weighter.scores.mean(dim=0)[0].tolist()
+                std_vals = self.model.gp_weighter.scores.std(dim=0)[0].tolist()
+                print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+            else:
+                print(self.model.template_weights.shape)
+                mean_vals = self.model.template_weights.mean(dim=0).tolist()
+                std_vals = self.model.template_weights.std(dim=0).tolist()
+                print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
         except Exception:
             pass
         print(f"Training completed in {time.time() - start_time:.2f} seconds")
@@ -890,69 +897,53 @@ class Trainer(BaseTrainer):
 
         return targets
 
-    def _finetune_gp_on_test(self) -> None:
-        """Sanity check: cheating on the test set to validate the GP component.
+    def _finetune_template_weights_on_test(self) -> None:
+        """Sanity check: cheating on the test set to validate the template weights.
 
-        This freezes all non-GP parameters (including the visual projection) and
-        optimizes only the GP weighter on the held-out test features to validate
-        the ceiling performance of the GP component.
+        This freezes all non-template weights parameters (including the visual projection) and
+        optimizes only the template weights on the held-out test features to validate
+        the ceiling performance of the template weights.
         """
-        from typing import cast as _cast
-        model = _cast(CustomCLIP, self.model)
-        use_gp = bool(getattr(self.config.adapter, 'use_gp', False)) and getattr(model, 'gp_weighter', None) is not None
+        use_gp = bool(getattr(self.config.adapter, 'use_gp', False)) and getattr(self.model, 'gp_weighter', None) is not None
+
+        # Ensure template weights are registered as trainable parameters when GP is disabled
         if not use_gp:
-            print("[SANITY] GP fine-tune on test requested but GP is disabled; skipping.")
-            return
+            tw = getattr(self.model, 'template_weights', None)
+            if isinstance(tw, torch.Tensor) and not isinstance(tw, torch.nn.Parameter):
+                self.model.template_weights = torch.nn.Parameter(tw.detach().clone(), requires_grad=True)
 
         # Freeze everything except GP parameters
-        for name, param in model.named_parameters():
-            if "gp_weighter" in name:
+        for name, param in self.model.named_parameters():
+            if use_gp and "gp_weighter" in name:
+                param.requires_grad = True
+            elif not use_gp and "template_weights" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
 
-        # Collect GP params
-        gp_params = [p for n, p in model.named_parameters() if p.requires_grad]
-        if len(gp_params) == 0:
-            print("[SANITY] No GP parameters require grad; nothing to fine-tune.")
-            return
-
-        # Optimizer with GP-specific LR (fallback to adapter.gp_lr)
-        # try:
-        #     gp_lr = float(getattr(self.config.adapter, 'gp_test_lr', getattr(self.config.adapter, 'gp_lr', self.config.optim.lr)))
-        # except Exception:
-        #     gp_lr = float(getattr(self.config.adapter, 'gp_lr', self.config.optim.lr))
-        gp_lr = float(self.config.optim.lr)
+        # Optimizer
+        lr = float(self.config.optim.lr)
         weight_decay = float(self.config.optim.weight_decay)
-        param_groups = [
-            {
-                'params': gp_params,
-                'lr': gp_lr,
-                'weight_decay': weight_decay,
-            }
-        ]
-        optim_gp = build_optimizer_from_param_groups(param_groups, self.config.optim)
-        try:
-            sched_gp = build_lr_scheduler(optim_gp, self.config.optim)
-        except Exception:
-            sched_gp = None
+        param_groups = [{'params': [p for n, p in self.model.named_parameters() if p.requires_grad], 'lr': lr, 'weight_decay': weight_decay}]
+        optim = build_optimizer_from_param_groups(param_groups, self.config.optim)
+        sched = build_lr_scheduler(optim, self.config.optim)
 
         # Prepare loop settings
         self.set_model_mode("train")
         try:
-            if hasattr(model, "image_encoder"):
-                model.image_encoder.eval()
+            if hasattr(self.model, "image_encoder"):
+                self.model.image_encoder.eval()
         except AttributeError:
             pass
         try:
-            if hasattr(model, "text_encoder"):
-                model.text_encoder.eval()
+            if hasattr(self.model, "text_encoder"):
+                self.model.text_encoder.eval()
         except AttributeError:
             pass
 
         # Use pre-extracted test features/labels
         if not hasattr(self, 'features_test') or not hasattr(self, 'labels_test'):
-            raise RuntimeError("features_test and labels_test must be available before GP fine-tune")
+            raise RuntimeError("features_test and labels_test must be available before template weights fine-tune")
 
         features = self.features_test.clone().cpu().numpy()
         labels = self.labels_test.clone()
@@ -967,9 +958,9 @@ class Trainer(BaseTrainer):
         batch_size = max(1, int(getattr(self.config.adapter, 'gp_test_batch_size', default_bs) or default_bs))
         num_batches = int(math.ceil(features.shape[0] / float(batch_size)))
         num_epochs = 100
-        num_mc = int(getattr(self.config.adapter, 'gp_num_mc_samples_train', 1) or 1)
+        num_mc = int(getattr(self.config.adapter, 'gp_num_mc_samples_train', 1) or 1) # for gp
 
-        print(f"[SANITY] GP-only fine-tuning on TEST set: epochs={num_epochs} bs={batch_size} lr={gp_lr}")
+        print(f"[SANITY] Template weights fine-tuning on TEST set: epochs={num_epochs} bs={batch_size} lr={lr}")
         for ep in range(num_epochs):
             running_loss = 0.0
             seen = 0
@@ -984,23 +975,23 @@ class Trainer(BaseTrainer):
                     y_b = y_b.detach().clone().to(self.device)
 
                 loss = self.compute_loss(x_b, y_b, num_samples=num_mc)
-                optim_gp.zero_grad()
+                optim.zero_grad()
                 loss.backward()
-                optim_gp.step()
+                optim.step()
 
                 batch_sz = (b1 - b0)
                 running_loss += float(loss.detach().item()) * batch_sz
                 seen += batch_sz
 
-            if sched_gp is not None:
+            if sched is not None:
                 try:
-                    sched_gp.step()
+                    sched.step()
                 except Exception:
                     pass
 
             # Evaluate test accuracy after each epoch
             with torch.no_grad():
-                logits = model.forward_features(self.features_test.to(self.device))
+                logits = self.model.forward_features(self.features_test.to(self.device))
                 acc = compute_accuracy(logits, self.labels_test.to(self.device))[0]
             avg_loss = running_loss / max(1, seen)
-            print(f"[SANITY] GP test fine-tune epoch {ep+1}/{num_epochs}: loss={avg_loss:.4f} acc_test={float(acc):.4f}")
+            print(f"[SANITY] Template weights test fine-tune epoch {ep+1}/{num_epochs}: loss={avg_loss:.4f} acc_test={float(acc):.4f}")

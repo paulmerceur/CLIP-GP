@@ -16,6 +16,7 @@ import json
 
 from clip import clip
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
+from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
 
 
 class TextEncoder(nn.Module):
@@ -52,14 +53,11 @@ def load_clip(config, device):
 
 def _get_templates(config):
     templates = ["a photo of a {}."]
-    try:
-        from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
-        if config.adapter.num_templates > 1:
-            templates += IMAGENET_TEMPLATES_SELECT[: config.adapter.num_templates - 1]
-        if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
-            templates += IMAGENET_TEMPLATES[: config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
-    except Exception:
-        pass
+    if config.adapter.num_templates > 1:
+        templates += IMAGENET_TEMPLATES_SELECT[: config.adapter.num_templates - 1]
+    if config.adapter.num_templates > 1 + len(IMAGENET_TEMPLATES_SELECT):
+        templates += IMAGENET_TEMPLATES[: config.adapter.num_templates - 1 - len(IMAGENET_TEMPLATES_SELECT)]
+    print(f"Templates: {templates}")
     return templates
 
 

@@ -19,6 +19,7 @@ class AdapterConfig:
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
+    finetune_template_weights_on_test: bool = False  # Do not use for regular training
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -30,7 +31,6 @@ class AdapterConfig:
     gp_num_mc_samples_eval: int = 10  # Number of Monte Carlo samples for testing
     learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
     gp_pca_dim: int = 128  # Dimensionality for PCA reduction before GP (0 = no reduction)
-    finetune_gp_on_test: bool = False  # Do not use for regular training
 
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
@@ -273,6 +273,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--template-init-method", type=str, default=None, choices=["uniform", "val_weighted", "top3", "minmax"], help="Template initialization method")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
+    parser.add_argument("--finetune-template-weights-on-test", action="store_true", help="Finetune template weights on test set")
 
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
@@ -284,7 +285,6 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--gp-num-mc-samples-eval", type=int, default=None, help="Number of Monte Carlo samples for testing")
     parser.add_argument("--learn-token-lambda", type=float, default=None, help="Weight for l2 regularization on visual learnable token inside the gp")
     parser.add_argument("--gp-pca-dim", type=int, default=None, help="Dimensionality for PCA reduction before GP")
-    parser.add_argument("--finetune-gp-on-test", action="store_true", help="Finetune GP on test set")
 
     # CoOp / CoCoOp
     parser.add_argument("--n-ctx", type=int, default=None, help="Number of context tokens for prompt learning")
@@ -368,7 +368,9 @@ def parse_args_to_config() -> Config:
         config.adapter.train_template_weights = True
     if args.freeze_visual_proj:
         config.adapter.freeze_visual_proj = True
-
+    if args.finetune_template_weights_on_test:
+        config.adapter.finetune_template_weights_on_test = True
+    
     # GP arguments
     if args.use_gp:
         config.adapter.use_gp = True
@@ -388,8 +390,6 @@ def parse_args_to_config() -> Config:
         config.adapter.learn_token_lambda = args.learn_token_lambda
     if args.gp_pca_dim is not None:
         config.adapter.gp_pca_dim = args.gp_pca_dim
-    if args.finetune_gp_on_test:
-        config.adapter.finetune_gp_on_test = True
 
     # CoOp / CoCoOp arguments
     if args.n_ctx is not None:
