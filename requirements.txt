@@ -10,3 +10,4 @@ torch
 torchvision
 pyyaml
 tensorboard
+entmax
