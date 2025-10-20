@@ -23,7 +23,7 @@ from .gp_template_weigher import GaussianProcessTemplateWeighter
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.conv.fp32_precision = 'tf32'
 
 
 @torch.no_grad()
@@ -196,7 +196,12 @@ class CustomCLIP(nn.Module):
             prototypes = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
         else:
             if isinstance(getattr(self, 'template_weights', None), torch.Tensor):
-                prototypes = torch.einsum("km,kmd->kd", cast(torch.Tensor, self.template_weights), self.text_embeddings)
+                template_weights = cast(torch.Tensor, self.template_weights)
+                K = self.text_embeddings.shape[0]
+                # If sharing weights across classes, broadcast from (1, M) to (K, M)
+                if template_weights.shape[0] == 1 and K > 1:
+                    template_weights = template_weights.expand(K, -1)
+                prototypes = torch.einsum("km,kmd->kd", template_weights, self.text_embeddings)
             else:
                 # Fallback to uniform mean if weights not initialized yet
                 prototypes = self.text_embeddings.mean(dim=1)
@@ -573,27 +578,30 @@ class Trainer(BaseTrainer):
         self.labels_test, output_test, self.features_test = self.extract_features(partition="test")
         print("Zero-Shot accuracy on test: " + str(round(compute_accuracy(output_test.cuda(), self.labels_test.cuda())[0], 2)))
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
-        try:
-            model = cast(CustomCLIP, self.model)
-            feats = self.features_train.to(self.device)
-            template_weights = _get_template_weights(
-                self.config,
-                text_embeddings=model.text_embeddings,
-                features=feats,
-                labels=self.labels_train.to(self.device),
-                logit_scale=model.logit_scale.exp(),
-            )
-            if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
-                with torch.no_grad():
-                    model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
-            else:
-                model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
-            if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
-                model.gp_weighter.initialize_from_weights(template_weights)
-                print("[GP] One-step initialization applied to GP weights.")
-        except Exception as e:
-            print(f"[WARN] Template weight init skipped: {e}")
+        model = cast(CustomCLIP, self.model)
+        feats = self.features_train.to(self.device)
+        template_weights = _get_template_weights(
+            self.config,
+            text_embeddings=model.text_embeddings,
+            features=feats,
+            labels=self.labels_train.to(self.device),
+            logit_scale=model.logit_scale.exp(),
+        )
+
+        # If sharing template weights across classes, average over the class dimension
+        if getattr(self.config.adapter, 'share_template_weights_across_classes', False):
+            template_weights = template_weights.mean(dim=0, keepdim=True)  # [1, M]
+
+        if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
+            with torch.no_grad():
+                model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
+        else:
+            model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+        if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
+            model.gp_weighter.initialize_from_weights(template_weights)
+            print("[GP] One-step initialization applied to GP weights.")
         self.before_train()
+        
         for self.epoch in range(self.start_epoch, self.max_epoch):
             self.before_epoch()
             self.run_epoch()
@@ -617,10 +625,16 @@ class Trainer(BaseTrainer):
                 print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
             else:
                 print(self.model.template_weights.shape)
-                mean_vals = self.model.template_weights.mean(dim=0).tolist()
-                std_vals = self.model.template_weights.std(dim=0).tolist()
-                print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
-                print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+                if self.model.template_weights.shape[0] == 1:
+                    # Shared weights across classes
+                    weights = self.model.template_weights.squeeze(0).tolist()
+                    print("Shared weights: [{}]".format(", ".join(f"{v:.4f}" for v in weights)))
+                else:
+                    # Per-class weights
+                    mean_vals = self.model.template_weights.mean(dim=0).tolist()
+                    std_vals = self.model.template_weights.std(dim=0).tolist()
+                    print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                    print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
         except Exception:
             pass
         print(f"Training completed in {time.time() - start_time:.2f} seconds")
@@ -906,7 +920,7 @@ class Trainer(BaseTrainer):
         """
         use_gp = bool(getattr(self.config.adapter, 'use_gp', False)) and getattr(self.model, 'gp_weighter', None) is not None
 
-        # Ensure template weights are registered as trainable parameters when GP is disabled
+            # Ensure template weights are registered as trainable parameters when GP is disabled
         if not use_gp:
             tw = getattr(self.model, 'template_weights', None)
             if isinstance(tw, torch.Tensor) and not isinstance(tw, torch.nn.Parameter):
@@ -995,3 +1009,5 @@ class Trainer(BaseTrainer):
                 acc = compute_accuracy(logits, self.labels_test.to(self.device))[0]
             avg_loss = running_loss / max(1, seen)
             print(f"[SANITY] Template weights test fine-tune epoch {ep+1}/{num_epochs}: loss={avg_loss:.4f} acc_test={float(acc):.4f}")
+
+

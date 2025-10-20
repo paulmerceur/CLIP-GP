@@ -20,6 +20,7 @@ class AdapterConfig:
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     finetune_template_weights_on_test: bool = False  # Do not use for regular training
+    share_template_weights_across_classes: bool = False  # If True, use shared template weights (1, num_templates) instead of per-class (num_classes, num_templates)
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -274,6 +275,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
     parser.add_argument("--finetune-template-weights-on-test", action="store_true", help="Finetune template weights on test set")
+    parser.add_argument("--share-template-weights-across-classes", action="store_true", help="Use shared template weights across all classes")
 
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
@@ -370,6 +372,8 @@ def parse_args_to_config() -> Config:
         config.adapter.freeze_visual_proj = True
     if args.finetune_template_weights_on_test:
         config.adapter.finetune_template_weights_on_test = True
+    if args.share_template_weights_across_classes:
+        config.adapter.share_template_weights_across_classes = True
     
     # GP arguments
     if args.use_gp:

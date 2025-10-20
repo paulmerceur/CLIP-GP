@@ -140,11 +140,15 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         Parameters
         ----------
         weights_km: torch.Tensor
-            Tensor of shape [K, M] with nonnegative weights summing to 1 per class.
+            Tensor of shape [K, M] or [1, M] with nonnegative weights summing to 1 per class.
         temperature: float
             Temperature to scale the initialization logits; >1 makes them softer.
         """
         w = weights_km.to(device=self._templates.device)
+        K = self.num_classes
+        # If sharing weights across classes, broadcast from (1, M) to (K, M)
+        if w.shape[0] == 1 and K > 1:
+            w = w.expand(K, -1)
         w = torch.clamp(w, min=1e-12)
         f_init = torch.log(w) / max(float(temperature), 1e-6)  # [K, M]
         try:
