@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Aggregate metrics.json files under output/<experiment>/ and print quick summaries.
-Also generate plots (Accuracy, ECE, AECE vs shots) per dataset and update a global CSV.
+Also generate plots (Accuracy, ECE, AECE vs shots) per dataset in _plots/perf_per_shots/,
+Accuracy vs ECE plots per dataset in _plots/acc_vs_ece/, plus average plots across datasets,
+and update a global CSV.
 
 Usage:
-  python scripts/aggregate_json.py <experiment_name> [--update-csv] [--csv runs.csv]
+  python scripts/aggregate_results.py <experiment_name> [--update-csv] [--csv runs.csv]
 
 This expects a layout like:
   output/<experiment>/<dataset>/<config>/seed*/metrics.json
@@ -87,10 +89,23 @@ def print_summary(grouped):
 def make_plots(grouped, exp_name: str):
     plots_dir = Path("output") / exp_name / "_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    perf_per_shots_dir = plots_dir / "perf_per_shots"
+    perf_per_shots_dir.mkdir(parents=True, exist_ok=True)
+
+    acc_vs_ece_dir = plots_dir / "acc_vs_ece"
+    acc_vs_ece_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect data for averaging across datasets
+    all_per_cfg_data = {}
+    all_shots_set = set()
+
     for ds, shots_map in grouped.items():
         # Build per-config shot->mean maps
         per_cfg: Dict[str, Dict[int, Dict[str, float]]] = {}
         all_shots: List[int] = sorted(shots_map.keys())
+        all_shots_set.update(all_shots)
+
         for shots, cfg_map in shots_map.items():
             for cfg, rs in cfg_map.items():
                 accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
@@ -104,49 +119,133 @@ def make_plots(grouped, exp_name: str):
                     "aece": statistics.fmean(aeces) if aeces else float('nan'),
                 }
 
-        num_cfg = len(per_cfg)
-        fig_w = max(16, min(48, 16 + 0.4 * max(0, num_cfg - 8)))
-        fig_h = 6  # normal height for plots
+        # Performance per shots plots (original plots)
+        make_perf_per_shots_plots(ds, per_cfg, all_shots, perf_per_shots_dir)
 
-        # Create a gridspec with extra row for legend
-        import matplotlib.gridspec as gridspec
-        fig = plt.figure(figsize=(fig_w, fig_h + 2))  # +2 for legend space
-        gs = gridspec.GridSpec(2, 3, height_ratios=[fig_h, 2])
-        ax_acc = fig.add_subplot(gs[0, 0])
-        ax_ece = fig.add_subplot(gs[0, 1])
-        ax_aece = fig.add_subplot(gs[0, 2])
+        # Accuracy vs ECE plots (new plots)
+        make_acc_vs_ece_plots(ds, per_cfg, all_shots, acc_vs_ece_dir)
 
+        # Collect data for averaging
         for cfg, shot_map in per_cfg.items():
-            xs = [s for s in all_shots if s in shot_map]
-            if not xs:
-                continue
-            ys_acc = [shot_map[s]["acc"] for s in xs]
-            ys_ece = [shot_map[s]["ece"] for s in xs]
-            ys_aece = [shot_map[s]["aece"] for s in xs]
-            ax_acc.plot(xs, ys_acc, marker="o", linestyle="-", label=cfg)
-            ax_ece.plot(xs, ys_ece, marker="o", linestyle="-", label=cfg)
-            ax_aece.plot(xs, ys_aece, marker="o", linestyle="-", label=cfg)
+            if cfg not in all_per_cfg_data:
+                all_per_cfg_data[cfg] = {}
+            for shots, metrics in shot_map.items():
+                if shots not in all_per_cfg_data[cfg]:
+                    all_per_cfg_data[cfg][shots] = {"acc": [], "ece": [], "aece": []}
+                for metric in ["acc", "ece", "aece"]:
+                    if not math.isnan(metrics[metric]):
+                        all_per_cfg_data[cfg][shots][metric].append(metrics[metric])
 
-        for ax, title, ylabel in [
-            (ax_acc, "Accuracy", "Accuracy (%)"),
-            (ax_ece, "ECE", "ECE"),
-            (ax_aece, "AECE", "AECE"),
-        ]:
-            ax.set_xlabel("# Shots")
-            ax.set_title(title)
-            ax.set_ylabel(ylabel)
-            ax.set_xticks(all_shots)
+    # Create average plots
+    num_datasets = len(grouped)
+    all_shots = sorted(all_shots_set)
 
-        handles, labels = ax_acc.get_legend_handles_labels()
-        if labels:
-            # Add legend to the bottom row spanning all columns
-            legend_ax = fig.add_subplot(gs[1, :])
-            legend_ax.axis('off')
-            legend_ax.legend(handles, labels, loc='center', ncol=2)
-        fig.suptitle(ds)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
-        fig.savefig(plots_dir / f"{ds}_metrics.png")
-        plt.close(fig)
+    # Average the metrics across datasets
+    avg_per_cfg = {}
+    for cfg, shot_map in all_per_cfg_data.items():
+        avg_per_cfg[cfg] = {}
+        for shots, metrics_lists in shot_map.items():
+            avg_per_cfg[cfg][shots] = {}
+            for metric in ["acc", "ece", "aece"]:
+                values = metrics_lists[metric]
+                avg_per_cfg[cfg][shots][metric] = statistics.fmean(values) if values else float('nan')
+
+    # Create average plots
+    make_perf_per_shots_plots(f"Average ({num_datasets} datasets)", avg_per_cfg, all_shots, perf_per_shots_dir)
+    make_acc_vs_ece_plots(f"Average ({num_datasets} datasets)", avg_per_cfg, all_shots, acc_vs_ece_dir)
+
+
+def make_perf_per_shots_plots(ds, per_cfg, all_shots, plots_dir):
+    num_cfg = len(per_cfg)
+    fig_w = max(16, min(48, 16 + 0.4 * max(0, num_cfg - 8)))
+    fig_h = 6  # normal height for plots
+
+    # Create a gridspec with extra row for legend
+    import matplotlib.gridspec as gridspec
+    fig = plt.figure(figsize=(fig_w, fig_h + 2))  # +2 for legend space
+    gs = gridspec.GridSpec(2, 3, height_ratios=[fig_h, 2])
+    ax_acc = fig.add_subplot(gs[0, 0])
+    ax_ece = fig.add_subplot(gs[0, 1])
+    ax_aece = fig.add_subplot(gs[0, 2])
+
+    for cfg, shot_map in per_cfg.items():
+        xs = [s for s in all_shots if s in shot_map]
+        if not xs:
+            continue
+        ys_acc = [shot_map[s]["acc"] for s in xs]
+        ys_ece = [shot_map[s]["ece"] for s in xs]
+        ys_aece = [shot_map[s]["aece"] for s in xs]
+        ax_acc.plot(xs, ys_acc, marker="o", linestyle="-", label=cfg)
+        ax_ece.plot(xs, ys_ece, marker="o", linestyle="-", label=cfg)
+        ax_aece.plot(xs, ys_aece, marker="o", linestyle="-", label=cfg)
+
+    for ax, title, ylabel in [
+        (ax_acc, "Accuracy", "Accuracy (%)"),
+        (ax_ece, "ECE", "ECE"),
+        (ax_aece, "AECE", "AECE"),
+    ]:
+        ax.set_xlabel("# Shots")
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(all_shots)
+
+    handles, labels = ax_acc.get_legend_handles_labels()
+    if labels:
+        # Add legend to the bottom row spanning all columns
+        legend_ax = fig.add_subplot(gs[1, :])
+        legend_ax.axis('off')
+        legend_ax.legend(handles, labels, loc='center', ncol=2)
+    fig.suptitle(ds)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+
+    # Use "average.png" for average plots, otherwise use dataset name
+    filename = "average.png" if ds.startswith("Average") else f"{ds}_metrics.png"
+    fig.savefig(plots_dir / filename)
+    plt.close(fig)
+
+
+def make_acc_vs_ece_plots(ds, per_cfg, all_shots, plots_dir):
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    for cfg, shot_map in per_cfg.items():
+        # Collect points for this config
+        points = []
+        for shots in all_shots:
+            if shots in shot_map:
+                acc = shot_map[shots]["acc"]
+                ece = shot_map[shots]["ece"]
+                if not (math.isnan(acc) or math.isnan(ece)):
+                    points.append((ece, acc))
+
+        if not points:
+            continue
+
+        # Sort points by ECE for cleaner line
+        points.sort(key=lambda p: p[0])
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+
+        ax.plot(xs, ys, marker="o", linestyle="-", label=cfg)
+
+        # Add star at average position
+        avg_ece = statistics.fmean(xs) if xs else float('nan')
+        avg_acc = statistics.fmean(ys) if ys else float('nan')
+        if not (math.isnan(avg_ece) or math.isnan(avg_acc)):
+            ax.scatter(avg_ece, avg_acc, marker="*", s=200, color=ax.get_lines()[-1].get_color(), zorder=10)
+
+    ax.set_xlabel("ECE")
+    ax.set_ylabel("Accuracy (%)")
+    ax.set_title(f"{ds}: Accuracy vs ECE")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+
+    # Use "average.png" for average plots, otherwise use dataset name
+    filename = "average.png" if ds.startswith("Average") else f"{ds}_acc_vs_ece.png"
+    fig.savefig(plots_dir / filename)
+    plt.close(fig)
 
 
 def update_global_csv(grouped, exp_name: str, csv_path: Path) -> None:
