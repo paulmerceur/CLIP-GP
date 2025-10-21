@@ -1,0 +1,35 @@
+name: benchmarks
+BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+
+# Seeds and shots
+seeds: [1, 2, 3, 4, 5]
+shots: [1, 2, 4, 8, 16, 32]
+
+# Output directory template
+template: "{experiment}/{dataset}/taskres_{shots}shots_{sig}/seed{seed}"
+
+# Grid of hyperparameters
+grid:
+  {}
+
+TRAINER_NAME: Adapter-TaskRes
+
+OPTIM:
+  # TaskRes defaults (from paper)
+  NAME: adam
+  LR: 0.002  # 2e-3 for most datasets, will override for ImageNet
+  MAX_EPOCH: 100  # 100 for 1-4 shot, 200 for 8-16 shot
+
+TRAINER:
+  ADAPTER:
+    # TaskRes specific
+    TASKRES_RESIDUAL_SCALE: 0.5  # α scaling factor (0.5 for most, 1.0 for Flowers102)
+
+
+

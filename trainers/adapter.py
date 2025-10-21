@@ -589,7 +589,7 @@ class Trainer(BaseTrainer):
         )
 
         # If sharing template weights across classes, average over the class dimension
-        if getattr(self.config.adapter, 'share_template_weights_across_classes', False):
+        if getattr(self.config.adapter, 'shared_template_weights', False):
             template_weights = template_weights.mean(dim=0, keepdim=True)  # [1, M]
 
         if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):

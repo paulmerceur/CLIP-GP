@@ -20,7 +20,7 @@ class AdapterConfig:
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     finetune_template_weights_on_test: bool = False  # Do not use for regular training
-    share_template_weights_across_classes: bool = False  # If True, use shared template weights (1, num_templates) instead of per-class (num_classes, num_templates)
+    shared_template_weights: bool = False  # If True, use shared template weights (1, num_templates) instead of per-class (num_classes, num_templates)
     
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
@@ -47,6 +47,9 @@ class AdapterConfig:
     tipaf_init_beta: float = 2.0
     tipaf_eps: float = 1e-4
 
+    # TaskRes specific
+    taskres_residual_scale: float = 0.5  # Scaling factor α for task residual (0.5 for most datasets, 1.0 for Flowers102)
+
 
 @dataclass
 class ModelConfig:
@@ -59,7 +62,7 @@ class ModelConfig:
 class DatasetConfig:
     """Dataset configuration"""
     name: str = "Caltech101"  # Dataset name
-    root: str = "/mnt/features/VDATA"
+    root: str = "/mnt/features/VDATA" # Root dataset directory
     num_shots: int = 1  # Number of shots for few-shot learning
     subsample_classes: str = "all"  # "all", "base", or "new"
     source_domains: Optional[List[str]] = None  # Source domains for DA/DG
@@ -114,7 +117,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-TipA", "Adapter-TipA-F", "Adapter-CLIP-Adapter"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-TipA", "Adapter-TipA-F", "Adapter-CLIP-Adapter", "Adapter-TaskRes"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -275,7 +278,7 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
     parser.add_argument("--finetune-template-weights-on-test", action="store_true", help="Finetune template weights on test set")
-    parser.add_argument("--share-template-weights-across-classes", action="store_true", help="Use shared template weights across all classes")
+    parser.add_argument("--shared-template-weights", action="store_true", help="Use shared template weights across all classes")
 
     # GP arguments
     parser.add_argument("--use-gp", action="store_true", help="Use GP weighting")
@@ -372,8 +375,8 @@ def parse_args_to_config() -> Config:
         config.adapter.freeze_visual_proj = True
     if args.finetune_template_weights_on_test:
         config.adapter.finetune_template_weights_on_test = True
-    if args.share_template_weights_across_classes:
-        config.adapter.share_template_weights_across_classes = True
+    if args.shared_template_weights:
+        config.adapter.shared_template_weights = True
     
     # GP arguments
     if args.use_gp:

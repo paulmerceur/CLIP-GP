@@ -4,5 +4,6 @@ from . import adapter_cocoop
 from . import adapter_tipa
 from . import adapter_tipa_f
 from . import adapter_clip_adapter
+from . import adapter_taskres
 
 
