@@ -35,12 +35,24 @@ class OxfordFlowers(DatasetBase):
             seed = config.seed
             preprocessed = os.path.join(self.split_fewshot_dir, f"shot_{num_shots}-seed_{seed}.pkl")
             
+            # Try to load preprocessed data, but handle import errors gracefully
+            data_loaded = False
             if os.path.exists(preprocessed):
-                print(f"Loading preprocessed few-shot data from {preprocessed}")
-                with open(preprocessed, "rb") as file:
-                    data = pickle.load(file)
-                    train, val = data["train"], data["val"]
-            else:
+                try:
+                    print(f"Loading preprocessed few-shot data from {preprocessed}")
+                    with open(preprocessed, "rb") as file:
+                        data = pickle.load(file)
+                        train, val = data["train"], data["val"]
+                    data_loaded = True
+                except (ModuleNotFoundError, ImportError, AttributeError) as e:
+                    print(f"Warning: Failed to load preprocessed data due to {e}. Regenerating...")
+                    # Remove the corrupted pickle file
+                    try:
+                        os.remove(preprocessed)
+                    except OSError:
+                        pass
+
+            if not data_loaded:
                 train = self.generate_fewshot_dataset(train, num_shots=num_shots)
                 val = self.generate_fewshot_dataset(val, num_shots=min(num_shots, 4))
                 data = {"train": train, "val": val}
