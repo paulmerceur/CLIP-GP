@@ -1,0 +1,31 @@
+name: baseline_linear
+BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
+datasets: [caltech101, oxford_pets, oxford_flowers]
+
+# Seeds and shots
+seeds: [1, 2, 3]
+shots: [1, 2, 4, 8, 16, 32]
+
+# Output directory template
+template: "{experiment}/{dataset}/baseline_linear_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
+grid:
+  {}
+
+TRAINER_NAME: Adapter
+
+TRAINER:
+  ADAPTER:
+    USE_GP: False
+    USE_LINEAR_TEMPLATE_WEIGHTING: True
+    TRAIN_TEMPLATE_WEIGHTS: True
+    FREEZE_VISUAL_PROJ: False
+    TEMPLATE_INIT_METHOD: uniform
+
+

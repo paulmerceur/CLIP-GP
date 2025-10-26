@@ -18,8 +18,9 @@ class AdapterConfig:
     l2_lambda: float = 0.1  # L2 regularization weight
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
+    use_linear_template_weighting: bool = False  # Use linear layer to compute template weights from embeddings (experimental)
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
-    finetune_template_weights_on_test: bool = False  # Do not use for regular training
+    finetune_on_test: bool = False  # Do not use for regular training
     shared_template_weights: bool = False  # If True, use shared template weights (1, num_templates) instead of per-class (num_classes, num_templates)
     
     # GP-specific settings
@@ -276,8 +277,9 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--l2-lambda", type=float, default=None, help="L2 regularization weight")
     parser.add_argument("--template-init-method", type=str, default=None, choices=["uniform", "val_weighted", "top3", "minmax"], help="Template initialization method")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
+    parser.add_argument("--use-linear-template-weighting", action="store_true", help="Use linear layer to compute template weights from embeddings (experimental)")
     parser.add_argument("--freeze-visual-proj", action="store_true", help="Freeze visual projection (keep identity; no training)")
-    parser.add_argument("--finetune-template-weights-on-test", action="store_true", help="Finetune template weights on test set")
+    parser.add_argument("--finetune-on-test", action="store_true", help="Finetune template weights on test set")
     parser.add_argument("--shared-template-weights", action="store_true", help="Use shared template weights across all classes")
 
     # GP arguments
@@ -371,10 +373,12 @@ def parse_args_to_config() -> Config:
         config.adapter.template_init_method = args.template_init_method
     if args.train_template_weights:
         config.adapter.train_template_weights = True
+    if args.use_linear_template_weighting:
+        config.adapter.use_linear_template_weighting = True
     if args.freeze_visual_proj:
         config.adapter.freeze_visual_proj = True
-    if args.finetune_template_weights_on_test:
-        config.adapter.finetune_template_weights_on_test = True
+    if args.finetune_on_test:
+        config.adapter.finetune_on_test = True
     if args.shared_template_weights:
         config.adapter.shared_template_weights = True
     

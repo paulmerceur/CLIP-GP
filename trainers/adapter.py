@@ -157,12 +157,24 @@ class CustomCLIP(nn.Module):
         # Optionally make template weights trainable for baseline
         use_gp = bool(getattr(config.adapter, 'use_gp', False))
         train_tw = bool(getattr(config.adapter, 'train_template_weights', False))
-        if (not use_gp) and train_tw:
+        use_linear_tw = bool(getattr(config.adapter, 'use_linear_template_weighting', False))
+
+        if (not use_gp) and train_tw and not use_linear_tw:
+            # Original approach: direct template weights matrix
             K = int(self.text_embeddings.shape[0])
             M = int(self.text_embeddings.shape[1])
             if M > 0:
                 init = torch.full((K, M), 1.0 / float(M), dtype=self.text_embeddings.dtype, device=self.text_embeddings.device)
                 self.template_weights = nn.Parameter(init, requires_grad=True)
+        elif (not use_gp) and use_linear_tw:
+            # New approach: linear layer that transforms embeddings to weights
+            D = int(self.text_embeddings.shape[-1])
+            self.template_weight_linear = nn.Linear(D, 1, bias=False)
+            # Initialize to produce roughly uniform weights
+            with torch.no_grad():
+                # We want the linear layer to initially produce similar values for all templates
+                # So initialize weights to small random values
+                self.template_weight_linear.weight.data.normal_(0, 0.01)
 
         # Learnable visual projection W (full-rank, bias-free), initialized to identity
         dim = int(self.text_embeddings.shape[-1])
@@ -195,7 +207,13 @@ class CustomCLIP(nn.Module):
             if num_samples <= 1: num_samples = 1
             prototypes = self.gp_weighter.sample_prototypes(num_samples, visual_embeddings)  # [S,K,D]
         else:
-            if isinstance(getattr(self, 'template_weights', None), torch.Tensor):
+            if hasattr(self, 'template_weight_linear'):
+                # Linear weighting: transform embeddings to scalars, then softmax
+                logits = self.template_weight_linear(self.text_embeddings).squeeze(-1)  # [K, M, D] -> [K, M, 1] -> [K, M]
+                template_weights = torch.softmax(logits, dim=-1)  # [K, M] normalized weights
+                prototypes = torch.einsum("km,kmd->kd", template_weights, self.text_embeddings)
+            elif isinstance(getattr(self, 'template_weights', None), torch.Tensor):
+                # Original approach: direct template weights matrix
                 template_weights = cast(torch.Tensor, self.template_weights)
                 K = self.text_embeddings.shape[0]
                 # If sharing weights across classes, broadcast from (1, M) to (K, M)
@@ -258,10 +276,11 @@ class Trainer(BaseTrainer):
         self.model.to(self.device)
         for name, param in self.model.named_parameters():
             allow_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'train_template_weights', False))
+            allow_linear_template = (not config.adapter.use_gp) and bool(getattr(config.adapter, 'use_linear_template_weighting', False))
             if bool(getattr(config.adapter, 'freeze_visual_proj', False)) and ("visual_proj" in name):
                 param.requires_grad = False
                 continue
-            if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)):
+            if ("visual_proj" in name) or ("gp_weighter" in name) or (allow_template and ("template_weights" in name)) or (allow_linear_template and ("template_weight_linear" in name)):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -293,6 +312,8 @@ class Trainer(BaseTrainer):
             if hasattr(self.model, 'template_weights') and isinstance(self.model.template_weights, torch.nn.Parameter):
                 if self.model.template_weights.requires_grad:
                     baseline_params.append(self.model.template_weights)
+            if hasattr(self.model, 'template_weight_linear'):
+                baseline_params.extend([p for p in self.model.template_weight_linear.parameters() if p.requires_grad])
             if len(baseline_params) == 0:
                 self.optim = None
                 self.sched = None
@@ -447,7 +468,9 @@ class Trainer(BaseTrainer):
         #         pass
 
         # L2 regularization
+        l2_reg = None
         try:
+            # Visual projection regularization (to identity)
             W = model.visual_proj.weight
             if W.requires_grad:
                 eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
@@ -456,8 +479,17 @@ class Trainer(BaseTrainer):
                 shots = self.config.dataset.num_shots
                 l2_reg = l2_reg * l2_lambda / shots
                 total_loss += l2_reg
-            else:
-                l2_reg = None
+
+            # Linear template weighting regularization (to small weights)
+            if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
+                linear_reg = model.template_weight_linear.weight.pow(2).sum()
+                linear_reg = linear_reg * l2_lambda / shots
+                total_loss += linear_reg
+                if l2_reg is not None:
+                    l2_reg += linear_reg
+                else:
+                    l2_reg = linear_reg
+
         except Exception:
             print("Error in L2 regularization")
             l2_reg = None
@@ -510,9 +542,28 @@ class Trainer(BaseTrainer):
 
         # Debug components
         try:
+            # Calculate individual regularization components
+            vis_reg = None
+            linear_reg = None
+            try:
+                if model.visual_proj.weight.requires_grad:
+                    eye = torch.eye(model.visual_proj.weight.shape[0], device=model.visual_proj.weight.device, dtype=model.visual_proj.weight.dtype)
+                    vis_reg = (model.visual_proj.weight - eye).pow(2).sum()
+                    vis_reg = vis_reg * self.config.adapter.l2_lambda / self.config.dataset.num_shots
+            except:
+                pass
+            try:
+                if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
+                    linear_reg = model.template_weight_linear.weight.pow(2).sum()
+                    linear_reg = linear_reg * self.config.adapter.l2_lambda / self.config.dataset.num_shots
+            except:
+                pass
+
             self._dbg_loss_components = {
                 "ce": float(ce_loss.detach().item()),
                 "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
+                "vis_reg": float(vis_reg.detach().item()) if vis_reg is not None else 0.0,
+                "linear_reg": float(linear_reg.detach().item()) if linear_reg is not None else 0.0,
                 "learn_token_reg": float(self._dbg_loss_components.get("learn_token_reg", 0.0)) if hasattr(self, '_dbg_loss_components') else 0.0,
                 "orth": float(orth.detach().item()) if orth is not None else 0.0,
                 "scores": w.mean(0)[0].detach().cpu() if (use_gp and gp_weighter is not None) else None,
@@ -592,11 +643,15 @@ class Trainer(BaseTrainer):
         if getattr(self.config.adapter, 'shared_template_weights', False):
             template_weights = template_weights.mean(dim=0, keepdim=True)  # [1, M]
 
-        if hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
+        if hasattr(model, 'template_weight_linear'):
+            # For linear weighting, no need to set template_weights since weights are computed dynamically
+            pass
+        elif hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
             with torch.no_grad():
                 model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
         else:
             model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
+
         if getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None:
             model.gp_weighter.initialize_from_weights(template_weights)
             print("[GP] One-step initialization applied to GP weights.")
@@ -609,8 +664,8 @@ class Trainer(BaseTrainer):
         
         # Optional sanity-check: fine-tune ONLY the template weights on the test set
         try:
-            if getattr(self.config.adapter, 'finetune_template_weights_on_test', False):
-                self._finetune_template_weights_on_test()
+            if getattr(self.config.adapter, 'finetune_on_test', False):
+                self._finetune_on_test()
         except Exception as e:
             print(f"[WARN] Template weights test-set fine-tune failed: {e}")
             
@@ -623,6 +678,22 @@ class Trainer(BaseTrainer):
                 std_vals = self.model.gp_weighter.scores.std(dim=0)[0].tolist()
                 print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
                 print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
+            elif hasattr(self.model, 'template_weight_linear'):
+                # Linear weighting: compute weights and show stats
+                with torch.no_grad():
+                    logits = self.model.template_weight_linear(self.model.text_embeddings).squeeze(-1)
+                    weights = torch.softmax(logits, dim=-1)
+                print(weights.shape)
+                if weights.shape[0] == 1:
+                    # Shared weights across classes
+                    weight_vals = weights.squeeze(0).tolist()
+                    print("Linear weights: [{}]".format(", ".join(f"{v:.4f}" for v in weight_vals)))
+                else:
+                    # Per-class weights
+                    mean_vals = weights.mean(dim=0).tolist()
+                    std_vals = weights.std(dim=0).tolist()
+                    print("Linear weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
+                    print("                 std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
             else:
                 print(self.model.template_weights.shape)
                 if self.model.template_weights.shape[0] == 1:
@@ -726,6 +797,7 @@ class Trainer(BaseTrainer):
                                 f"learn_token_reg={comp.get('learn_token_reg', 0):.4f} "
                                 f"orth={comp.get('orth', 0):.4f} "
                                 f"l2_reg={comp.get('l2_reg', comp.get('l2', 0)):.4f} "
+                                f"vis_reg={comp.get('vis_reg', 0):.4f} linear_reg={comp.get('linear_reg', 0):.4f} "
                                 f"scores={comp.get('scores', None)} "
                                 f"Total={comp.get('total', 0):.4f}  "
                             )
@@ -911,7 +983,7 @@ class Trainer(BaseTrainer):
 
         return targets
 
-    def _finetune_template_weights_on_test(self) -> None:
+    def _finetune_on_test(self) -> None:
         """Sanity check: cheating on the test set to validate the template weights.
 
         This freezes all non-template weights parameters (including the visual projection) and
@@ -930,7 +1002,7 @@ class Trainer(BaseTrainer):
         for name, param in self.model.named_parameters():
             if use_gp and "gp_weighter" in name:
                 param.requires_grad = True
-            elif not use_gp and "template_weights" in name:
+            elif not use_gp and ("template_weights" in name or "template_weight_linear" in name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
