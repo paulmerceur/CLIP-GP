@@ -53,7 +53,7 @@ def _get_template_weights(config, text_embeddings: torch.Tensor, features: torch
       - "uniform": uniform 1/M weights per class
       - "val_weighted": per-class per-template accuracy used as logits
       - "top3": keep global top-3 templates by average accuracy, mask others
-      - "minmax": per-class min–max rescale of accuracies in [0,1]
+      - "minmax": per-class min-max rescale of accuracies in [0,1]
 
     The pipeline:
       1) Compute zero-shot logits per template on provided features
@@ -160,12 +160,12 @@ class CustomCLIP(nn.Module):
         use_linear_tw = bool(getattr(config.adapter, 'use_linear_template_weighting', False))
 
         if (not use_gp) and train_tw and not use_linear_tw:
-            # Original approach: direct template weights matrix
+            # Trainable baseline: store logits and map to weights via softmax at use time
             K = int(self.text_embeddings.shape[0])
             M = int(self.text_embeddings.shape[1])
             if M > 0:
-                init = torch.full((K, M), 1.0 / float(M), dtype=self.text_embeddings.dtype, device=self.text_embeddings.device)
-                self.template_weights = nn.Parameter(init, requires_grad=True)
+                init_logits = torch.zeros((K, M), dtype=self.text_embeddings.dtype, device=self.text_embeddings.device)
+                self.template_weights = nn.Parameter(init_logits, requires_grad=True)
         elif (not use_gp) and use_linear_tw:
             # New approach: linear layer that transforms embeddings to weights
             D = int(self.text_embeddings.shape[-1])
@@ -212,13 +212,13 @@ class CustomCLIP(nn.Module):
                 logits = self.template_weight_linear(self.text_embeddings).squeeze(-1)  # [K, M, D] -> [K, M, 1] -> [K, M]
                 template_weights = torch.softmax(logits, dim=-1)  # [K, M] normalized weights
                 prototypes = torch.einsum("km,kmd->kd", template_weights, self.text_embeddings)
-            elif isinstance(getattr(self, 'template_weights', None), torch.Tensor):
-                # Original approach: direct template weights matrix
-                template_weights = cast(torch.Tensor, self.template_weights)
+            elif isinstance(getattr(self, 'template_weights', None), torch.nn.Parameter):
+                # Trainable baseline: treat stored values as logits -> normalize with softmax
+                logits = cast(torch.Tensor, self.template_weights)
                 K = self.text_embeddings.shape[0]
-                # If sharing weights across classes, broadcast from (1, M) to (K, M)
-                if template_weights.shape[0] == 1 and K > 1:
-                    template_weights = template_weights.expand(K, -1)
+                if logits.shape[0] == 1 and K > 1:
+                    logits = logits.expand(K, -1)
+                template_weights = torch.softmax(logits, dim=-1)
                 prototypes = torch.einsum("km,kmd->kd", template_weights, self.text_embeddings)
             else:
                 # Fallback to uniform mean if weights not initialized yet
@@ -262,8 +262,11 @@ class CustomCLIP(nn.Module):
 @TRAINER_REGISTRY.register("Adapter")
 class Trainer(BaseTrainer):
     """Unified adapter trainer supporting both baseline and GP methods."""
-    
+
     def __init__(self, config, dataset_manager):
+        # If full fine-tuning is enabled, modify config to use all training data
+        if getattr(config.dataset, 'full_finetune', False):
+            config.dataset.num_shots = 0
         super().__init__(config, dataset_manager)
 
     def build_model(self):
@@ -477,13 +480,20 @@ class Trainer(BaseTrainer):
                 l2_reg = (W - eye).pow(2).sum()
                 l2_lambda = self.config.adapter.l2_lambda
                 shots = self.config.dataset.num_shots
+                # For full fine-tuning (shots=0), use total training samples for scaling
+                if shots == 0:
+                    shots = len(self.features_train) if hasattr(self, 'features_train') else 1
                 l2_reg = l2_reg * l2_lambda / shots
                 total_loss += l2_reg
 
             # Linear template weighting regularization (to small weights)
             if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
                 linear_reg = model.template_weight_linear.weight.pow(2).sum()
-                linear_reg = linear_reg * l2_lambda / shots
+                # For full fine-tuning (shots=0), use total training samples for scaling
+                reg_shots = self.config.dataset.num_shots
+                if reg_shots == 0:
+                    reg_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
+                linear_reg = linear_reg * l2_lambda / reg_shots
                 total_loss += linear_reg
                 if l2_reg is not None:
                     l2_reg += linear_reg
@@ -549,13 +559,19 @@ class Trainer(BaseTrainer):
                 if model.visual_proj.weight.requires_grad:
                     eye = torch.eye(model.visual_proj.weight.shape[0], device=model.visual_proj.weight.device, dtype=model.visual_proj.weight.dtype)
                     vis_reg = (model.visual_proj.weight - eye).pow(2).sum()
-                    vis_reg = vis_reg * self.config.adapter.l2_lambda / self.config.dataset.num_shots
+                    debug_shots = self.config.dataset.num_shots
+                    if debug_shots == 0:
+                        debug_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
+                    vis_reg = vis_reg * self.config.adapter.l2_lambda / debug_shots
             except:
                 pass
             try:
                 if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
                     linear_reg = model.template_weight_linear.weight.pow(2).sum()
-                    linear_reg = linear_reg * self.config.adapter.l2_lambda / self.config.dataset.num_shots
+                    debug_shots = self.config.dataset.num_shots
+                    if debug_shots == 0:
+                        debug_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
+                    linear_reg = linear_reg * self.config.adapter.l2_lambda / debug_shots
             except:
                 pass
 
@@ -648,7 +664,9 @@ class Trainer(BaseTrainer):
             pass
         elif hasattr(model, 'template_weights') and isinstance(getattr(model, 'template_weights'), torch.nn.Parameter):
             with torch.no_grad():
-                model.template_weights.data.copy_(template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
+                # Store initialization as logits for trainable baseline
+                logits_init = torch.log(template_weights.clamp_min(1e-12))
+                model.template_weights.data.copy_(logits_init.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device))
         else:
             model.template_weights = template_weights.to(dtype=model.text_embeddings.dtype, device=model.text_embeddings.device)
 
@@ -695,15 +713,20 @@ class Trainer(BaseTrainer):
                     print("Linear weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
                     print("                 std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
             else:
-                print(self.model.template_weights.shape)
-                if self.model.template_weights.shape[0] == 1:
-                    # Shared weights across classes
-                    weights = self.model.template_weights.squeeze(0).tolist()
+                # For trainable baseline, internal tensor is logits; print normalized weights
+                tw = self.model.template_weights
+                if isinstance(tw, torch.nn.Parameter):
+                    with torch.no_grad():
+                        w = torch.softmax(tw, dim=-1)
+                else:
+                    w = tw
+                print(w.shape)
+                if w.shape[0] == 1:
+                    weights = w.squeeze(0).tolist()
                     print("Shared weights: [{}]".format(", ".join(f"{v:.4f}" for v in weights)))
                 else:
-                    # Per-class weights
-                    mean_vals = self.model.template_weights.mean(dim=0).tolist()
-                    std_vals = self.model.template_weights.std(dim=0).tolist()
+                    mean_vals = w.mean(dim=0).tolist()
+                    std_vals = w.std(dim=0).tolist()
                     print("Weights: mean = [{}]".format(", ".join(f"{v:.4f}" for v in mean_vals)))
                     print("          std = [{}]".format(", ".join(f"{v:.4f}" for v in std_vals)))
         except Exception:
@@ -1081,5 +1104,3 @@ class Trainer(BaseTrainer):
                 acc = compute_accuracy(logits, self.labels_test.to(self.device))[0]
             avg_loss = running_loss / max(1, seen)
             print(f"[SANITY] Template weights test fine-tune epoch {ep+1}/{num_epochs}: loss={avg_loss:.4f} acc_test={float(acc):.4f}")
-
-
