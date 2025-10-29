@@ -6,10 +6,10 @@ root: /mnt/features/VDATA/
 
 # Datasets
 #datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, eurosat, ucf101]
+datasets: [caltech101, oxford_pets, oxford_flowers]
 
 # Seeds and shots
-seeds: [1, 2, 3, 4, 5]
+seeds: [1, 2, 3]
 shots: [1, 2, 4, 8, 16]
 
 # Output directory template
@@ -17,13 +17,12 @@ template: "{experiment}/{dataset}/tipa-f_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  {}
+  TRAINER.ADAPTER.TIPAF_WEIGHTING: [gp]
 
 TRAINER_NAME: Adapter-TipA-F
 
 OPTIM:
-  # Tip-Adapter-F defaults
-  NAME: adamw
+  NAME: "adamw"
   LR: 0.001
   MAX_EPOCH: 20
 
@@ -33,5 +32,10 @@ TRAINER:
     TIPAF_INIT_ALPHA: 20.0
     TIPAF_INIT_BETA: 2.0
     TIPAF_EPS: 0.0001
+    # Adapter-specific (heavy) optimizer config
+    TIPAF_TW_EPOCHS: 200
+    TIPAF_TW_OPTIMIZER: adamw
+    TIPAF_TW_LR: 0.01
+    TIPAF_TW_EPS: 0.0001
 
 

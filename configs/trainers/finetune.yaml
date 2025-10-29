@@ -1,0 +1,39 @@
+name: finetune
+BASE_CONFIG: configs/trainers/default.yaml
+
+# Dataset root
+root: /mnt/features/VDATA/
+
+# Datasets
+# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+datasets: [caltech101, oxford_pets, oxford_flowers]
+
+# Seeds and shots
+seeds: [1, 2, 3]
+shots: [0]
+
+# Output directory template
+template: "{experiment}/{dataset}/finetune_{shots}shots_{sig}/seed{seed}"
+
+# Hyperparameters grid
+grid:
+  TRAINER.ADAPTER.USE_GP: [False, True]
+  TRAINER.ADAPTER.L2_LAMBDA: [0.0, 10.0, 0.05]
+
+TRAINER_NAME: Adapter
+
+TRAINER:
+  ADAPTER:
+    FREEZE_VISUAL_PROJ: False
+    NUM_TEMPLATES: 7
+    TEMPLATE_INIT_METHOD: val_weighted
+    # GP-specific overrides beyond default baseline
+    USE_GP: True
+    GP_KERNEL_TYPE: linear
+    GP_NUM_MC_SAMPLES_TRAIN: 30
+    GP_NUM_MC_SAMPLES_EVAL: 300
+    GP_USE_ELBO: False
+    GP_LR: 1.e-3
+    GP_BETA: 1.0
+    LEARN_TOKEN_LAMBDA: 1e-2
+    GP_PCA_DIM: 256

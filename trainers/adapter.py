@@ -480,9 +480,10 @@ class Trainer(BaseTrainer):
                 l2_reg = (W - eye).pow(2).sum()
                 l2_lambda = self.config.adapter.l2_lambda
                 shots = self.config.dataset.num_shots
+                num_classes = len(self.dm.dataset.classnames)
                 # For full fine-tuning (shots=0), use total training samples for scaling
                 if shots == 0:
-                    shots = len(self.features_train) if hasattr(self, 'features_train') else 1
+                    shots = len(self.features_train) / num_classes
                 l2_reg = l2_reg * l2_lambda / shots
                 total_loss += l2_reg
 

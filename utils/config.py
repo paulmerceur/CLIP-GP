@@ -26,13 +26,13 @@ class AdapterConfig:
     # GP-specific settings
     use_gp: bool = False  # Whether to use GP weighting for templates
     gp_kernel_type: str = "rbf"  # Kernel type: "rbf", "linear", "matern"
-    gp_use_elbo: bool = True  # If True, add GP ELBO (with KL) during main training
-    gp_lr: float = 0.01  # Learning rate for GP parameters
+    gp_use_elbo: bool = False  # If True, add GP ELBO (with KL) during main training
+    gp_lr: float = 0.001  # Learning rate for GP parameters
     gp_beta: float = 0.001  # KL weight for ELBO loss
-    gp_num_mc_samples_train: int = 10  # Number of Monte Carlo samples for training
-    gp_num_mc_samples_eval: int = 10  # Number of Monte Carlo samples for testing
-    learn_token_lambda: float = 1e-3  # Weight for l2 regularization on visual learnable token inside the gp
-    gp_pca_dim: int = 128  # Dimensionality for PCA reduction before GP (0 = no reduction)
+    gp_num_mc_samples_train: int = 30  # Number of Monte Carlo samples for training
+    gp_num_mc_samples_eval: int = 100  # Number of Monte Carlo samples for testing
+    learn_token_lambda: float = 1e-2  # Weight for l2 regularization on visual learnable token inside the gp
+    gp_pca_dim: int = 256  # Dimensionality for PCA reduction before GP (0 = no reduction)
 
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
@@ -47,6 +47,12 @@ class AdapterConfig:
     tipaf_init_alpha: float = 20.0
     tipaf_init_beta: float = 2.0
     tipaf_eps: float = 1e-4
+    tipaf_weighting: str = "none"  # "none" (standard), "tw" (template weights), "gp" (Gaussian Process)
+    # Template weighting optimizer
+    tipaf_tw_epochs: int = 200  # Epochs to train the Tip-Adapter-F adapter (heavy part)
+    tipaf_tw_optimizer: str = "adamw"  # Optimizer for adapter: adamw, adam, sgd
+    tipaf_tw_lr: float = 0.01  # LR for adapter optimizer
+    tipaf_tw_eps: float = 1e-4  # Epsilon for adapter optimizer (if applicable)
 
     # TaskRes specific
     taskres_residual_scale: float = 0.5  # Scaling factor α for task residual (0.5 for most datasets, 1.0 for Flowers102)

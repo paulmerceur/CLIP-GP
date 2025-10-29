@@ -196,7 +196,7 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         # visual_token = self.variational_strategy.inducing_points[:, -1, :]  # [K, D]
         # visual_token = F.normalize(visual_token, p=2, dim=-1).unsqueeze(1)  # [K, 1, D]
 
-        if (visual_embeddings.shape[0] == self.num_classes) and (visual_embeddings is not None):
+        if (visual_embeddings is not None) and (visual_embeddings.shape[0] == self.num_classes):
             # visual_embeddings = visual_embeddings.unsqueeze(1)
             visual_embeddings = self._project(visual_embeddings).unsqueeze(1)  # [K, 1, d]
             
@@ -234,7 +234,9 @@ class ResidualMeanWithBias(gpytorch.means.Mean):
     def forward(self, x):
         K, M = self.f0.shape
         N = x.size(-2)
-        base = self.f0 + self.cls_bias + self.tmp_bias       # [K,M]
+        # Ensure device/dtype alignment with inputs
+        f0 = self.f0.to(device=x.device, dtype=self.cls_bias.dtype)
+        base = f0 + self.cls_bias + self.tmp_bias       # [K,M]
         if N == M:
             return base
         extra = N - M
