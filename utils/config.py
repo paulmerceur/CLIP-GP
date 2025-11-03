@@ -37,6 +37,8 @@ class AdapterConfig:
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
     clip_adapter_ratio: float = 0.2   # Blend ratio between adapted and original features
+    clip_adapter_weighting: str = "none"  # "none", "tw", "gp"
+    clip_adapter_tw_lr: float = 0.01  # Learning rate for learnable template weights (CLIP-Adapter)
 
     # Prompt-learning (CoOp / CoCoOp)
     n_ctx: int = 16 # number of learnable context tokens

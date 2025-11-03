@@ -17,7 +17,7 @@ template: "{experiment}/{dataset}/clip-adapter_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  {}
+  TRAINER.ADAPTER.CLIP_ADAPTER_WEIGHTING: [gp]
 
 TRAINER_NAME: Adapter-CLIP-Adapter
 

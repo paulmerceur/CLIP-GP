@@ -38,6 +38,9 @@ def load_runs(exp_dir: Path) -> List[Dict[str, Any]]:
             for seed_dir in sorted(d for d in config_dir.glob("seed*")):
                 metrics_path = seed_dir / "metrics.json"
                 if not metrics_path.is_file():
+                    # delete the seed_dir
+                    import shutil
+                    shutil.rmtree(seed_dir)
                     continue
                 try:
                     payload = json.loads(metrics_path.read_text())
