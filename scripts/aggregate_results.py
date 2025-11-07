@@ -31,16 +31,18 @@ import math
 import matplotlib.pyplot as plt
 
 
-def load_runs(exp_dir: Path) -> List[Dict[str, Any]]:
+def load_runs(exp_dir: Path, delete: bool = False) -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
     for dataset_dir in sorted(d for d in exp_dir.iterdir() if d.is_dir()):
         for config_dir in sorted(d for d in dataset_dir.iterdir() if d.is_dir()):
             for seed_dir in sorted(d for d in config_dir.glob("seed*")):
                 metrics_path = seed_dir / "metrics.json"
                 if not metrics_path.is_file():
-                    # delete the seed_dir
-                    import shutil
-                    shutil.rmtree(seed_dir)
+                    if delete:
+                        import shutil
+                        shutil.rmtree(seed_dir)
+                    else:
+                        print(f"Skipping {seed_dir} because it doesn't exist")
                     continue
                 try:
                     payload = json.loads(metrics_path.read_text())
@@ -294,10 +296,11 @@ def main():
     ap.add_argument("experiment", help="Experiment subfolder under output/")
     ap.add_argument("--csv", default="runs.csv", help="Global CSV filename under output/")
     ap.add_argument("--update-csv", action="store_true", help="Append aggregated rows to global CSV (off by default)")
+    ap.add_argument("--delete", action="store_true", help="Delete uncompleted runs (metrics could not be retrieved)")
     args = ap.parse_args()
 
     exp_dir = Path("output") / args.experiment
-    runs = load_runs(exp_dir)
+    runs = load_runs(exp_dir, args.delete)
     if not runs:
         print("No metrics.json found. Did the runs finish?")
         return
