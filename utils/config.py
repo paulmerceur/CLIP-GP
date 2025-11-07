@@ -45,16 +45,14 @@ class AdapterConfig:
     ctx_init: str = "" # optional initialization phrase (overrides n_ctx)
     csc: bool = False  # Class-Specific Context when no ctx_init is provided
 
-    # Tip-Adapter-F defaults (paper-aligned)
-    tipaf_init_alpha: float = 20.0
-    tipaf_init_beta: float = 2.0
-    tipaf_eps: float = 1e-4
-    tipaf_weighting: str = "none"  # "none" (standard), "tw" (template weights), "gp" (Gaussian Process)
-    # Template weighting optimizer
-    tipaf_tw_epochs: int = 200  # Epochs to train the Tip-Adapter-F adapter (heavy part)
-    tipaf_tw_optimizer: str = "adamw"  # Optimizer for adapter: adamw, adam, sgd
-    tipaf_tw_lr: float = 0.01  # LR for adapter optimizer
-    tipaf_tw_eps: float = 1e-4  # Epsilon for adapter optimizer (if applicable)
+    # Tip-Adapter defaults
+    tip_adapter_trainable: bool = False
+    tip_adapter_optimizer: str = "sgd"
+    tip_adapter_lr: float = 0.001
+    tip_adapter_epochs: int = 20
+    tip_adapter_init_alpha: float = 0.0
+    tip_adapter_init_beta: float = 0.0
+    tip_adapter_eps: float = 0.0
 
     # TaskRes specific
     taskres_residual_scale: float = 0.5  # Scaling factor α for task residual (0.5 for most datasets, 1.0 for Flowers102)
@@ -126,7 +124,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Adapter-TipA", "Adapter-TipA-F", "Adapter-CLIP-Adapter", "Adapter-TaskRes"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Tip-Adapter", "Adapter-CLIP-Adapter", "Adapter-TaskRes"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -306,11 +304,6 @@ def parse_args_to_config() -> Config:
     parser.add_argument("--ctx-init", type=str, default=None, help="Initialization phrase for context tokens")
     parser.add_argument("--csc", action="store_true", help="Use class-specific context for prompt learning")
 
-    # Tip-Adapter-F arguments
-    parser.add_argument("--tipaf-init-alpha", type=float, default=None, help="Initial alpha value for Tip-Adapter-F")
-    parser.add_argument("--tipaf-init-beta", type=float, default=None, help="Initial beta value for Tip-Adapter-F")
-    parser.add_argument("--tipaf-eps", type=float, default=None, help="Epsilon value for Tip-Adapter-F")
-
     # CLIP-Adapter arguments
     parser.add_argument("--clip-adapter-reduction", type=int, default=None, help="Bottleneck reduction ratio for adapter MLP")
     parser.add_argument("--clip-adapter-ratio", type=float, default=None, help="Blend ratio between adapted and original features")
@@ -417,14 +410,6 @@ def parse_args_to_config() -> Config:
         config.adapter.ctx_init = args.ctx_init
     if args.csc:
         config.adapter.csc = True
-
-    # Tip-Adapter-F arguments
-    if args.tipaf_init_alpha is not None:
-        config.adapter.tipaf_init_alpha = args.tipaf_init_alpha
-    if args.tipaf_init_beta is not None:
-        config.adapter.tipaf_init_beta = args.tipaf_init_beta
-    if args.tipaf_eps is not None:
-        config.adapter.tipaf_eps = args.tipaf_eps
 
     # CLIP-Adapter arguments
     if args.clip_adapter_reduction is not None:

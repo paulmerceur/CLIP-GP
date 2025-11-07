@@ -54,7 +54,7 @@ class Trial:
     def signature(self) -> str:
         # Human-readable signature: join "<lastkey><value>" pairs without hashing
         if not self.grid_overrides:
-            return "default"
+            return ""
         parts: List[str] = []
         for k, v in sorted(self.grid_overrides.items()):
             short = k.split(".")[-1]
