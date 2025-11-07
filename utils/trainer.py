@@ -374,6 +374,10 @@ class BaseTrainer:
         print(f"* macro_f1: {macro_f1:.1f}%")
         print(f"* ECE: {ece:.2f}%")
         print(f"* AECE: {aece:.2f}%")
+
+        # Save summary to json file
+        self._write_run_summary_json(results, start_time=self.time_start)
+
         
         # Write to TensorBoard
         for k, v in results.items():
