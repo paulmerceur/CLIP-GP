@@ -418,10 +418,7 @@ class BaseTrainer:
     def _write_run_summary_json(self, metrics: Dict[str, float], start_time: float) -> None:
         """Write a JSON summary for this run under output_dir/metrics.json."""
         out_dir = Path(self.output_dir)
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+
         # Infer method for clarity
         try:
             tname = getattr(self.config, 'trainer_name', '')
@@ -439,6 +436,10 @@ class BaseTrainer:
                 method = 'gp' if bool(getattr(self.config.adapter, 'use_gp', False)) else 'baseline'
         except Exception:
             method = 'baseline'
+
+        # Get zero-shot metrics if computed earlier
+        zs = getattr(self, "zero_shot_metrics", None)
+
         # Prepare payload
         payload = {
             "timestamp": datetime.datetime.now().isoformat(),
@@ -447,6 +448,7 @@ class BaseTrainer:
             "seed": int(self.config.seed),
             "method": method,
             "backbone": self.config.model.backbone_name,
+            "zero_shot": zs,
             "metrics": metrics,
             "config": self._config_to_dict_for_json(),
             "output_dir": str(out_dir),
