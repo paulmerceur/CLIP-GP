@@ -14,6 +14,7 @@ from pathlib import Path
 class AdapterConfig:
     """Adapter-specific configuration"""
     # Basic adapter settings
+    use_custom_templates: bool = False  # Use custom templates for the dataset, this will negate the use of num_templates
     num_templates: int = 1  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
