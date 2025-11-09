@@ -30,6 +30,16 @@ import statistics
 import math
 import matplotlib.pyplot as plt
 
+# Edit this list to control how configs are grouped when using --grouped.
+# Each string is matched as a substring against the normalized config name
+# (i.e., the config directory name with the "_<shots>shots" suffix removed).
+# The order matters: a config will be assigned to the first matching substring.
+GROUP_SUBSTRINGS: List[str] = [
+    "_8templates",
+    "_88templates",
+    "_custom_templates",
+]
+
 
 def load_runs(exp_dir: Path, delete: bool = False) -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
@@ -75,23 +85,65 @@ def print_summary(grouped):
         rows = []
         for shots, cfg_map in sorted(shots_map.items()):
             for cfg, rs in sorted(cfg_map.items()):
-                accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
+                accs = [float(r["metrics"].get("accuracy", float('nan'))) for r in rs]
+                if math.isnan(accs[0]):
+                    accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
                 eces = [float(r["metrics"].get("ece", float('nan'))) for r in rs]
                 aeces = [float(r["metrics"].get("aece", float('nan'))) for r in rs]
                 n = len(rs)
-                acc_mean = statistics.fmean(accs) if accs else float('nan')
-                acc_std = statistics.pstdev(accs) if n > 1 else 0.0
-                ece_mean = statistics.fmean(eces) if eces else float('nan')
-                ece_std = statistics.pstdev(eces) if n > 1 else 0.0
-                aece_mean = statistics.fmean(aeces) if aeces else float('nan')
-                aece_std = statistics.pstdev(aeces) if n > 1 else 0.0
+                try:
+                    acc_mean = statistics.fmean(accs) if accs else float('nan')
+                    acc_std = statistics.pstdev(accs) if n > 1 else 0.0
+                    ece_mean = statistics.fmean(eces) if eces else float('nan')
+                    ece_std = statistics.pstdev(eces) if n > 1 else 0.0
+                    aece_mean = statistics.fmean(aeces) if aeces else float('nan')
+                    aece_std = statistics.pstdev(aeces) if n > 1 else 0.0
+                except Exception:
+                    print(f"Error calculating statistics for {cfg} {shots}: {accs}")
                 rows.append((cfg, shots, n, acc_mean, acc_std, ece_mean, ece_std, aece_mean, aece_std))
         rows.sort(key=lambda x: (x[1], x[0]))
         for cfg, shots, n, acc_m, acc_s, ece_m, ece_s, aece_m, aece_s in rows:
             print(f"{cfg:<{max_cfg_len}} {shots:>5d} {n:>5d} | {acc_m:7.2f} {acc_s:7.2f} | {ece_m:7.3f} {ece_s:7.3f} | {aece_m:7.3f} {aece_s:7.3f}")
 
 
-def make_plots(grouped, exp_name: str):
+def _group_per_cfg(per_cfg: Dict[str, Dict[int, Dict[str, float]]]) -> tuple[Dict[str, Dict[int, Dict[str, float]]], Dict[str, Dict[int, Dict[str, float]]], Dict[str, set]]:
+    """
+    Group per-config metrics by substring. Returns:
+      - per_group_for_plot: keys include counts e.g. "<substr> (N)"
+      - per_group_for_collect: keys are raw "<substr>" (stable across datasets)
+      - group_to_fams: mapping from raw "<substr>" (cleaned) to the set of matched fam names
+    """
+    assigned = set()  # fams already grouped
+    per_group_for_plot: Dict[str, Dict[int, Dict[str, float]]] = {}
+    per_group_for_collect: Dict[str, Dict[int, Dict[str, float]]] = {}
+    group_to_fams: Dict[str, set] = {}
+    substrings = GROUP_SUBSTRINGS
+    for sub in substrings:
+        matched = [fam for fam in per_cfg.keys() if fam not in assigned and sub in fam]
+        if not matched:
+            continue
+        # Aggregate across matched configs per shot
+        shots_all = sorted({s for fam in matched for s in per_cfg[fam].keys()})
+        shot_map: Dict[int, Dict[str, float]] = {}
+        for s in shots_all:
+            vals_acc = [per_cfg[fam][s]["acc"] for fam in matched if s in per_cfg[fam] and not math.isnan(per_cfg[fam][s]["acc"])]
+            vals_ece = [per_cfg[fam][s]["ece"] for fam in matched if s in per_cfg[fam] and not math.isnan(per_cfg[fam][s]["ece"])]
+            vals_aece = [per_cfg[fam][s]["aece"] for fam in matched if s in per_cfg[fam] and not math.isnan(per_cfg[fam][s]["aece"])]
+            shot_map[s] = {
+                "acc": statistics.fmean(vals_acc) if vals_acc else float('nan'),
+                "ece": statistics.fmean(vals_ece) if vals_ece else float('nan'),
+                "aece": statistics.fmean(vals_aece) if vals_aece else float('nan'),
+            }
+        clean_sub = sub.replace("_", "")
+        label_with_count = f"{clean_sub} ({len(matched)})"
+        per_group_for_plot[label_with_count] = shot_map
+        per_group_for_collect[clean_sub] = shot_map
+        group_to_fams.setdefault(clean_sub, set()).update(matched)
+        assigned.update(matched)
+    return per_group_for_plot, per_group_for_collect, group_to_fams
+
+
+def make_plots(grouped, exp_name: str, use_grouping: bool = False):
     plots_dir = Path("output") / exp_name / "_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +156,7 @@ def make_plots(grouped, exp_name: str):
     # Collect data for averaging across datasets
     all_per_cfg_data = {}
     all_shots_set = set()
+    global_group_to_fams: Dict[str, set] = {}
 
     for ds, shots_map in grouped.items():
         # Build per-config shot->mean maps
@@ -113,7 +166,9 @@ def make_plots(grouped, exp_name: str):
 
         for shots, cfg_map in shots_map.items():
             for cfg, rs in cfg_map.items():
-                accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
+                accs = [float(r["metrics"].get("accuracy", float('nan'))) for r in rs]
+                if math.isnan(accs[0]):
+                    accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
                 eces = [float(r["metrics"].get("ece", float('nan'))) for r in rs]
                 aeces = [float(r["metrics"].get("aece", float('nan'))) for r in rs]
                 # Normalize config label across shots to draw a single line
@@ -124,14 +179,25 @@ def make_plots(grouped, exp_name: str):
                     "aece": statistics.fmean(aeces) if aeces else float('nan'),
                 }
 
+        # Optionally regroup multiple configs into single lines by substring
+        if use_grouping:
+            per_group_for_plot, per_group_for_collect, group_to_fams = _group_per_cfg(per_cfg)
+            per_cfg_for_plots = per_group_for_plot
+            per_cfg_for_collect = per_group_for_collect
+            for g, fams in group_to_fams.items():
+                global_group_to_fams.setdefault(g, set()).update(fams)
+        else:
+            per_cfg_for_plots = per_cfg
+            per_cfg_for_collect = per_cfg
+
         # Performance per shots plots (original plots)
-        make_perf_per_shots_plots(ds, per_cfg, all_shots, perf_per_shots_dir)
+        make_perf_per_shots_plots(ds, per_cfg_for_plots, all_shots, perf_per_shots_dir)
 
         # Accuracy vs ECE plots (new plots)
-        make_acc_vs_ece_plots(ds, per_cfg, all_shots, acc_vs_ece_dir)
+        make_acc_vs_ece_plots(ds, per_cfg_for_plots, all_shots, acc_vs_ece_dir)
 
         # Collect data for averaging
-        for cfg, shot_map in per_cfg.items():
+        for cfg, shot_map in per_cfg_for_collect.items():
             if cfg not in all_per_cfg_data:
                 all_per_cfg_data[cfg] = {}
             for shots, metrics in shot_map.items():
@@ -155,9 +221,20 @@ def make_plots(grouped, exp_name: str):
                 values = metrics_lists[metric]
                 avg_per_cfg[cfg][shots][metric] = statistics.fmean(values) if values else float('nan')
 
+    # If grouping, relabel average lines to include counts: "<group> (N configs)"
+    if use_grouping and global_group_to_fams:
+        avg_labeled: Dict[str, Dict[int, Dict[str, float]]] = {}
+        for clean_group, shot_map in avg_per_cfg.items():
+            n_cfg = len(global_group_to_fams.get(clean_group, set()))
+            label = f"{clean_group} ({n_cfg} configs)"
+            avg_labeled[label] = shot_map
+        avg_for_plots = avg_labeled
+    else:
+        avg_for_plots = avg_per_cfg
+
     # Create average plots
-    make_perf_per_shots_plots(f"Average ({num_datasets} datasets)", avg_per_cfg, all_shots, perf_per_shots_dir)
-    make_acc_vs_ece_plots(f"Average ({num_datasets} datasets)", avg_per_cfg, all_shots, acc_vs_ece_dir)
+    make_perf_per_shots_plots(f"Average ({num_datasets} datasets)", avg_for_plots, all_shots, perf_per_shots_dir)
+    make_acc_vs_ece_plots(f"Average ({num_datasets} datasets)", avg_for_plots, all_shots, acc_vs_ece_dir)
 
 
 def make_perf_per_shots_plots(ds, per_cfg, all_shots, plots_dir):
@@ -271,7 +348,9 @@ def update_global_csv(grouped, exp_name: str, csv_path: Path) -> None:
         for ds, shots_map in grouped.items():
             for shots, cfg_map in shots_map.items():
                 for cfg, rs in cfg_map.items():
-                    accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
+                    accs = [float(r["metrics"].get("accuracy", float('nan'))) for r in rs]
+                    if math.isnan(accs[0]):
+                        accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
                     eces = [float(r["metrics"].get("ece", float('nan'))) for r in rs]
                     aeces = [float(r["metrics"].get("aece", float('nan'))) for r in rs]
                     n = len(rs)
@@ -297,6 +376,7 @@ def main():
     ap.add_argument("--csv", default="runs.csv", help="Global CSV filename under output/")
     ap.add_argument("--update-csv", action="store_true", help="Append aggregated rows to global CSV (off by default)")
     ap.add_argument("--delete", action="store_true", help="Delete uncompleted runs (metrics could not be retrieved)")
+    ap.add_argument("--grouped", action="store_true", help="Group multiple configs into single lines using GROUP_SUBSTRINGS")
     args = ap.parse_args()
 
     exp_dir = Path("output") / args.experiment
@@ -306,7 +386,7 @@ def main():
         return
     grouped = group_by_dataset_shots_config(runs)
     print_summary(grouped)
-    make_plots(grouped, args.experiment)
+    make_plots(grouped, args.experiment, use_grouping=args.grouped)
     if args.update_csv:
         update_global_csv(grouped, args.experiment, Path("output") / args.csv)
 
