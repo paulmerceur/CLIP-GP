@@ -3,6 +3,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from clip import clip
 
 from utils.trainer import BaseTrainer, load_clip, _get_templates, _get_clip_weights
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
@@ -74,6 +75,55 @@ class Trainer(BaseTrainer):
         self.build_model()
         # Zero-shot baseline (for consistent logs)
         self.set_model_mode("eval")
+        # Optional: train template weight matrix before Tip-Adapter
+        use_tw = bool(getattr(self.config.adapter, "tip_adapter_use_template_weight_training", False))
+        if use_tw:
+            # Pre-extract few-shot train features
+            tr_feats, tr_labels = _preextract_features(self.clip_model, self.train_loader_x, self.device)
+            # Build per-class, per-template text embeddings [K, M, D]
+            with torch.no_grad():
+                E_list = []
+                for name in self.classnames:
+                    prompts = [t.format(name) for t in self.templates]
+                    tok = clip.tokenize(prompts).to(self.device)
+                    emb = self.clip_model.encode_text(tok)  # [M, D]
+                    emb = emb / emb.norm(dim=-1, keepdim=True)
+                    E_list.append(emb)
+                E = torch.stack(E_list, dim=0)  # [K, M, D]
+            K = int(E.shape[0])
+            M = int(E.shape[1])
+            tw_logits = nn.Parameter(torch.zeros(K, M, device=self.device, dtype=E.dtype))
+            # Optimizer from CONFIG.OPTIM
+            lr = float(self.config.optim.lr)
+            wd = float(getattr(self.config.optim, 'weight_decay', 0.0))
+            optimizer = torch.optim.AdamW([tw_logits], lr=lr, weight_decay=wd)
+            total_steps = max(1, len(self.train_loader_x)) * max(1, int(getattr(self.config.optim, 'max_epoch', 50)))
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
+            # Train for train.max_epoch epochs on few-shot cached features
+            epochs = int(getattr(self.config.optim, 'max_epoch', 50))
+            for ep in range(epochs):
+                weights = torch.softmax(tw_logits, dim=-1)  # [K, M]
+                # Prototypes [K, D]
+                prototypes = torch.einsum("km,kmd->kd", weights, E)
+                prototypes = prototypes / prototypes.norm(dim=-1, keepdim=True)
+                # Logits for all training features
+                feats = tr_feats.to(device=self.device, dtype=prototypes.dtype)
+                logits = 100.0 * (feats @ prototypes.t())
+                loss = F.cross_entropy(logits, tr_labels.to(self.device))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                if (ep == 0) or ((ep + 1) % 10 == 0):
+                    with torch.no_grad():
+                        acc = compute_accuracy(logits, tr_labels.to(self.device))[0]
+                    print(f"[TW] epoch {ep+1}/{epochs} loss={float(loss):.4f} acc={float(acc):.2f}")
+            with torch.no_grad():
+                weights = torch.softmax(tw_logits, dim=-1)
+                prototypes = torch.einsum("km,kmd->kd", weights, E)
+                prototypes = prototypes / prototypes.norm(dim=-1, keepdim=True)  # [K, D]
+                self.clip_weights = prototypes.t().to(self.device)  # [D, K]
+        # Zero-shot after optional template-weight training
         test_feats, test_labels = _preextract_features(self.clip_model, self.test_loader, self.device)
         clip_logits_test = 100.0 * (test_feats.to(self.device) @ self.clip_weights)
         zs_acc = compute_accuracy(clip_logits_test, test_labels.to(self.device))[0]

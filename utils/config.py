@@ -47,6 +47,7 @@ class AdapterConfig:
 
     # Tip-Adapter defaults
     tip_adapter_trainable: bool = False
+    tip_adapter_use_template_weight_training: bool = False
     tip_adapter_optimizer: str = "sgd"
     tip_adapter_lr: float = 0.001
     tip_adapter_epochs: int = 20
