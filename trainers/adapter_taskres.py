@@ -10,7 +10,6 @@ from utils.metrics import compute_accuracy, AverageMeter
 from utils.optimization import build_optimizer, build_lr_scheduler
 from utils.trainer_registry import TRAINER_REGISTRY
 
-
 # Custom templates for different datasets (from TaskRes implementation)
 CUSTOM_TEMPLATES = {
     "Caltech101": "a photo of a {}.",
@@ -66,14 +65,7 @@ class CustomCLIP(nn.Module):
         """Compute base text features using templates."""
         device = next(text_encoder.parameters()).device
 
-        # Determine dataset and templates
-        dataset_name = config.dataset.name
-        if dataset_name == "ImageNet":
-            templates = _get_templates(config)
-        else:
-            # Use custom template for specific dataset
-            template = CUSTOM_TEMPLATES.get(dataset_name, "a photo of a {}.")
-            templates = [template]
+        templates = _get_templates(config)
 
         with torch.no_grad():
             text_embeddings = []
