@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 import gpytorch
-from entmax import sparsemax
 from typing import Any
+from entmax import sparsemax
 
 
 class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
@@ -111,14 +111,17 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
             base_kernel.initialize(lengthscale=ls_cfg)
             # Fix linter issue: set requires_grad through parameter
             base_kernel.raw_lengthscale.requires_grad_(True)
+            self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel, batch_shape=batch_shape)
         elif kernel_type == "matern":
             base_kernel = gpytorch.kernels.MaternKernel(nu=0.5, batch_shape=batch_shape, ard_num_dims=self.red_dim)
+            self.covar_module = base_kernel
         elif kernel_type == "linear":
             base_kernel = gpytorch.kernels.LinearKernel(batch_shape=batch_shape)
+            self.covar_module = base_kernel
         else:
             raise ValueError(f"Unsupported kernel: {kernel_type}")
 
-        self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel, batch_shape=batch_shape)
+        
         # Gaussian likelihood for supervised regression on per-template targets
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=batch_shape)
 
@@ -140,15 +143,11 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
         Parameters
         ----------
         weights_km: torch.Tensor
-            Tensor of shape [K, M] or [1, M] with nonnegative weights summing to 1 per class.
+            Tensor of shape [K, M] with nonnegative weights summing to 1 per class.
         temperature: float
             Temperature to scale the initialization logits; >1 makes them softer.
         """
         w = weights_km.to(device=self._templates.device)
-        K = self.num_classes
-        # If sharing weights across classes, broadcast from (1, M) to (K, M)
-        if w.shape[0] == 1 and K > 1:
-            w = w.expand(K, -1)
         w = torch.clamp(w, min=1e-12)
         f_init = torch.log(w) / max(float(temperature), 1e-6)  # [K, M]
         try:
@@ -219,9 +218,9 @@ class GaussianProcessTemplateWeighter(gpytorch.models.ApproximateGP):
 
         self.scores = w
         
-        prototypes = torch.einsum("skm,kmd->skd", w, self._templates_red)
-        prototypes = self._lift(prototypes)
+        prototypes = torch.einsum("skm,kmd->skd", w, self._templates)
         return prototypes
+
 
 class ResidualMeanWithBias(gpytorch.means.Mean):
     def __init__(self, f0_logits: torch.Tensor):  # [K,M] frozen prior (log w0)
@@ -230,73 +229,16 @@ class ResidualMeanWithBias(gpytorch.means.Mean):
         self.register_buffer('f0', f0_logits.clone())       # frozen prior
         self.cls_bias = torch.nn.Parameter(torch.zeros(K, 1))
         self.tmp_bias = torch.nn.Parameter(torch.zeros(1, M))
+        self.register_buffer('neg_tail', torch.tensor(50.))
 
     def forward(self, x):
         K, M = self.f0.shape
         N = x.size(-2)
-        # Ensure device/dtype alignment with inputs
-        f0 = self.f0.to(device=x.device, dtype=self.cls_bias.dtype)
-        base = f0 + self.cls_bias + self.tmp_bias       # [K,M]
+        base = self.f0 + self.cls_bias + self.tmp_bias       # [K,M]
+        # base = self.f0 + self.tmp_bias       # [K,M]
         if N == M:
             return base
         extra = N - M
         tail = (self.cls_bias + self.tmp_bias.mean(dim=1, keepdim=True)).expand(K, extra)
+        # tail = (self.tmp_bias.mean(dim=1, keepdim=True)).expand(K, extra)
         return torch.cat([base, tail], dim=1)                # [K,N]
-
-
-class ContextAwareMean(gpytorch.means.Mean):
-    def __init__(self, f0_logits: torch.Tensor, D: int):
-        super().__init__()
-        K, M = f0_logits.shape
-        self.register_buffer('f0', f0_logits.clone())
-        self.cls_bias = torch.nn.Parameter(torch.zeros(K,1))
-        self.W = torch.nn.Linear(D, 1, bias=False)  # projects context feature to a scalar
-
-    def forward(self, x):
-        # x shape: [K, N, D]; last column may be your class context feature
-        K, M = self.f0.shape
-        N = x.size(-2)
-        base = self.f0 + self.cls_bias
-        if N == M:
-            return base
-        ctx = x[:, -1, :]                 # [K, D] the extra context point
-        delta = self.W(ctx)               # [K,1] per-class shift from context
-        tail = (self.cls_bias + delta)    # for the extra point(s)
-        return torch.cat([base, tail.expand(K, N - M)], dim=1)
-
-
-class LinearFeatMean(gpytorch.means.Mean):
-    def __init__(self, in_dim):
-        super().__init__()
-        self.beta = torch.nn.Parameter(torch.zeros(in_dim))
-    def forward(self, feats):  # feats = φ(x)
-        return feats @ self.beta
-
-
-class PerTemplateMean(gpytorch.means.Mean):
-    """Learnable mean of shape [K, M] (one bias per class & template)."""
-
-    def __init__(self, num_classes: int, num_templates: int):
-        super().__init__()
-        # One scalar per (class, template) pair; values will be set from mean_init
-        self.mean_param = torch.nn.Parameter(torch.empty(num_classes, num_templates))
-
-    def forward(self, x):  # noqa: D401 – simple forward override
-        """Return mean of shape [K, N] where N = x.size(-2).
-
-        If *N* equals the number of stored template biases (*M*), we use them
-        directly.  Otherwise (e.g. when *x* is the concatenation of inducing
-        and test points, hence N = 2 M) we broadcast the **average** bias of
-        each class across all points.  This keeps shapes compatible while still
-        learning a per-class offset.  Feel free to refine this later.
-        """
-
-        N = x.size(-2)
-        K, M = self.mean_param.shape
-
-        if N == M:
-            return self.mean_param
-
-        # Otherwise use per-class scalar (mean over templates) and broadcast
-        per_class_bias = self.mean_param.mean(dim=-1, keepdim=True)  # [K,1]
-        return per_class_bias.expand(K, N)

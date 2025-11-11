@@ -12,7 +12,7 @@ import copy
 
 from clip import clip
 from utils.trainer import BaseTrainer, TextEncoder, load_clip, _get_templates
-from utils.metrics import compute_accuracy, AverageMeter
+from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 from utils.dataset_base import build_dataset, TorchDatasetWrapper
@@ -158,15 +158,23 @@ class CustomCLIP(nn.Module):
         use_gp = bool(getattr(config.adapter, 'use_gp', False))
         train_tw = bool(getattr(config.adapter, 'train_template_weights', False))
         use_linear_tw = bool(getattr(config.adapter, 'use_linear_template_weighting', False))
+        self.gp_num_mc_samples_train = int(getattr(config.adapter, 'gp_num_mc_samples_train', 1) or 1)
+        self.gp_num_mc_samples_eval = int(getattr(config.adapter, 'gp_num_mc_samples_eval', 1) or 1)
+        self.gp_weighter = None
 
-        if (not use_gp) and train_tw and not use_linear_tw:
+        if use_gp:
+            self.gp_weighter = GaussianProcessTemplateWeighter(
+                text_embeddings=self.text_embeddings,
+                cfg=config,
+            )
+        elif train_tw and not use_linear_tw:
             # Trainable baseline: store logits and map to weights via softmax at use time
             K = int(self.text_embeddings.shape[0])
             M = int(self.text_embeddings.shape[1])
             if M > 0:
                 init_logits = torch.zeros((K, M), dtype=self.text_embeddings.dtype, device=self.text_embeddings.device)
                 self.template_weights = nn.Parameter(init_logits, requires_grad=True)
-        elif (not use_gp) and use_linear_tw:
+        elif use_linear_tw:
             # New approach: linear layer that transforms embeddings to weights
             D = int(self.text_embeddings.shape[-1])
             self.template_weight_linear = nn.Linear(D, 1, bias=False)
@@ -188,14 +196,6 @@ class CustomCLIP(nn.Module):
         except StopIteration:
             target_device = self.text_embeddings.device
         self.visual_proj.to(device=target_device)
-        self.gp_weighter = None
-        self.gp_num_mc_samples_train = int(getattr(config.adapter, 'gp_num_mc_samples_train', 1) or 1)
-        self.gp_num_mc_samples_eval = int(getattr(config.adapter, 'gp_num_mc_samples_eval', 1) or 1)
-        if use_gp:
-            self.gp_weighter = GaussianProcessTemplateWeighter(
-                text_embeddings=self.text_embeddings,
-                cfg=config,
-            )
 
     def get_prototypes(self, num_samples: int = 1, visual_embeddings: torch.Tensor = None):
         """Get class prototypes; if GP is enabled, average over num_samples.
@@ -394,13 +394,14 @@ class Trainer(BaseTrainer):
         from typing import cast
         model = cast(CustomCLIP, self.model)
         use_gp = bool(getattr(self.config.adapter, 'use_gp', False) and getattr(model, 'gp_weighter', None) is not None)
+        gp_logits = bool(getattr(self.config.adapter, 'logits_gp', False))
         gp_weighter = getattr(model, 'gp_weighter', None)
 
         # Cross entropy
         if use_gp and num_samples > 1 and gp_weighter is not None:
             # Sample S prototype sets [S,K,D] in fp32 for stability
             proj_features = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype))
-            protos = gp_weighter.sample_prototypes(num_samples, visual_embeddings=proj_features)
+            protos = gp_weighter.sample_prototypes(num_samples)
             proj_weight = model.visual_proj.weight
             target_device = proj_weight.device
             target_dtype = proj_weight.dtype
@@ -425,6 +426,21 @@ class Trainer(BaseTrainer):
                 logits_s = scale * (features_norm @ prototypes_norm.t())
                 ce_vals.append(F.cross_entropy(logits_s, labels))
             ce_loss = torch.stack(ce_vals, dim=0).mean()
+        elif gp_logits and getattr(model, 'gp_logits', None) is not None:
+            projected = self.model.visual_proj(features.to(self.model.visual_proj.weight.dtype))
+            protoypes = self.model.get_prototypes(num_samples=1, visual_embeddings=projected)
+            projected_norm = F.normalize(projected, p=2, dim=-1)
+            scale = model.logit_scale.exp()
+            prototypes_norm = F.normalize(protoypes, p=2, dim=-1)
+            base_logits = scale * (projected_norm @ prototypes_norm.t())
+            
+            gp_residuals = model.gp_logits.sample_residuals(projected_norm, model.text_embeddings, num_samples=num_samples)  # [S, K, B]
+            ce_vals = []
+            for i in range(num_samples):
+                f_sample = gp_residuals[i].transpose(0, 1)  # [B, K]
+                logits_s = base_logits + f_sample
+                ce_vals.append(F.cross_entropy(logits_s, labels))
+            ce_loss = torch.stack(ce_vals, dim=0).mean()
         else:
             f = features
             proj_weight = model.visual_proj.weight
@@ -436,75 +452,35 @@ class Trainer(BaseTrainer):
             ce_loss = F.cross_entropy(logits, labels)
         total_loss = ce_loss
 
-        # # GP ELBO
-        # if use_gp and gp_weighter is not None and bool(getattr(self.config.adapter, 'gp_use_elbo', True)):
-        #     try:
-        #         gp_weighter.train()
-        #         if hasattr(gp_weighter, 'likelihood'):
-        #             gp_weighter.likelihood.train()
-        #         if not hasattr(self, '_gp_targets') or getattr(self, '_gp_targets', None) is None:
-        #             try:
-        #                 self._gp_targets = self._compute_gp_template_targets_prob()
-        #             except Exception:
-        #                 self._gp_targets = None
-        #         if getattr(self, '_gp_targets', None) is not None:
-        #             x = gp_weighter._templates
-        #             y = cast(torch.Tensor, self._gp_targets)
-        #             if y.device != x.device:
-        #                 y = y.to(x.device)
-        #             mll = gpytorch.mlls.VariationalELBO(
-        #                 gp_weighter.likelihood,
-        #                 gp_weighter,
-        #                 num_data=int(gp_weighter.num_templates),
-        #                 beta=float(self.config.adapter.gp_beta),
-        #             )
-        #             out = gp_weighter(x)
-        #             elbo_val = mll(out, y)
-        #             elbo_mean = elbo_val.mean() if elbo_val.dim() > 0 else elbo_val
-        #             total_loss = total_loss + (-elbo_mean)
-        #             try:
-        #                 self._dbg_loss_components = getattr(self, '_dbg_loss_components', {})
-        #                 self._dbg_loss_components['elbo'] = float((-elbo_mean).detach().item())
-        #             except Exception:
-        #                 pass
-        #     except Exception:
-        #         pass
+        # GP on logits KL
+        if gp_logits and getattr(model, 'gp_logits', None) is not None:
+            kl = model.gp_logits.variational_strategy.kl_divergence().sum()
+            beta = float(getattr(self.config.adapter, 'gp_beta', 1.0))
+            total_loss += kl * beta
+
+        # KL for GP
+        if use_gp and gp_weighter is not None:
+            kl = model.gp_weighter.variational_strategy.kl_divergence().sum()
+            kl_term = kl * float(getattr(self.config.adapter, 'gp_beta', 1.0))
+            total_loss = total_loss + kl_term
 
         # L2 regularization
-        l2_reg = None
         try:
-            # Visual projection regularization (to identity)
             W = model.visual_proj.weight
             if W.requires_grad:
                 eye = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
                 l2_reg = (W - eye).pow(2).sum()
-                l2_lambda = self.config.adapter.l2_lambda
+                l2_lambda = float(self.config.adapter.l2_lambda)
                 shots = self.config.dataset.num_shots
-                num_classes = len(self.dm.dataset.classnames)
-                # For full fine-tuning (shots=0), use total training samples for scaling
-                if shots == 0:
-                    shots = len(self.features_train) / num_classes
-                l2_reg = l2_reg * l2_lambda / shots
+                l2_reg = l2_reg * (l2_lambda / shots)
                 total_loss += l2_reg
-
-            # Linear template weighting regularization (to small weights)
-            if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
-                linear_reg = model.template_weight_linear.weight.pow(2).sum()
-                # For full fine-tuning (shots=0), use total training samples for scaling
-                reg_shots = self.config.dataset.num_shots
-                if reg_shots == 0:
-                    reg_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
-                linear_reg = linear_reg * l2_lambda / reg_shots
-                total_loss += linear_reg
-                if l2_reg is not None:
-                    l2_reg += linear_reg
-                else:
-                    l2_reg = linear_reg
-
+            else:
+                l2_reg = None
         except Exception:
             print("Error in L2 regularization")
             l2_reg = None
 
+        '''
         # Learnable token regularizer
         if use_gp and gp_weighter is not None:
             # proj visuals
@@ -539,50 +515,17 @@ class Trainer(BaseTrainer):
                     self._dbg_loss_components["learn_token_reg"] = float(reg.detach().item())
                 except Exception:
                     pass
+            '''
+        if gp_weighter is not None:
             w = gp_weighter.scores
-            
-            orth = None
-            # A_kernel = gp_weighter.A.weight
-            # orth = 1.e-2 * ((A_kernel @ A_kernel.t()) - torch.eye(A_kernel.size(0), device=A_kernel.device, dtype=A_kernel.dtype)).pow(2).sum()
-            # total_loss = total_loss + orth
-            # eps = 1e-8
-            # lam_entropy = 1.e-2
-            # H = -(w.clamp_min(eps) * w.clamp_min(eps).log()).sum(dim=-1)
-            # score_entropy_reg = -lam_entropy * H.mean()
-            # total_loss = total_loss + score_entropy_reg
 
         # Debug components
         try:
-            # Calculate individual regularization components
-            vis_reg = None
-            linear_reg = None
-            try:
-                if model.visual_proj.weight.requires_grad:
-                    eye = torch.eye(model.visual_proj.weight.shape[0], device=model.visual_proj.weight.device, dtype=model.visual_proj.weight.dtype)
-                    vis_reg = (model.visual_proj.weight - eye).pow(2).sum()
-                    debug_shots = self.config.dataset.num_shots
-                    if debug_shots == 0:
-                        debug_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
-                    vis_reg = vis_reg * self.config.adapter.l2_lambda / debug_shots
-            except:
-                pass
-            try:
-                if hasattr(model, 'template_weight_linear') and model.template_weight_linear.weight.requires_grad:
-                    linear_reg = model.template_weight_linear.weight.pow(2).sum()
-                    debug_shots = self.config.dataset.num_shots
-                    if debug_shots == 0:
-                        debug_shots = len(self.features_train) if hasattr(self, 'features_train') else 1
-                    linear_reg = linear_reg * self.config.adapter.l2_lambda / debug_shots
-            except:
-                pass
-
             self._dbg_loss_components = {
                 "ce": float(ce_loss.detach().item()),
                 "l2_reg": float(l2_reg.detach().item()) if l2_reg is not None else 0.0,
-                "vis_reg": float(vis_reg.detach().item()) if vis_reg is not None else 0.0,
-                "linear_reg": float(linear_reg.detach().item()) if linear_reg is not None else 0.0,
+                "kl": float(kl_term.detach().item()) if use_gp else 0.0,
                 "learn_token_reg": float(self._dbg_loss_components.get("learn_token_reg", 0.0)) if hasattr(self, '_dbg_loss_components') else 0.0,
-                "orth": float(orth.detach().item()) if orth is not None else 0.0,
                 "scores": w.mean(0)[0].detach().cpu() if (use_gp and gp_weighter is not None) else None,
                 "total": float(total_loss.detach().item()),
             }
@@ -644,7 +587,17 @@ class Trainer(BaseTrainer):
 
         # Feature extraction on test set
         self.labels_test, output_test, self.features_test = self.extract_features(partition="test")
-        print("Zero-Shot accuracy on test: " + str(round(compute_accuracy(output_test.cuda(), self.labels_test.cuda())[0], 2)))
+        zs_acc = compute_accuracy(output_test, self.labels_test)[0]
+        zs_ece = compute_ece(output_test, self.labels_test)
+        zs_aece = compute_aece(output_test, self.labels_test)
+        print("Zero-Shot accuracy on test: " + str(round(zs_acc, 2)))
+        print("Zero-Shot ECE on test: " + str(round(zs_ece, 2)))
+        print("Zero-Shot AECE on test: " + str(round(zs_aece, 2)))
+        self.zero_shot_metrics = {
+            "top1_acc": zs_acc,
+            "ece": zs_ece,
+            "aece": zs_aece,
+        }
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
         model = cast(CustomCLIP, self.model)
         feats = self.features_train.to(self.device)
@@ -734,12 +687,6 @@ class Trainer(BaseTrainer):
             pass
         print(f"Training completed in {time.time() - start_time:.2f} seconds")
 
-        # After training completes, compute final test metrics and write metrics.json
-        try:
-            metrics = self._compute_final_metrics()
-            self._write_run_summary_json(metrics, start_time=start_time)
-        except Exception as e:
-            print(f"[WARN] Failed to write metrics.json: {e}") 
 
     def run_epoch(self):
         """Run one training epoch."""
