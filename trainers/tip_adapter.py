@@ -8,6 +8,8 @@ from clip import clip
 from utils.trainer import BaseTrainer, load_clip, _get_templates, _get_clip_weights
 from utils.metrics import compute_accuracy, compute_ece, compute_aece
 from utils.trainer_registry import TRAINER_REGISTRY
+from .gp_template_weigher import GaussianProcessTemplateWeighter
+from .adapter import _get_template_weights
 
 
 def _preextract_features(clip_model, loader, device) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -54,7 +56,14 @@ class Trainer(BaseTrainer):
         best_beta = float(self.config.adapter.tip_adapter_init_beta)
         best_alpha = float(self.config.adapter.tip_adapter_init_alpha)
         with torch.no_grad():
-            clip_logits = 100.0 * (val_feats @ self.clip_weights)
+            use_gp = bool(getattr(self.config.adapter, "use_gp", False)) and hasattr(self, "gp_weighter") and (getattr(self, "gp_weighter") is not None)
+            if use_gp:
+                S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))
+                prot = prot / prot.norm(dim=-1, keepdim=True)
+                clip_logits = 100.0 * torch.einsum("bd,skd->bsk", val_feats.to(self.device), prot).mean(dim=1)
+            else:
+                clip_logits = 100.0 * (val_feats @ self.clip_weights)
             for beta in betas:
                 if adapter is None:
                     affinity = val_feats @ self.cache_keys.t()
@@ -77,7 +86,79 @@ class Trainer(BaseTrainer):
         self.set_model_mode("eval")
         # Optional: train template weight matrix before Tip-Adapter
         use_tw = bool(getattr(self.config.adapter, "tip_adapter_use_template_weight_training", False))
-        if use_tw:
+        use_gp = bool(getattr(self.config.adapter, "use_gp", False))
+        if use_gp:
+            self.gp_weighter = None
+            # Pre-extract few-shot train features
+            tr_feats, tr_labels = _preextract_features(self.clip_model, self.train_loader_x, self.device)
+            # Build per-class, per-template text embeddings [K, M, D]
+            with torch.no_grad():
+                E_list = []
+                for name in self.classnames:
+                    prompts = [t.format(name) for t in self.templates]
+                    tok = clip.tokenize(prompts).to(self.device)
+                    emb = self.clip_model.encode_text(tok)  # [M, D]
+                    emb = emb / emb.norm(dim=-1, keepdim=True)
+                    E_list.append(emb)
+                E = torch.stack(E_list, dim=0)  # [K, M, D]
+            # Train GP-based template weighter on few-shot features
+            try:
+                gp_weighter = GaussianProcessTemplateWeighter(text_embeddings=E, cfg=self.config).to(self.device)
+                self.gp_weighter = gp_weighter
+                # Warm start from per-template weights computed on few-shot features
+                try:
+                    with torch.no_grad():
+                        init_w = _get_template_weights(
+                            self.config,
+                            text_embeddings=E,
+                            features=tr_feats,
+                            labels=tr_labels,
+                            logit_scale=self.clip_model.logit_scale.exp(),
+                        )  # [K, M]
+                    self.gp_weighter.initialize_from_weights(init_w)
+                    print("[Tip-Adapter][GP] Initialized from few-shot template weights.")
+                except Exception as e_init:
+                    print(f"[Tip-Adapter][GP][WARN] initialization from weights failed ({e_init}); proceeding without warm start.")
+                # Optimize ELBO: CE on few-shot logits + KL
+                gp_lr = float(getattr(self.config.adapter, "gp_lr", 1e-3))
+                weight_decay = float(getattr(self.config.optim, "weight_decay", 0.0))
+                optimizer = torch.optim.AdamW(self.gp_weighter.parameters(), lr=gp_lr, weight_decay=weight_decay)
+                epochs = int(getattr(self.config.optim, "max_epoch", 50))
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+                S_tr = int(getattr(self.config.adapter, "gp_num_mc_samples_train", 30) or 1)
+                beta_kl = float(getattr(self.config.adapter, "gp_beta", 1e-3))
+                for ep in range(epochs):
+                    self.gp_weighter.train()
+                    with torch.no_grad():
+                        feats = tr_feats.to(self.device)  # already normalized
+                        labels = tr_labels.to(self.device)
+                    prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S_tr))  # [S,K,D]
+                    prot = prot / prot.norm(dim=-1, keepdim=True)
+                    prot = prot.to(dtype=feats.dtype, device=feats.device)
+                    logits_s = 100.0 * torch.einsum("bd,skd->bsk", feats, prot)  # [B,S,K]
+                    logits = logits_s.mean(dim=1)  # [B,K]
+                    ce = F.cross_entropy(logits, labels)
+                    kl = self.gp_weighter.variational_strategy.kl_divergence().sum()
+                    loss = ce + beta_kl * kl
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+                    if (ep == 0) or ((ep + 1) % 10 == 0):
+                        with torch.no_grad():
+                            acc = compute_accuracy(logits, labels)[0]
+                        print(f"[GP] epoch {ep+1}/{epochs} loss={float(loss):.4f} CE={float(ce):.4f} KL={float(kl):.4f} acc={float(acc):.2f}")
+                # Set mean prototypes after training (still use MC at inference later)
+                with torch.no_grad():
+                    num_mc = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                    prot_samples = gp_weighter.sample_prototypes(num_samples=max(1, num_mc))  # [S,K,D]
+                    prototypes = prot_samples.mean(dim=0)  # [K,D]
+                    prototypes = prototypes / prototypes.norm(dim=-1, keepdim=True)
+                    self.clip_weights = prototypes.t().to(self.device)  # [D,K]
+                print("[Tip-Adapter] Using trained GP-based template weighter for prototypes.")
+            except Exception as e:
+                print(f"[Tip-Adapter][WARN] GP weighting failed ({e}); falling back to default CLIP weights.")
+        elif use_tw:
             # Pre-extract few-shot train features
             tr_feats, tr_labels = _preextract_features(self.clip_model, self.train_loader_x, self.device)
             # Build per-class, per-template text embeddings [K, M, D]
@@ -125,7 +206,17 @@ class Trainer(BaseTrainer):
                 self.clip_weights = prototypes.t().to(self.device)  # [D, K]
         # Zero-shot after optional template-weight training
         test_feats, test_labels = _preextract_features(self.clip_model, self.test_loader, self.device)
-        clip_logits_test = 100.0 * (test_feats.to(self.device) @ self.clip_weights)
+        if use_gp and hasattr(self, "gp_weighter") and (self.gp_weighter is not None):
+            with torch.no_grad():
+                S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                # MC-average logits over prototype samples
+                prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))  # [S,K,D]
+                prot = prot / prot.norm(dim=-1, keepdim=True)
+                f = test_feats.to(self.device)  # already normalized in _preextract_features
+                logits_s = 100.0 * torch.einsum("bd,skd->bsk", f, prot)  # [B,S,K]
+                clip_logits_test = logits_s.mean(dim=1)  # [B,K]
+        else:
+            clip_logits_test = 100.0 * (test_feats.to(self.device) @ self.clip_weights)
         zs_acc = compute_accuracy(clip_logits_test, test_labels.to(self.device))[0]
         print("Zero-Shot accuracy on test: " + str(round(zs_acc, 2)))
         # Build few-shot cache
@@ -158,7 +249,14 @@ class Trainer(BaseTrainer):
                         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                     affinity = adapter(image_features)
                     cache_logits = ((-1.0) * (beta - beta * affinity)).exp() @ self.cache_vals
-                    clip_logits = 100.0 * (image_features @ self.clip_weights)
+                    if use_gp and hasattr(self, "gp_weighter") and (self.gp_weighter is not None):
+                        with torch.no_grad():
+                            S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                            prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))
+                            prot = prot / prot.norm(dim=-1, keepdim=True)
+                            clip_logits = 100.0 * torch.einsum("bd,skd->bsk", image_features, prot).mean(dim=1)
+                    else:
+                        clip_logits = 100.0 * (image_features @ self.clip_weights)
                     tip_logits = clip_logits + cache_logits * alpha
                     loss = F.cross_entropy(tip_logits, target)
                     acc = compute_accuracy(tip_logits, target)[0]
@@ -182,7 +280,13 @@ class Trainer(BaseTrainer):
                     t_feats, t_labels = _preextract_features(self.clip_model, self.test_loader, self.device)
                     affinity = adapter(t_feats.to(self.device))
                     cache_logits = ((-1.0) * (beta - beta * affinity)).exp() @ self.cache_vals
-                    clip_logits = 100.0 * (t_feats.to(self.device) @ self.clip_weights)
+                    if use_gp and hasattr(self, "gp_weighter") and (self.gp_weighter is not None):
+                        S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                        prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))
+                        prot = prot / prot.norm(dim=-1, keepdim=True)
+                        clip_logits = 100.0 * torch.einsum("bd,skd->bsk", t_feats.to(self.device), prot).mean(dim=1)
+                    else:
+                        clip_logits = 100.0 * (t_feats.to(self.device) @ self.clip_weights)
                     tip_logits_tmp = clip_logits + cache_logits * alpha
                     acc_tmp = compute_accuracy(tip_logits_tmp, t_labels.to(self.device))[0]
                     if acc_tmp > best_acc:
@@ -204,7 +308,13 @@ class Trainer(BaseTrainer):
                 t_feats, t_labels = _preextract_features(self.clip_model, self.test_loader, self.device)
                 affinity = adapter(t_feats.to(self.device))
                 cache_logits = ((-1.0) * (best_beta - best_beta * affinity)).exp() @ self.cache_vals
-                clip_logits = 100.0 * (t_feats.to(self.device) @ self.clip_weights)
+                if use_gp and hasattr(self, "gp_weighter") and (self.gp_weighter is not None):
+                    S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+                    prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))
+                    prot = prot / prot.norm(dim=-1, keepdim=True)
+                    clip_logits = 100.0 * torch.einsum("bd,skd->bsk", t_feats.to(self.device), prot).mean(dim=1)
+                else:
+                    clip_logits = 100.0 * (t_feats.to(self.device) @ self.clip_weights)
                 tip_logits = clip_logits + cache_logits * best_alpha
                 acc = compute_accuracy(tip_logits, t_labels.to(self.device))[0]
         else:
@@ -262,7 +372,14 @@ class Trainer(BaseTrainer):
         else:
             affinity = adapter(test_feats.to(self.device))
         cache_logits = ((-1.0) * (beta - beta * affinity)).exp() @ self.cache_vals
-        clip_logits = 100.0 * (test_feats.to(self.device) @ self.clip_weights)
+        use_gp = bool(getattr(self.config.adapter, "use_gp", False)) and hasattr(self, "gp_weighter") and (getattr(self, "gp_weighter") is not None)
+        if use_gp:
+            S = int(getattr(self.config.adapter, "gp_num_mc_samples_eval", 100) or 1)
+            prot = self.gp_weighter.sample_prototypes(num_samples=max(1, S))
+            prot = prot / prot.norm(dim=-1, keepdim=True)
+            clip_logits = 100.0 * torch.einsum("bd,skd->bsk", test_feats.to(self.device), prot).mean(dim=1)
+        else:
+            clip_logits = 100.0 * (test_feats.to(self.device) @ self.clip_weights)
         logits = clip_logits + cache_logits * alpha
         labels = test_labels.to(self.device)
         acc = compute_accuracy(logits, labels)[0]
