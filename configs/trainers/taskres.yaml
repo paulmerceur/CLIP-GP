@@ -6,6 +6,7 @@ root: /mnt/features/VDATA/
 
 # Datasets
 datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
@@ -30,13 +31,4 @@ TRAINER:
   ADAPTER:
     # TaskRes specific
     TASKRES_RESIDUAL_SCALE: 0.5  # α scaling factor (0.5 for most, 1.0 for Flowers102)
-
-
-
-
-
-
-
-
-
 

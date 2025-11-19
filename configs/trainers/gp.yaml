@@ -1,16 +1,16 @@
-name: benchmarks
+name: baseline
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
 root: /mnt/features/VDATA/
 
 # Datasets
-# datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-datasets: [caltech101, eurosat, ucf101]
+datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
+# datasets: [caltech101, eurosat, ucf101]
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
-shots: [1, 2, 4, 8, 16]
+shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
 template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
@@ -24,7 +24,6 @@ TRAINER_NAME: Adapter
 TRAINER:
   ADAPTER:
     FREEZE_VISUAL_PROJ: False
-    NUM_TEMPLATES: 7
     TEMPLATE_INIT_METHOD: val_weighted
     # GP-specific overrides beyond default baseline
     USE_GP: True

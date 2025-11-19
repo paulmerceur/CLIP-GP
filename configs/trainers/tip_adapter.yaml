@@ -1,4 +1,4 @@
-name: benchmarks
+name: tip-adapter
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
@@ -6,19 +6,21 @@ root: /mnt/features/VDATA/
 
 # Datasets
 datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-# datasets: [caltech101, oxford_pets, oxford_flowers]
+# datasets: [caltech101]
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
-template: "{experiment}/{dataset}/tip-adapter_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/TIP-Adapter_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  TRAINER.ADAPTER.TIP_ADAPTER_TRAINABLE: [True, False]
-  TRAINER.ADAPTER.TIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: [True, False]
+  {}
+  #TRAINER.ADAPTER.TIP_ADAPTER_TRAINABLE: [True, False]
+  #TRAINER.ADAPTER.TIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: [True, False]
+
 
 TRAINER_NAME: Tip-Adapter
 
@@ -31,5 +33,7 @@ TRAINER:
     TIP_ADAPTER_INIT_ALPHA: 20.0
     TIP_ADAPTER_INIT_BETA: 2.0
     TIP_ADAPTER_EPS: 0.0001
-
+    TIP_ADAPTER_TRAINABLE: False
+    USE_GP: False
+    
 

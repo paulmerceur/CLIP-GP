@@ -1,4 +1,4 @@
-name: benchmarks
+name: clip-adapter
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
@@ -10,25 +10,23 @@ datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food1
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
-shots: [1, 2, 4, 8, 16]
+shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
 template: "{experiment}/{dataset}/clip-adapter_{shots}shots_{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  TRAINER.ADAPTER.CLIP_ADAPTER_WEIGHTING: [gp]
+  TRAINER.ADAPTER.CLIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: [True, False]
 
-TRAINER_NAME: Adapter-CLIP-Adapter
-
-OPTIM:
-  NAME: adam
-  LR: 0.001
-  MAX_EPOCH: 100
+TRAINER_NAME: CLIP-Adapter
 
 TRAINER:
   ADAPTER:
     # CLIP-Adapter defaults from paper/code
     CLIP_ADAPTER_REDUCTION: 4   # bottleneck reduction
     CLIP_ADAPTER_RATIO: 0.2     # blend ratio
+    CLIP_ADAPTER_OPTIMIZER: adam
+    CLIP_ADAPTER_LR: 0.001
+    CLIP_ADAPTER_EPOCHS: 100
 

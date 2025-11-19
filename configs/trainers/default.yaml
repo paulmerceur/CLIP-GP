@@ -29,8 +29,17 @@ TRAIN:
 TRAINER:
   ADAPTER:
     TEMPLATE_INIT_METHOD: uniform
-    NUM_TEMPLATES: 7
+    NUM_TEMPLATES: 8
     L2_LAMBDA: 0.5
+    # GP
+    GP_KERNEL_TYPE: linear
+    GP_NUM_MC_SAMPLES_TRAIN: 30
+    GP_NUM_MC_SAMPLES_EVAL: 300
+    GP_USE_ELBO: False
+    GP_LR: 1.e-3
+    GP_BETA: 1
+    LEARN_TOKEN_LAMBDA: 8e-3
+    GP_PCA_DIM: 256
 
 # Default trainer selection
 TRAINER_NAME: Adapter
