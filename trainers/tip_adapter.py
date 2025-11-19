@@ -347,8 +347,8 @@ class Trainer(BaseTrainer):
         print(f"* error: {100 - float(acc):.1f}%")
         # ECE and AECE for log parity
         try:
-            ece_val = compute_ece(tip_logits, final_labels.to(self.device)) * 100.0
-            aece_val = compute_aece(tip_logits, final_labels.to(self.device)) * 100.0
+            ece_val = compute_ece(tip_logits, final_labels.to(self.device))
+            aece_val = compute_aece(tip_logits, final_labels.to(self.device))
             print(f"* ECE: {ece_val:.2f}%")
             print(f"* AECE: {aece_val:.2f}%")
         except Exception:
