@@ -17,6 +17,7 @@ class AdapterConfig:
     use_custom_templates: bool = False  # Use custom templates for the dataset, this will negate the use of num_templates
     num_templates: int = 1  # Number of templates to use
     l2_lambda: float = 0.1  # L2 regularization weight
+    template_tw_l2_lambda: float = 0.0  # L2 regularization for learnable template weight matrix
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
     train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
     use_linear_template_weighting: bool = False  # Use linear layer to compute template weights from embeddings (experimental)
@@ -38,8 +39,10 @@ class AdapterConfig:
     # CLIP-Adapter specific
     clip_adapter_reduction: int = 4   # Bottleneck reduction ratio for adapter MLP
     clip_adapter_ratio: float = 0.2   # Blend ratio between adapted and original features
-    clip_adapter_weighting: str = "none"  # "none", "tw", "gp"
-    clip_adapter_tw_lr: float = 0.01  # Learning rate for learnable template weights (CLIP-Adapter)
+    clip_adapter_use_template_weight_training: bool = False  # Train template weights before CLIP-Adapter
+    clip_adapter_optimizer: str = "adam"
+    clip_adapter_lr: float = 0.001
+    clip_adapter_epochs: int = 100
 
     # Prompt-learning (CoOp / CoCoOp)
     n_ctx: int = 16 # number of learnable context tokens
@@ -126,7 +129,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Tip-Adapter", "Adapter-CLIP-Adapter", "Adapter-TaskRes"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Tip-Adapter", "CLIP-Adapter", "Adapter-TaskRes"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -283,6 +286,7 @@ def parse_args_to_config() -> Config:
     # Adapter arguments
     parser.add_argument("--num-templates", type=int, default=None, help="Number of templates")
     parser.add_argument("--l2-lambda", type=float, default=None, help="L2 regularization weight")
+    parser.add_argument("--template-tw-l2-lambda", type=float, default=None, help="L2 regularization weight for template weight matrix")
     parser.add_argument("--template-init-method", type=str, default=None, choices=["uniform", "val_weighted", "top3", "minmax"], help="Template initialization method")
     parser.add_argument("--train-template-weights", action="store_true", help="Train template weights (non-GP)")
     parser.add_argument("--use-linear-template-weighting", action="store_true", help="Use linear layer to compute template weights from embeddings (experimental)")
@@ -372,6 +376,8 @@ def parse_args_to_config() -> Config:
         config.adapter.num_templates = args.num_templates
     if args.l2_lambda is not None:
         config.adapter.l2_lambda = args.l2_lambda
+    if args.template_tw_l2_lambda is not None:
+        config.adapter.template_tw_l2_lambda = args.template_tw_l2_lambda
     if args.template_init_method is not None:
         config.adapter.template_init_method = args.template_init_method
     if args.train_template_weights:
