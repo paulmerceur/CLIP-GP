@@ -19,7 +19,7 @@ template: "{experiment}/{dataset}/TaskRes_{shots}shots_{sig}/seed{seed}"
 grid:
   {}
 
-TRAINER_NAME: Adapter-TaskRes
+TRAINER_NAME: TaskRes
 
 TRAINER:
   ADAPTER:
