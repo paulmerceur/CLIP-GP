@@ -15,7 +15,7 @@ from tqdm import tqdm
 import json
 
 from clip import clip
-from utils.metrics import compute_accuracy, compute_ece, compute_aece
+from utils.metrics import compute_accuracy, compute_ece, compute_aece, compute_ece_with_bins, compute_aece_with_bins
 from datasets.imagenet_templates import IMAGENET_TEMPLATES_SELECT, IMAGENET_TEMPLATES
 
 CUSTOM_TEMPLATES = {
@@ -253,7 +253,7 @@ class BaseTrainer:
         
         # Training state
         self.start_epoch = self.epoch = 0
-        self.max_epoch = config.optim.max_epoch
+        self.max_epoch = config.adapter.clip_adapter_epochs
         self.output_dir = config.output_dir
         
         # Data loaders from dataset manager
@@ -513,15 +513,26 @@ class BaseTrainer:
         except ImportError:
             macro_f1 = 0.0
         
-        # Compute calibration metrics (0-1), report as percentage for consistency
+        # Compute calibration metrics and bins
         ece = compute_ece(all_outputs, all_labels)
         aece = compute_aece(all_outputs, all_labels)
+        try:
+            ece_bins_val, ece_bins = compute_ece_with_bins(all_outputs, all_labels, n_bins=10)
+        except Exception:
+            ece_bins_val, ece_bins = float('nan'), {"bin_acc": [], "bin_conf": [], "bin_count": []}
+        try:
+            aece_bins_val, aece_bins = compute_aece_with_bins(all_outputs, all_labels, n_bins=10)
+        except Exception:
+            aece_bins_val, aece_bins = float('nan'), {"bin_acc": [], "bin_conf": [], "bin_count": []}
         
         results = {
             "accuracy": accuracy,
             "macro_f1": macro_f1,
             "ece": ece,
-            "aece": aece
+            "aece": aece,
+            # Include per-bin calibration for reliability diagrams
+            "calibration": ece_bins,
+            "adaptive_calibration": aece_bins,
         }
         
         # Print results
@@ -568,10 +579,21 @@ class BaseTrainer:
             aece_val = compute_aece(all_outputs, all_labels)
         except Exception:
             aece_val = float('nan')
+        # Also compute per-bin arrays to store in JSON (for scripts)
+        try:
+            _, ece_bins = compute_ece_with_bins(all_outputs, all_labels, n_bins=10)
+        except Exception:
+            ece_bins = {"bin_acc": [], "bin_conf": [], "bin_count": []}
+        try:
+            _, aece_bins = compute_aece_with_bins(all_outputs, all_labels, n_bins=10)
+        except Exception:
+            aece_bins = {"bin_acc": [], "bin_conf": [], "bin_count": []}
         return {
             "top1_acc": float(acc),
             "ece": float(ece_val),
             "aece": float(aece_val),
+            "calibration": ece_bins,
+            "adaptive_calibration": aece_bins,
         }
 
     def _write_run_summary_json(self, metrics: Dict[str, float], start_time: float) -> None:

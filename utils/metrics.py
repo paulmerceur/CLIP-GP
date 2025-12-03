@@ -3,7 +3,7 @@ Evaluation metrics for CLIP-GP.
 """
 import torch
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 
 def compute_accuracy(logits: torch.Tensor, labels: torch.Tensor, topk: Tuple[int, ...] = (1,)) -> List[float]:
@@ -134,6 +134,99 @@ def compute_aece(logits: torch.Tensor, labels: torch.Tensor, n_bins: int = 10) -
 
     return float(aece.item() * 100)
 
+
+def compute_ece_with_bins(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    n_bins: int = 10,
+) -> Tuple[float, Dict[str, List[float]]]:
+    """
+    Compute ECE along with per-bin accuracy, average confidence, and counts.
+    Returns:
+        (ece_percent, {"bin_acc": [...], "bin_conf": [...], "bin_count": [...]})
+      where lists have length n_bins; bin_acc/conf are in [0,1].
+    """
+    import torch.nn.functional as F
+    device = logits.device
+    probs = F.softmax(logits, dim=-1)
+    conf, preds = probs.max(dim=-1)
+    acc = preds.eq(labels).float()
+    bin_boundaries = torch.linspace(0, 1, n_bins + 1, device=device)
+    ece = torch.zeros(1, device=device)
+    bin_acc: List[float] = []
+    bin_conf: List[float] = []
+    bin_cnt: List[float] = []
+    for i in range(n_bins):
+        in_bin = (conf > bin_boundaries[i]) * (conf <= bin_boundaries[i + 1])
+        count = in_bin.sum().item()
+        if count > 0:
+            acc_in_bin = acc[in_bin].mean().item()
+            conf_in_bin = conf[in_bin].mean().item()
+            prop_in_bin = float(count) / float(conf.numel())
+            ece += abs(conf_in_bin - acc_in_bin) * prop_in_bin
+            bin_acc.append(float(acc_in_bin))
+            bin_conf.append(float(conf_in_bin))
+            bin_cnt.append(float(count))
+        else:
+            # Empty bin: use center confidence and zero count
+            center = (float(i) + 0.5) / float(n_bins)
+            bin_acc.append(0.0)
+            bin_conf.append(center)
+            bin_cnt.append(0.0)
+    return float(ece.item() * 100.0), {"bin_acc": bin_acc, "bin_conf": bin_conf, "bin_count": [int(c) for c in bin_cnt]}
+
+
+def compute_aece_with_bins(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    n_bins: int = 10,
+) -> Tuple[float, Dict[str, List[float]]]:
+    """
+    Compute AECE along with per-bin accuracy, average confidence, and counts using equal-frequency bins.
+    Returns:
+        (aece_percent, {"bin_acc": [...], "bin_conf": [...], "bin_count": [...]})
+      where lists have length n_bins; bin_acc/conf are in [0,1].
+    """
+    import torch.nn.functional as F
+    if logits.numel() == 0:
+        return 0.0, {"bin_acc": [], "bin_conf": [], "bin_count": []}
+    device = logits.device
+    probs = F.softmax(logits, dim=-1)
+    conf, preds = probs.max(dim=-1)
+    acc = preds.eq(labels).float()
+    num_samples = conf.numel()
+    if num_samples == 0:
+        return 0.0, {"bin_acc": [], "bin_conf": [], "bin_count": []}
+    n_bins = max(1, min(int(n_bins), int(num_samples)))
+    sorted_conf, sort_idx = torch.sort(conf)
+    sorted_acc = acc[sort_idx]
+    edges = torch.linspace(0, num_samples, n_bins + 1, device=device)
+    edges = edges.round().long()
+    edges[0] = 0
+    edges[-1] = num_samples
+    aece = torch.zeros(1, device=device)
+    bin_acc: List[float] = []
+    bin_conf: List[float] = []
+    bin_cnt: List[int] = []
+    for i in range(n_bins):
+        left = int(edges[i].item())
+        right = int(edges[i + 1].item())
+        if right <= left:
+            bin_acc.append(0.0)
+            bin_conf.append((i + 0.5) / float(n_bins))
+            bin_cnt.append(0)
+            continue
+        bin_conf_t = sorted_conf[left:right]
+        bin_acc_t = sorted_acc[left:right]
+        count = int(bin_conf_t.numel())
+        avg_conf_in_bin = bin_conf_t.mean().item()
+        accuracy_in_bin = bin_acc_t.mean().item()
+        prop_in_bin = (right - left) / float(num_samples)
+        aece += abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
+        bin_acc.append(float(accuracy_in_bin))
+        bin_conf.append(float(avg_conf_in_bin))
+        bin_cnt.append(int(count))
+    return float(aece.item() * 100.0), {"bin_acc": bin_acc, "bin_conf": bin_conf, "bin_count": bin_cnt}
 
 class AverageMeter:
     """

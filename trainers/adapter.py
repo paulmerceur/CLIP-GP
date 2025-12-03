@@ -12,7 +12,7 @@ import copy
 
 from clip import clip
 from utils.trainer import BaseTrainer, TextEncoder, load_clip, _get_templates
-from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece
+from utils.metrics import compute_accuracy, AverageMeter, compute_ece, compute_aece, compute_ece_with_bins, compute_aece_with_bins
 from utils.optimization import build_optimizer, build_lr_scheduler, build_optimizer_from_param_groups
 from utils.trainer_registry import TRAINER_REGISTRY
 from utils.dataset_base import build_dataset, TorchDatasetWrapper
@@ -593,10 +593,21 @@ class Trainer(BaseTrainer):
         print("Zero-Shot accuracy on test: " + str(round(zs_acc, 2)))
         print("Zero-Shot ECE on test: " + str(round(zs_ece, 2)))
         print("Zero-Shot AECE on test: " + str(round(zs_aece, 2)))
+        # Per-bin calibration for zero-shot (for reliability diagrams)
+        try:
+            zs_ece_val, zs_calib = compute_ece_with_bins(output_test, self.labels_test, n_bins=10)
+        except Exception:
+            zs_calib = {"bin_acc": [], "bin_conf": [], "bin_count": []}
+        try:
+            zs_aece_val, zs_adapt_calib = compute_aece_with_bins(output_test, self.labels_test, n_bins=10)
+        except Exception:
+            zs_adapt_calib = {"bin_acc": [], "bin_conf": [], "bin_count": []}
         self.zero_shot_metrics = {
             "top1_acc": zs_acc,
             "ece": zs_ece,
             "aece": zs_aece,
+            "calibration": zs_calib,
+            "adaptive_calibration": zs_adapt_calib,
         }
         self.labels_train, logits_zs, self.features_train = self.extract_features(partition="train")
         model = cast(CustomCLIP, self.model)
