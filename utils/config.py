@@ -19,7 +19,7 @@ class AdapterConfig:
     l2_lambda: float = 0.1  # L2 regularization weight
     template_tw_l2_lambda: float = 0.0  # L2 regularization for learnable template weight matrix
     template_init_method: str = "uniform"  # "uniform", "val_weighted", "top3", "minmax"
-    train_template_weights: bool = False  # Train template weights alongside visual projection (non-GP only)
+    train_template_weights: bool = True  # Train template weights alongside visual projection (non-GP only)
     use_linear_template_weighting: bool = False  # Use linear layer to compute template weights from embeddings (experimental)
     freeze_visual_proj: bool = False  # If True, keep visual projection fixed at identity
     finetune_on_test: bool = False  # Do not use for regular training
@@ -61,6 +61,10 @@ class AdapterConfig:
 
     # TaskRes specific
     taskres_residual_scale: float = 0.5  # Scaling factor α for task residual (0.5 for most datasets, 1.0 for Flowers102)
+    taskres_optimizer: str = "adam"  # Optimizer used for TaskRes residuals
+    taskres_lr: float = 0.001        # Learning rate for TaskRes residuals
+    taskres_epochs: int = 100        # Training epochs for TaskRes residuals
+    taskres_use_template_weight_training: bool = False  # Pre-train template weights before TaskRes (non-GP)
 
 
 @dataclass
@@ -129,7 +133,7 @@ class TrainConfig:
 class Config:
     """Complete configuration for CLIP-GP training"""
     # Core components
-    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Tip-Adapter", "CLIP-Adapter", "Adapter-TaskRes"
+    trainer_name: str = "Adapter" # "Adapter", "Adapter-CoOp", "Tip-Adapter", "CLIP-Adapter", "TaskRes"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
