@@ -3,10 +3,10 @@
 Aggregate metrics.json files under output/<experiment>/ and print quick summaries.
 Also generate plots (Accuracy, ECE, AECE vs shots) per dataset in _plots/perf_per_shots/,
 Accuracy vs ECE plots per dataset in _plots/acc_vs_ece/, plus average plots across datasets,
-and update a global CSV.
+and write experiment-specific tables under _tables/.
 
 Usage:
-  python scripts/aggregate_results.py <experiment_name> [--update-csv] [--csv runs.csv]
+  python scripts/aggregate_results.py <experiment_name>
 
 This expects a layout like:
   output/<experiment>/<dataset>/<config>/seed*/metrics.json
@@ -41,6 +41,27 @@ GROUP_SUBSTRINGS: Dict[str, str] = {
     "_88templates": "88 Templates",
     "_custom_templates": "Custom Templates",
 }
+
+def _collect_zero_shot_values(runs: List[Dict[str, Any]], key: str) -> List[float]:
+    """
+    Collect a list of finite float values for the given zero-shot metric key from a list of runs.
+    Safely skips runs missing zero-shot data or with non-numeric/NaN values.
+    """
+    values: List[float] = []
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        zs = r.get("zero_shot")
+        if not isinstance(zs, dict):
+            continue
+        v = zs.get(key, None)
+        try:
+            v_f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not math.isnan(v_f):
+            values.append(v_f)
+    return values
 
 
 def load_runs(exp_dir: Path, delete: bool = False) -> List[Dict[str, Any]]:
@@ -107,17 +128,17 @@ def print_summary(grouped):
         # Add zero-shot rows: average zero_shot metrics over seeds from 1-shot runs
         if 1 in shots_map:
             for cfg_1shot, rs in sorted(shots_map[1].items()):
-                zs_accs = [float(r.get("zero_shot", {}).get("top1_acc", float('nan'))) for r in rs]
-                zs_eces = [float(r.get("zero_shot", {}).get("ece", float('nan'))) for r in rs]
-                zs_aeces = [float(r.get("zero_shot", {}).get("aece", float('nan'))) for r in rs]
+                zs_accs = _collect_zero_shot_values(rs, "top1_acc")
+                zs_eces = _collect_zero_shot_values(rs, "ece")
+                zs_aeces = _collect_zero_shot_values(rs, "aece")
                 n = len(rs)
                 try:
                     acc_mean = statistics.fmean(zs_accs) if zs_accs else float('nan')
-                    acc_std = statistics.pstdev(zs_accs) if n > 1 else 0.0
+                    acc_std = statistics.pstdev(zs_accs) if len(zs_accs) > 1 else 0.0
                     ece_mean = statistics.fmean(zs_eces) if zs_eces else float('nan')
-                    ece_std = statistics.pstdev(zs_eces) if n > 1 else 0.0
+                    ece_std = statistics.pstdev(zs_eces) if len(zs_eces) > 1 else 0.0
                     aece_mean = statistics.fmean(zs_aeces) if zs_aeces else float('nan')
-                    aece_std = statistics.pstdev(zs_aeces) if n > 1 else 0.0
+                    aece_std = statistics.pstdev(zs_aeces) if len(zs_aeces) > 1 else 0.0
                 except Exception:
                     print(f"Error calculating zero-shot statistics for {cfg_1shot}: {zs_accs}")
                 # Replace the "_1shots" suffix with "_0shots" for display
@@ -155,9 +176,9 @@ def print_average_summary(grouped):
         if 1 in shots_map:
             for cfg_1shot, rs in shots_map[1].items():
                 fam = cfg_1shot.replace("_1shots", "")
-                zs_accs = [float(r.get("zero_shot", {}).get("top1_acc", float('nan'))) for r in rs]
-                zs_eces = [float(r.get("zero_shot", {}).get("ece", float('nan'))) for r in rs]
-                zs_aeces = [float(r.get("zero_shot", {}).get("aece", float('nan'))) for r in rs]
+                zs_accs = _collect_zero_shot_values(rs, "top1_acc")
+                zs_eces = _collect_zero_shot_values(rs, "ece")
+                zs_aeces = _collect_zero_shot_values(rs, "aece")
                 per_cfg.setdefault(fam, {})[0] = {
                     "acc": statistics.fmean(zs_accs) if zs_accs else float('nan'),
                     "ece": statistics.fmean(zs_eces) if zs_eces else float('nan'),
@@ -284,9 +305,9 @@ def make_plots(grouped, exp_name: str, use_grouping: bool = False, show_zero_sho
         if show_zero_shot and 1 in shots_map:
             for cfg_1shot, rs in shots_map[1].items():
                 fam = cfg_1shot.replace("_1shots", "")
-                zs_accs = [float(r.get("zero_shot", {}).get("top1_acc", float('nan'))) for r in rs]
-                zs_eces = [float(r.get("zero_shot", {}).get("ece", float('nan'))) for r in rs]
-                zs_aeces = [float(r.get("zero_shot", {}).get("aece", float('nan'))) for r in rs]
+                zs_accs = _collect_zero_shot_values(rs, "top1_acc")
+                zs_eces = _collect_zero_shot_values(rs, "ece")
+                zs_aeces = _collect_zero_shot_values(rs, "aece")
                 zero_shot_as_per_cfg.setdefault(fam, {})[0] = {
                     "acc": statistics.fmean(zs_accs) if zs_accs else float('nan'),
                     "ece": statistics.fmean(zs_eces) if zs_eces else float('nan'),
@@ -513,51 +534,104 @@ def make_acc_vs_ece_plots(ds, per_cfg, all_shots, plots_dir, show_zero_shot: boo
     plt.close(fig)
 
 
-def update_global_csv(grouped, exp_name: str, csv_path: Path) -> None:
-    """Append aggregated rows (mean over seeds) to a global CSV.
-
-    One row per dataset × shots × config label.
+def _compute_per_dataset_fam_shot_means(grouped) -> Dict[str, Dict[str, Dict[int, Dict[str, float]]]]:
     """
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "experiment_name", "dataset", "shots", "config_label", "n_seeds",
-        "acc_mean", "acc_std", "ece_mean", "ece_std", "aece_mean", "aece_std",
-    ]
-    exists = csv_path.is_file()
-    with csv_path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not exists:
-            writer.writeheader()
-        for ds, shots_map in grouped.items():
-            for shots, cfg_map in shots_map.items():
-                for cfg, rs in cfg_map.items():
-                    accs = [float(r["metrics"].get("accuracy", float('nan'))) for r in rs]
-                    if math.isnan(accs[0]):
-                        accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
-                    eces = [float(r["metrics"].get("ece", float('nan'))) for r in rs]
-                    aeces = [float(r["metrics"].get("aece", float('nan'))) for r in rs]
-                    n = len(rs)
-                    row = {
-                        "experiment_name": exp_name,
-                        "dataset": ds,
-                        "shots": shots,
-                        "config_label": cfg,
-                        "n_seeds": n,
-                        "acc_mean": statistics.fmean(accs) if accs else float('nan'),
-                        "acc_std": statistics.pstdev(accs) if n > 1 else 0.0,
-                        "ece_mean": statistics.fmean(eces) if eces else float('nan'),
-                        "ece_std": statistics.pstdev(eces) if n > 1 else 0.0,
-                        "aece_mean": statistics.fmean(aeces) if aeces else float('nan'),
-                        "aece_std": statistics.pstdev(aeces) if n > 1 else 0.0,
-                    }
-                    writer.writerow(row)
+    Build per-dataset -> family(config label sans _{shots}shots) -> shot -> metric means over seeds.
+    Returns:
+      { dataset: { fam: { shot: { "acc": float, "ece": float, "aece": float } } } }
+    """
+    per_ds: Dict[str, Dict[str, Dict[int, Dict[str, float]]]] = {}
+    for ds, shots_map in grouped.items():
+        fam_map: Dict[str, Dict[int, Dict[str, float]]] = {}
+        for shots, cfg_map in shots_map.items():
+            for cfg, rs in cfg_map.items():
+                accs = [float(r["metrics"].get("accuracy", float('nan'))) for r in rs]
+                if accs and math.isnan(accs[0]):
+                    accs = [float(r["metrics"].get("top1_acc", float('nan'))) for r in rs]
+                eces = [float(r["metrics"].get("ece", float('nan'))) for r in rs]
+                aeces = [float(r["metrics"].get("aece", float('nan'))) for r in rs]
+                fam = cfg.replace(f"_{shots}shots", "")
+                fam_map.setdefault(fam, {})[shots] = {
+                    "acc": statistics.fmean(accs) if accs else float('nan'),
+                    "ece": statistics.fmean(eces) if eces else float('nan'),
+                    "aece": statistics.fmean(aeces) if aeces else float('nan'),
+                }
+        per_ds[ds] = fam_map
+    return per_ds
+
+
+def _write_table_csv(table_path: Path, fam_to_shots: Dict[str, Dict[int, Dict[str, float]]], shots_set: List[int]) -> None:
+    """
+    Write a CSV with columns grouped by metric:
+      method, acc_1, acc_2, ..., acc_32, ece_1, ece_2, ..., ece_32
+    AECE is omitted.
+    """
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    header = ["method"] + [f"acc_{s}" for s in shots_set] + [f"ece_{s}" for s in shots_set]
+    with table_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for fam in sorted(fam_to_shots.keys()):
+            row = [fam]
+            # Accuracy block
+            for s in shots_set:
+                v = fam_to_shots.get(fam, {}).get(s, {}).get("acc", float('nan'))
+                row.append(f"{v:.2f}" if not math.isnan(v) else "")
+            # ECE block
+            for s in shots_set:
+                v = fam_to_shots.get(fam, {}).get(s, {}).get("ece", float('nan'))
+                row.append(f"{v:.2f}" if not math.isnan(v) else "")
+            writer.writerow(row)
+
+
+def write_experiment_tables(grouped, exp_name: str, shots_set: List[int] | None = None) -> None:
+    """
+    Generate experiment-specific tables:
+      - One CSV per dataset
+      - One CSV averaging across datasets
+    Saved to: output/<experiment>/_tables/
+    Rows: grouped by metric (Accuracy, ECE, AECE) with one line per method (config family)
+    Columns: fixed shot counts {1,2,4,8,16,32}
+    """
+    if shots_set is None:
+        shots_set = [1, 2, 4, 8, 16, 32]
+    out_dir = Path("output") / exp_name / "_tables"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-dataset tables
+    per_ds = _compute_per_dataset_fam_shot_means(grouped)
+    for ds, fam_map in per_ds.items():
+        table_path = out_dir / f"{ds}.csv"
+        _write_table_csv(table_path, fam_map, shots_set)
+
+    # Average across datasets: build fam -> shot -> lists then average
+    agg: Dict[str, Dict[int, Dict[str, List[float]]]] = {}
+    for fam_map in per_ds.values():
+        for fam, shot_map in fam_map.items():
+            for s, metrics in shot_map.items():
+                fam_s = agg.setdefault(fam, {}).setdefault(s, {"acc": [], "ece": [], "aece": []})
+                for metric in ["acc", "ece", "aece"]:
+                    if not math.isnan(metrics.get(metric, float('nan'))):
+                        fam_s[metric].append(metrics[metric])
+    avg_fam: Dict[str, Dict[int, Dict[str, float]]] = {}
+    for fam, shot_map in agg.items():
+        avg_fam[fam] = {}
+        for s, lists in shot_map.items():
+            avg_fam[fam][s] = {
+                "acc": statistics.fmean(lists["acc"]) if lists["acc"] else float('nan'),
+                "ece": statistics.fmean(lists["ece"]) if lists["ece"] else float('nan'),
+                "aece": statistics.fmean(lists["aece"]) if lists["aece"] else float('nan'),
+            }
+    _write_table_csv(out_dir / "Average.csv", avg_fam, shots_set)
+
+def update_global_csv(grouped, exp_name: str, csv_path: Path) -> None:
+    """Deprecated: global CSV is no longer used."""
+    return None
 
 
 def main():
     ap = argparse.ArgumentParser(description="Aggregate metrics.json runs under output/<experiment>/")
     ap.add_argument("experiment", help="Experiment subfolder under output/")
-    ap.add_argument("--csv", default="runs.csv", help="Global CSV filename under output/")
-    ap.add_argument("--update-csv", action="store_true", help="Append aggregated rows to global CSV (off by default)")
     ap.add_argument("--delete", action="store_true", help="Delete uncompleted runs (metrics could not be retrieved)")
     ap.add_argument("--grouped", action="store_true", help="Group multiple configs into single lines using GROUP_SUBSTRINGS")
     ap.add_argument("--show-zero-shot", action="store_true", help="Show zero-shot performance as stars on plots")
@@ -573,8 +647,8 @@ def main():
     # Print an additional table averaging across datasets
     print_average_summary(grouped)
     make_plots(grouped, args.experiment, use_grouping=args.grouped, show_zero_shot=args.show_zero_shot)
-    if args.update_csv:
-        update_global_csv(grouped, args.experiment, Path("output") / args.csv)
+    # Always regenerate experiment-specific tables under _tables/
+    write_experiment_tables(grouped, args.experiment)
 
 
 if __name__ == "__main__":
