@@ -13,13 +13,11 @@ seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
-template: "{experiment}/{dataset}/TIP-Adapter_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/TIP-Adapter_{shots}shots{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
   {}
-  #TRAINER.ADAPTER.TIP_ADAPTER_TRAINABLE: [True, False]
-  #TRAINER.ADAPTER.TIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: [True, False]
 
 
 TRAINER_NAME: Tip-Adapter
@@ -34,6 +32,7 @@ TRAINER:
     TIP_ADAPTER_INIT_BETA: 2.0
     TIP_ADAPTER_EPS: 0.0001
     TIP_ADAPTER_TRAINABLE: False
+    TIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: False
     USE_GP: False
     
 

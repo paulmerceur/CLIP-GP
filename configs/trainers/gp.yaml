@@ -1,4 +1,4 @@
-name: baseline
+name: gp
 BASE_CONFIG: configs/trainers/default.yaml
 
 # Dataset root
@@ -13,7 +13,7 @@ seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
-template: "{experiment}/{dataset}/gp_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/GP_{shots}shots{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
@@ -24,7 +24,6 @@ TRAINER_NAME: Adapter
 TRAINER:
   ADAPTER:
     FREEZE_VISUAL_PROJ: False
-    TEMPLATE_INIT_METHOD: val_weighted
     # GP-specific overrides beyond default baseline
     USE_GP: True
     GP_KERNEL_TYPE: linear

@@ -6,14 +6,14 @@ root: /mnt/features/VDATA/
 
 # Datasets
 datasets: [caltech101, oxford_pets, oxford_flowers, fgvc_aircraft, ucf101, food101, stanford_cars, eurosat, dtd]
-# datasets: [caltech101, oxford_pets, oxford_flowers]
+# datasets: [caltech101]
 
 # Seeds and shots
 seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
-template: "{experiment}/{dataset}/base_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/Baseline_{shots}shots{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
@@ -26,4 +26,3 @@ TRAINER:
     USE_GP: False
     TRAIN_TEMPLATE_WEIGHTS: True
     FREEZE_VISUAL_PROJ: False
-

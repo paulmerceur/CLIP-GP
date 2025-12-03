@@ -13,11 +13,11 @@ seeds: [1, 2, 3, 4, 5]
 shots: [1, 2, 4, 8, 16, 32]
 
 # Output directory template
-template: "{experiment}/{dataset}/clip-adapter_{shots}shots_{sig}/seed{seed}"
+template: "{experiment}/{dataset}/CLIP-Adapter_{shots}shots{sig}/seed{seed}"
 
 # Hyperparameters grid
 grid:
-  TRAINER.ADAPTER.CLIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: [True, False]
+  {}
 
 TRAINER_NAME: CLIP-Adapter
 
@@ -29,4 +29,7 @@ TRAINER:
     CLIP_ADAPTER_OPTIMIZER: adam
     CLIP_ADAPTER_LR: 0.001
     CLIP_ADAPTER_EPOCHS: 100
+    CLIP_ADAPTER_USE_TEMPLATE_WEIGHT_TRAINING: False
+    USE_GP: False
+
 
